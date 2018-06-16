@@ -25,6 +25,7 @@ use secp256k1::Secp256k1;
 use rand::{thread_rng, Rng};
 
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
+use lightning::ln::peer_handler::SocketDescriptor as LnSocketTrait;
 use lightning::chain::chaininterface;
 use lightning::util::events::EventsProvider;
 
@@ -39,6 +40,7 @@ use std::vec::Vec;
 use std::os::unix::io::{RawFd, AsRawFd};
 use std::hash::Hash;
 use std::time::{Instant, Duration};
+use std::io::Write;
 
 const FEE_PROPORTIONAL_MILLIONTHS: u32 = 10;
 const ANNOUNCE_CHANNELS: bool = false;
@@ -115,7 +117,7 @@ impl chaininterface::BroadcasterInterface for ChainInterface {
 }
 
 struct Connection {
-	writer: Option<futures::stream::SplitSink<tokio_codec::Framed<tokio::net::TcpStream, tokio_codec::BytesCodec>>>,
+	writer: Option<mpsc::Sender<bytes::Bytes>>,
 	event_notify: mpsc::UnboundedSender<()>,
 	pending_read: Vec<u8>,
 	read_blocker: Option<futures::sync::oneshot::Sender<Result<(), std::io::Error>>>,
@@ -166,15 +168,30 @@ impl Connection {
 		}).then(move |_| {
 			if us_close_ref.lock().unwrap().need_disconnect {
 				peer_manager_ref.disconnect_event(&SocketDescriptor::new(us_close_ref, peer_manager_ref.clone()));
+				println!("Peer disconnected!");
+			} else {
+				println!("We disconnected peer!");
 			}
 			Ok(())
 		}));
 	}
 
-	fn setup_inbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream) {
+	fn new(event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream) -> (futures::stream::SplitStream<tokio_codec::Framed<tokio::net::TcpStream, tokio_codec::BytesCodec>>, Arc<Mutex<Self>>) {
 		let fd = stream.as_raw_fd();
 		let (writer, reader) = tokio_codec::Framed::new(stream, tokio_codec::BytesCodec::new()).split();
-		let us = Arc::new(Mutex::new(Self { writer: Some(writer), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: true, need_disconnect: true, fd }));
+		let (send_sink, send_stream) = mpsc::channel(3);
+		tokio::spawn(writer.send_all(send_stream.map_err(|_| -> std::io::Error {
+			unreachable!();
+		})).then(|_| {
+			future::result(Ok(()))
+		}));
+		let us = Arc::new(Mutex::new(Self { writer: Some(send_sink), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: true, need_disconnect: true, fd }));
+
+		(reader, us)
+	}
+
+	fn setup_inbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream) {
+		let (reader, us) = Self::new(event_notify, stream);
 
 		if let Ok(_) = peer_manager.new_inbound_connection(SocketDescriptor::new(us.clone(), peer_manager.clone())) {
 			Self::schedule_read(peer_manager, us, reader);
@@ -182,13 +199,14 @@ impl Connection {
 	}
 
 	fn setup_outbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, their_node_id: PublicKey, stream: tokio::net::TcpStream) {
-		let fd = stream.as_raw_fd();
-		let (writer, reader) = tokio_codec::Framed::new(stream, tokio_codec::BytesCodec::new()).split();
-		let us = Arc::new(Mutex::new(Self { writer: Some(writer), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: true, need_disconnect: true, fd }));
+		let (reader, us) = Self::new(event_notify, stream);
 
 		if let Ok(initial_send) = peer_manager.new_outbound_connection(their_node_id, SocketDescriptor::new(us.clone(), peer_manager.clone())) {
-			let _ = us.lock().unwrap().writer.as_mut().unwrap().start_send(bytes::Bytes::from(initial_send));
-			Self::schedule_read(peer_manager, us, reader);
+			if SocketDescriptor::new(us.clone(), peer_manager.clone()).send_data(&initial_send, 0, true) == initial_send.len() {
+				Self::schedule_read(peer_manager, us, reader);
+			} else {
+				println!("Failed to write first full message to socket!");
+			}
 		}
 	}
 }
