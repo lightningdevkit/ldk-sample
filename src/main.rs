@@ -420,7 +420,7 @@ fn main() {
 			util: chaininterface::ChainWatchInterfaceUtil::new(),
 			txn_to_broadcast: Mutex::new(HashMap::new()),
 		});
-		let monitor = channelmonitor::SimpleManyChannelMonitor::<(bitcoin::util::hash::Sha256dHash, u16)>::new(chain_monitor.clone(), chain_monitor.clone());
+		let monitor = channelmonitor::SimpleManyChannelMonitor::<lightning::chain::transaction::OutPoint>::new(chain_monitor.clone(), chain_monitor.clone());
 
 		let channel_manager = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor).unwrap();
 		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap()));
