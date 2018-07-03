@@ -10,10 +10,13 @@ extern crate tokio_io;
 extern crate tokio_fs;
 extern crate tokio_codec;
 extern crate bytes;
+extern crate base64;
+
+mod rpc_client;
+use rpc_client::RPCClient;
 
 use bytes::BufMut;
 
-use hyper::{Client,StatusCode};
 use futures::future;
 use futures::future::Future;
 use futures::{AsyncSink, Stream, Sink};
@@ -35,7 +38,7 @@ use bitcoin::network::serialize::BitcoinHash;
 use std::collections::HashMap;
 use std::{env, mem};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 use std::hash::Hash;
 use std::time::{Instant, Duration};
@@ -77,6 +80,39 @@ struct FeeEstimator {
 	background_est: AtomicUsize,
 	normal_est: AtomicUsize,
 	high_prio_est: AtomicUsize,
+}
+impl FeeEstimator {
+	fn update_values(us: Arc<Self>, rpc_client: &RPCClient) -> impl Future<Item=(), Error=()> {
+		let mut reqs: Vec<Box<Future<Item=(), Error=()> + Send>> = Vec::with_capacity(3);
+		{
+			let us = us.clone();
+			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""]).and_then(move |v| {
+				if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
+					us.high_prio_est.store((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize, Ordering::Release);
+				}
+				Ok(())
+			})));
+		}
+		{
+			let us = us.clone();
+			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["18", "\"ECONOMICAL\""]).and_then(move |v| {
+				if let Some(serde_json::Value::Number(np_btc_per_kb)) = v.get("feerate") {
+					us.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize, Ordering::Release);
+				}
+				Ok(())
+			})));
+		}
+		{
+			let us = us.clone();
+			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["144", "\"ECONOMICAL\""]).and_then(move |v| {
+				if let Some(serde_json::Value::Number(bp_btc_per_kb)) = v.get("feerate") {
+					us.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize, Ordering::Release);
+				}
+				Ok(())
+			})));
+		}
+		future::join_all(reqs).then(|_| { Ok(()) })
+	}
 }
 impl chaininterface::FeeEstimator for FeeEstimator {
 	fn get_est_sat_per_vbyte(&self, conf_target: chaininterface::ConfirmationTarget) -> u64 {
@@ -332,12 +368,18 @@ impl EventHandler {
 }
 
 fn main() {
-	println!("USAGE: rust-lightning-jsonrpc URL");
+	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port");
 	if env::args().len() < 2 { return; }
 
-	let client = Client::new();
-
-	let uri_base = env::args().skip(1).next().unwrap();
+	let rpc_client = {
+		let path = env::args().skip(1).next().unwrap();
+		let path_parts: Vec<&str> = path.split('@').collect();
+		if path_parts.len() != 2 {
+			println!("Bad RPC URL provided");
+			return;
+		}
+		Arc::new(RPCClient::new(path_parts[0], path_parts[1]))
+	};
 
 	let mut network = constants::Network::Bitcoin;
 	let cur_block = Arc::new(Mutex::new(String::from("")));
@@ -350,26 +392,20 @@ fn main() {
 	});
 
 	{
-		println!("Checking validity of URL to a REST-running bitcoind...");
+		println!("Checking validity of RPC URL to bitcoind...");
 		let mut thread_rt = tokio::runtime::current_thread::Runtime::new().unwrap();
-		thread_rt.block_on(client.get((uri_base.clone() + "/rest/chaininfo.json").parse().unwrap()).and_then(|res| {
-			assert_eq!(res.status(), StatusCode::OK);
-
-			res.into_body().concat2().and_then(|body| {
-				let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-				assert!(v["verificationprogress"].as_f64().unwrap() > 0.99);
-				assert_eq!(v["bip9_softforks"]["segwit"]["status"].as_str().unwrap(), "active");
-				match v["chain"].as_str().unwrap() {
-					"main" => network = constants::Network::Bitcoin,
-					"test" => network = constants::Network::Testnet,
-					_ => panic!("Unknown network type"),
-				}
-				*cur_block.lock().unwrap() = String::from(v["bestblockhash"].as_str().unwrap());
-				Ok(())
-			})
+		thread_rt.block_on(rpc_client.make_rpc_call("getblockchaininfo", &Vec::new()).and_then(|v| {
+			assert!(v["verificationprogress"].as_f64().unwrap() > 0.99);
+			assert_eq!(v["bip9_softforks"]["segwit"]["status"].as_str().unwrap(), "active");
+			match v["chain"].as_str().unwrap() {
+				"main" => network = constants::Network::Bitcoin,
+				"test" => network = constants::Network::Testnet,
+				_ => panic!("Unknown network type"),
+			}
+			*cur_block.lock().unwrap() = String::from(v["bestblockhash"].as_str().unwrap());
+			FeeEstimator::update_values(fee_estimator.clone(), &rpc_client)
 		})).unwrap();
 		println!("Success! Starting up...");
-		//TODO: Blocked on Bitcoin Core #11770: Fill in fee_estimator values!
 	}
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -386,7 +422,7 @@ fn main() {
 		});
 		let monitor = channelmonitor::SimpleManyChannelMonitor::<(bitcoin::util::hash::Sha256dHash, u16)>::new(chain_monitor.clone(), chain_monitor.clone());
 
-		let channel_manager = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator, monitor, chain_monitor.clone(), chain_monitor).unwrap();
+		let channel_manager = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor).unwrap();
 		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap()));
 
 		let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
@@ -407,28 +443,18 @@ fn main() {
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
-		let req_running = Arc::new(AtomicBool::new(false));
-		tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::new(1, 0)).for_each(move |_| {
-			if !req_running.swap(true, Ordering::AcqRel) {
-				let req_ref = req_running.clone();
-				let block_ref = cur_block.clone();
-				tokio::spawn(client.get((uri_base.clone() + "/rest/chaininfo.json").parse().unwrap()).and_then(move |res| {
-					assert_eq!(res.status(), StatusCode::OK);
-
-					res.into_body().concat2().and_then(move |body| {
-						let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-						let new_block = v["bestblockhash"].as_str().unwrap();
-						if new_block == *block_ref.lock().unwrap() { return Ok(()); }
-						//TODO: Figure out the list of changes to apply and notify via the chaininterface.
-						println!("NEW BEST BLOCK!");
-						//TODO: Blocked on Bitcoin Core #11770: Fill in fee_estimator values!
-						*block_ref.lock().unwrap() = String::from(new_block);
-						req_ref.store(false, Ordering::Release);
-						Ok(())
-					})
-				}).then(|_| { Ok(()) }));
-			}
-			Ok(())
+		tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::from_secs(1)).for_each(move |_| {
+			let cur_block = cur_block.clone();
+			let fee_estimator = fee_estimator.clone();
+			let rpc_client = rpc_client.clone();
+			rpc_client.make_rpc_call("getblockchaininfo", &Vec::new()).and_then(move |v| {
+				let new_block = v["bestblockhash"].as_str().unwrap();
+				if new_block == *cur_block.lock().unwrap() { return future::Either::A(future::result(Ok(()))); }
+				//TODO: Figure out the list of changes to apply and notify via the chaininterface.
+				println!("NEW BEST BLOCK!");
+				*cur_block.lock().unwrap() = String::from(new_block);
+				future::Either::B(FeeEstimator::update_values(fee_estimator, &rpc_client))
+			}).then(|_| { Ok(()) })
 		}).then(|_| { Ok(()) }));
 
 		tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::new(1, 0)).for_each(move |_| {
