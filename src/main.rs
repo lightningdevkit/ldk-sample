@@ -37,7 +37,6 @@ use std::{env, mem};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::vec::Vec;
-use std::os::unix::io::{RawFd, AsRawFd};
 use std::hash::Hash;
 use std::time::{Instant, Duration};
 use std::io::Write;
@@ -123,7 +122,7 @@ struct Connection {
 	read_blocker: Option<futures::sync::oneshot::Sender<Result<(), std::io::Error>>>,
 	read_paused: bool,
 	need_disconnect: bool,
-	fd: RawFd,
+	id: u64,
 }
 impl Connection {
 	fn schedule_read(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, us: Arc<Mutex<Self>>, reader: futures::stream::SplitStream<tokio_codec::Framed<tokio::net::TcpStream, tokio_codec::BytesCodec>>) {
@@ -176,8 +175,7 @@ impl Connection {
 		}));
 	}
 
-	fn new(event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream) -> (futures::stream::SplitStream<tokio_codec::Framed<tokio::net::TcpStream, tokio_codec::BytesCodec>>, Arc<Mutex<Self>>) {
-		let fd = stream.as_raw_fd();
+	fn new(event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream, id: u64) -> (futures::stream::SplitStream<tokio_codec::Framed<tokio::net::TcpStream, tokio_codec::BytesCodec>>, Arc<Mutex<Self>>) {
 		let (writer, reader) = tokio_codec::Framed::new(stream, tokio_codec::BytesCodec::new()).split();
 		let (send_sink, send_stream) = mpsc::channel(3);
 		tokio::spawn(writer.send_all(send_stream.map_err(|_| -> std::io::Error {
@@ -185,21 +183,21 @@ impl Connection {
 		})).then(|_| {
 			future::result(Ok(()))
 		}));
-		let us = Arc::new(Mutex::new(Self { writer: Some(send_sink), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: true, need_disconnect: true, fd }));
+		let us = Arc::new(Mutex::new(Self { writer: Some(send_sink), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: true, need_disconnect: true, id }));
 
 		(reader, us)
 	}
 
-	fn setup_inbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream) {
-		let (reader, us) = Self::new(event_notify, stream);
+	fn setup_inbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, stream: tokio::net::TcpStream, id: u64) {
+		let (reader, us) = Self::new(event_notify, stream, id);
 
 		if let Ok(_) = peer_manager.new_inbound_connection(SocketDescriptor::new(us.clone(), peer_manager.clone())) {
 			Self::schedule_read(peer_manager, us, reader);
 		}
 	}
 
-	fn setup_outbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, their_node_id: PublicKey, stream: tokio::net::TcpStream) {
-		let (reader, us) = Self::new(event_notify, stream);
+	fn setup_outbound(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, event_notify: mpsc::UnboundedSender<()>, their_node_id: PublicKey, stream: tokio::net::TcpStream, id: u64) {
+		let (reader, us) = Self::new(event_notify, stream, id);
 
 		if let Ok(initial_send) = peer_manager.new_outbound_connection(their_node_id, SocketDescriptor::new(us.clone(), peer_manager.clone())) {
 			if SocketDescriptor::new(us.clone(), peer_manager.clone()).send_data(&initial_send, 0, true) == initial_send.len() {
@@ -214,13 +212,13 @@ impl Connection {
 #[derive(Clone)]
 struct SocketDescriptor {
 	conn: Arc<Mutex<Connection>>,
-	fd: RawFd,
+	id: u64,
 	peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>,
 }
 impl SocketDescriptor {
 	fn new(conn: Arc<Mutex<Connection>>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>) -> Self {
-		let fd = conn.lock().unwrap().fd.clone();
-		Self { conn, fd, peer_manager }
+		let id = conn.lock().unwrap().id;
+		Self { conn, id, peer_manager }
 	}
 }
 impl peer_handler::SocketDescriptor for SocketDescriptor {
@@ -303,12 +301,12 @@ impl peer_handler::SocketDescriptor for SocketDescriptor {
 impl Eq for SocketDescriptor {}
 impl PartialEq for SocketDescriptor {
 	fn eq(&self, o: &Self) -> bool {
-		self.fd == o.fd
+		self.id == o.id
 	}
 }
 impl Hash for SocketDescriptor {
 	fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-		self.fd.hash(state);
+		self.id.hash(state);
 	}
 }
 
@@ -402,8 +400,10 @@ fn main() {
 
 		let peer_manager_listener = peer_manager.clone();
 		let event_listener = event_notify.clone();
+		let mut inbound_id = 0;
 		tokio::spawn(listener.incoming().for_each(move |sock| {
-			Connection::setup_inbound(peer_manager_listener.clone(), event_listener.clone(), sock);
+			Connection::setup_inbound(peer_manager_listener.clone(), event_listener.clone(), sock, inbound_id);
+			inbound_id += 2;
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
@@ -437,6 +437,7 @@ fn main() {
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
+		let mut outbound_id = 1;
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 		print!("> "); std::io::stdout().flush().unwrap();
@@ -453,7 +454,8 @@ fn main() {
 										match std::net::TcpStream::connect(addr) {
 											Ok(stream) => {
 												println!("connected, initiating handshake!");
-												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::current()).unwrap());
+												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::current()).unwrap(), outbound_id);
+												outbound_id += 2;
 											},
 											Err(e) => {
 												println!("connection failed {:?}!", e);
