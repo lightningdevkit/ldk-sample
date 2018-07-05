@@ -2,9 +2,39 @@ use base64;
 use hyper;
 use serde_json;
 
+use bitcoin::blockdata::block::BlockHeader;
+
 use futures::{future, Future, Stream};
 
+use utils::hex_to_u256_rev;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Deserialize)]
+pub struct GetHeaderResponse {
+	pub hash: String,
+	pub confirmations: u64,
+	pub height: u32,
+	pub version: u32,
+	pub merkleroot: String,
+	pub time: u32,
+	pub nonce: u32,
+	pub bits: String,
+	pub previousblockhash: String,
+}
+
+impl GetHeaderResponse {
+	pub fn to_block_header(&self) -> BlockHeader {
+		BlockHeader {
+			version: self.version,
+			prev_blockhash: hex_to_u256_rev(&self.previousblockhash).unwrap(),
+			merkle_root: hex_to_u256_rev(&self.merkleroot).unwrap(),
+			time: self.time,
+			bits: self.bits.parse().unwrap(),
+			nonce: self.nonce,
+		}
+	}
+}
 
 pub struct RPCClient {
 	basic_auth: String,
@@ -70,6 +100,20 @@ impl RPCClient {
 						return future::err(());
 					}
 				}))
+			}
+		})
+	}
+
+	pub fn get_header(&self, header_hash: &str) -> impl Future<Item=GetHeaderResponse, Error=()> {
+		let param = "\"".to_string() + header_hash + "\"";
+		self.make_rpc_call("getblockheader", &vec![&param]).and_then(|v| {
+			let deser_res: Result<GetHeaderResponse, _> = serde_json::from_value(v);
+			match deser_res {
+				Ok(resp) => Ok(resp),
+				Err(_) => {
+					println!("Got invalid header message from RPC server!");
+					Err(())
+				},
 			}
 		})
 	}
