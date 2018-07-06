@@ -94,7 +94,7 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""]).and_then(move |v| {
 				if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
-					us.high_prio_est.store((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize, Ordering::Release);
+					us.high_prio_est.store((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize + 3, Ordering::Release);
 				}
 				Ok(())
 			})));
@@ -103,7 +103,7 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["18", "\"ECONOMICAL\""]).and_then(move |v| {
 				if let Some(serde_json::Value::Number(np_btc_per_kb)) = v.get("feerate") {
-					us.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize, Ordering::Release);
+					us.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize + 3, Ordering::Release);
 				}
 				Ok(())
 			})));
@@ -112,7 +112,7 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["144", "\"ECONOMICAL\""]).and_then(move |v| {
 				if let Some(serde_json::Value::Number(bp_btc_per_kb)) = v.get("feerate") {
-					us.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize, Ordering::Release);
+					us.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize + 3, Ordering::Release);
 				}
 				Ok(())
 			})));
