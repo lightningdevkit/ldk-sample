@@ -324,11 +324,11 @@ fn main() {
 		});
 		let monitor = channelmonitor::SimpleManyChannelMonitor::<lightning::chain::transaction::OutPoint>::new(chain_monitor.clone(), chain_monitor.clone());
 
-		let channel_manager = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone()).unwrap();
+		let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone()).unwrap();
 		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap()));
 
 		let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
-			chan_handler: channel_manager,
+			chan_handler: channel_manager.clone(),
 			route_handler: router,
 		}, our_node_secret));
 
@@ -395,6 +395,7 @@ fn main() {
 		let mut outbound_id = 1;
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
+		println!("'n pubkey value' Create a channel with the given connected node (by pubkey) and value in satoshis");
 		print!("> "); std::io::stdout().flush().unwrap();
 		tokio::spawn(tokio_codec::FramedRead::new(tokio_fs::stdin(), tokio_codec::LinesCodec::new()).for_each(move |line| {
 			if line.len() > 2 && line.as_bytes()[1] == ' ' as u8 {
@@ -418,6 +419,23 @@ fn main() {
 										}
 									} else { println!("Couldn't parse host:port into a socket address"); }
 								} else { println!("Invalid line, should be c pubkey@host:port"); }
+							},
+							None => println!("Bad PubKey for remote node"),
+						}
+					},
+					0x6e => { // 'n'
+						match hex_to_compressed_pubkey(line.split_at(2).1) {
+							Some(pk) => {
+								if line.as_bytes()[2 + 33*2] == ' ' as u8 {
+									let parse_res: Result<u64, _> = line.split_at(2 + 33*2 + 1).1.parse();
+									if let Ok(value) = parse_res {
+										match channel_manager.create_channel(pk, value, 0) {
+											Ok(_) => println!("Channel created, sending open_channel!"),
+											Err(e) => println!("Failed to open channel: {:?}!", e),
+										}
+										event_notify.unbounded_send(()).unwrap();
+									} else { println!("Couldn't parse second argument into a value"); }
+								} else { println!("Invalid line, should be n pubkey value"); }
 							},
 							None => println!("Bad PubKey for remote node"),
 						}
