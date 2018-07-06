@@ -64,7 +64,7 @@ impl Connection {
 				}
 			}
 
-			let _ = us_ref.lock().unwrap().event_notify.start_send(());
+			us_ref.lock().unwrap().event_notify.unbounded_send(()).unwrap();
 
 			//TODO: This sucks, find a better way:
 			let (sender, blocker) = futures::sync::oneshot::channel();
@@ -154,7 +154,7 @@ impl peer_handler::SocketDescriptor for SocketDescriptor {
 						sender.send(Ok(())).unwrap();
 					}
 					us.read_paused = false;
-					let _ = us.event_notify.start_send(());
+					us.event_notify.unbounded_send(()).unwrap();
 					Ok(())
 				}));
 			}
