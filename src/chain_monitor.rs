@@ -213,6 +213,7 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 		let fee_estimator = fee_estimator.clone();
 		let rpc_client = rpc_client.clone();
 		let chain_monitor = chain_monitor.clone();
+		let event_notify = event_notify.clone();
 		rpc_client.make_rpc_call("getblockchaininfo", &Vec::new()).and_then(move |v| {
 			let new_block = v["bestblockhash"].as_str().unwrap().to_string();
 			let old_block = cur_block.lock().unwrap().clone();
@@ -245,6 +246,7 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 				}
 				future::join_all(connect_futures)
 					.then(move |_: Result<Vec<()>, ()>| { FeeEstimator::update_values(fee_estimator, &rpc_client) })
+					.then(move |_| { event_notify.unbounded_send(()).unwrap(); Ok(()) })
 			}))
 		}).then(|_| { Ok(()) })
 	}).then(|_| { Ok(()) }));
