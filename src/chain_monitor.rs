@@ -238,7 +238,7 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 					if let &ForkStep::ConnectBlock((ref hash, height)) = &event {
 						let block_height = *height;
 						let chain_monitor = chain_monitor.clone();
-						connect_futures.push(rpc_client.make_rpc_call("getblock", &vec![&("\"".to_string() + hash + "\""), "0"]).then(move |blockhex| {
+						connect_futures.push(rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"]).then(move |blockhex| {
 							let block: Block = bitcoin::network::serialize::deserialize(&hex_to_vec(blockhex.unwrap().as_str().unwrap()).unwrap()).unwrap();
 							println!("Connecting block {}", block.bitcoin_hash().be_hex_string());
 							chain_monitor.util.block_connected_with_filtering(&block, block_height);
