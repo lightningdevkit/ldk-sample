@@ -11,6 +11,7 @@ extern crate tokio_fs;
 extern crate tokio_codec;
 extern crate bytes;
 extern crate base64;
+extern crate bitcoin_bech32;
 
 #[macro_use]
 extern crate serde_derive;
@@ -36,13 +37,16 @@ use secp256k1::Secp256k1;
 
 use rand::{thread_rng, Rng};
 
+use lightning::chain;
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
-use lightning::util::events::EventsProvider;
+use lightning::util::events::{Event, EventsProvider};
 
-use bitcoin::network::constants;
+use bitcoin::blockdata;
+use bitcoin::network::{constants, serialize};
 
 use std::{env, mem};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 use std::time::{Instant, Duration};
 use std::io::Write;
@@ -56,11 +60,10 @@ fn _check_usize_is_64() {
 	unsafe { mem::transmute::<*const usize, [u8; 8]>(panic!()); }
 }
 
-fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
+fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
 	let mut b = 0;
-	let mut data = Vec::with_capacity(33);
+	let mut data = Vec::with_capacity(hex.len() / 2);
 	for (idx, c) in hex.as_bytes().iter().enumerate() {
-		if idx >= 33*2 { break; }
 		b <<= 4;
 		match *c {
 			b'A'...b'F' => b |= c - b'A' + 10,
@@ -73,28 +76,90 @@ fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
 			b = 0;
 		}
 	}
+	Some(data)
+}
+
+fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
+	let data = match hex_to_vec(&hex[0..33*2]) {
+		Some(bytes) => bytes,
+		None => return None
+	};
 	match PublicKey::from_slice(&Secp256k1::without_caps(), &data) {
 		Ok(pk) => Some(pk),
 		Err(_) => None,
 	}
 }
 
+fn hex_str(value: &[u8; 32]) -> String {
+	let mut res = String::with_capacity(64);
+	for v in value {
+		res += &format!("{:02x}", v);
+	}
+	res
+}
+
 struct EventHandler {
+	network: constants::Network,
+	rpc_client: Arc<RPCClient>,
 	peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>,
+	channel_manager: Arc<channelmanager::ChannelManager>,
+	broadcaster: Arc<chain::chaininterface::BroadcasterInterface>,
+	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 }
 impl EventHandler {
-	fn setup(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>) -> mpsc::UnboundedSender<()> {
-		let us = Arc::new(Self { peer_manager });
+	fn setup(network: constants::Network, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>) -> mpsc::UnboundedSender<()> {
+		let us = Arc::new(Self { network, rpc_client, peer_manager, channel_manager, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()) });
 		let (sender, receiver) = mpsc::unbounded();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
 			let events = us.peer_manager.get_and_clear_pending_events();
 			for event in events {
 				match event {
-					_ => unimplemented!(),
+					Event::FundingGenerationReady { temporary_channel_id, channel_value_satoshis, output_script, .. } => {
+						let addr = bitcoin_bech32::WitnessProgram::from_scriptpubkey(&output_script[..], match us.network {
+								constants::Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
+								constants::Network::Testnet => bitcoin_bech32::constants::Network::Testnet,
+							}
+						).expect("LN funding tx should always be to a SegWit output").to_address();
+						let us = us.clone();
+						return future::Either::A(us.rpc_client.make_rpc_call("createrawtransaction", &["[]", &format!("{{\"{}\": {}}}", addr, channel_value_satoshis as f64 / 1_000_000_00.0)]).and_then(move |tx_hex| {
+							us.rpc_client.make_rpc_call("fundrawtransaction", &[&format!("\"{}\"", tx_hex.as_str().unwrap())]).and_then(move |funded_tx| {
+								let changepos = funded_tx["changepos"].as_i64().unwrap();
+								assert!(changepos == 0 || changepos == 1);
+								us.rpc_client.make_rpc_call("signrawtransaction", &[&format!("\"{}\"", funded_tx["hex"].as_str().unwrap())]).and_then(move |signed_tx| {
+									assert_eq!(signed_tx["complete"].as_bool().unwrap(), true);
+									let tx: blockdata::transaction::Transaction = serialize::deserialize(&hex_to_vec(&signed_tx["hex"].as_str().unwrap()).unwrap()).unwrap();
+									let outpoint = chain::transaction::OutPoint {
+										txid: tx.txid(),
+										index: if changepos == 0 { 1 } else { 0 },
+									};
+									us.channel_manager.funding_transaction_generated(&temporary_channel_id, outpoint);
+									us.txn_to_broadcast.lock().unwrap().insert(outpoint, tx);
+									println!("Generated funding tx!");
+									Ok(())
+								})
+							})
+						}));
+					},
+					Event::FundingBroadcastSafe { funding_txo, .. } => {
+						let mut txn = us.txn_to_broadcast.lock().unwrap();
+						let tx = txn.remove(&funding_txo).unwrap();
+						us.broadcaster.broadcast_transaction(&tx);
+						println!("Broadcast funding tx {}!", tx.txid());
+					},
+					Event::PaymentReceived { payment_hash, amt } => {
+						println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash));
+					},
+					Event::PaymentSent { payment_preimage } => {
+						println!("Less money :(, proof: {}", hex_str(&payment_preimage));
+					},
+					Event::PaymentFailed { payment_hash } => {
+						println!("Send failed id {}!", hex_str(&payment_hash));
+					},
+					_ => panic!(),
 				}
 			}
-			Ok(())
+			future::Either::B(future::result(Ok(())))
 		}).then(|_| { Ok(()) }));
 		sender
 	}
@@ -154,7 +219,7 @@ fn main() {
 			route_handler: router,
 		}, our_node_secret));
 
-		let event_notify = EventHandler::setup(peer_manager.clone());
+		let event_notify = EventHandler::setup(network, rpc_client.clone(), peer_manager.clone(), channel_manager.clone(), chain_monitor.clone());
 
 		let listener = tokio::net::TcpListener::bind(&"0.0.0.0:9735".parse().unwrap()).unwrap();
 
