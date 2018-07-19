@@ -206,7 +206,7 @@ fn find_fork(mut steps_tx: mpsc::Sender<ForkStep>, current_hash: String, target_
 }
 
 pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_monitor: Arc<ChainInterface>, event_notify: mpsc::UnboundedSender<()>) {
-	FeeEstimator::update_values(fee_estimator.clone(), &rpc_client);
+	tokio::spawn(FeeEstimator::update_values(fee_estimator.clone(), &rpc_client));
 	let cur_block = Arc::new(Mutex::new(String::from("")));
 	tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::from_secs(1)).for_each(move |_| {
 		let cur_block = cur_block.clone();
@@ -219,10 +219,12 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 			let old_block = cur_block.lock().unwrap().clone();
 			if new_block == old_block { return future::Either::A(future::result(Ok(()))); }
 
+			*cur_block.lock().unwrap() = new_block.clone();
+			if old_block == "" { return future::Either::A(future::result(Ok(()))); }
+
 			let (events_tx, events_rx) = mpsc::channel(1);
-			find_fork(events_tx, new_block.clone(), old_block, rpc_client.clone());
+			find_fork(events_tx, new_block, old_block, rpc_client.clone());
 			println!("NEW BEST BLOCK!");
-			*cur_block.lock().unwrap() = new_block;
 			future::Either::B(events_rx.collect().then(move |events_res| {
 				let events = events_res.unwrap();
 				for event in events.iter().rev() {
