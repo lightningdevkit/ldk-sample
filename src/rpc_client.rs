@@ -54,7 +54,7 @@ impl RPCClient {
 	}
 
 	/// params entries must be pre-quoted if appropriate
-	pub fn make_rpc_call(&self, method: &str, params: &Vec<&str>) -> impl Future<Item=serde_json::Value, Error=()> {
+	pub fn make_rpc_call(&self, method: &str, params: &[&str]) -> impl Future<Item=serde_json::Value, Error=()> {
 		let mut request = hyper::Request::post(&self.uri);
 		let auth: &str = &self.basic_auth;
 		request.header("Authorization", auth);
@@ -106,7 +106,7 @@ impl RPCClient {
 
 	pub fn get_header(&self, header_hash: &str) -> impl Future<Item=GetHeaderResponse, Error=()> {
 		let param = "\"".to_string() + header_hash + "\"";
-		self.make_rpc_call("getblockheader", &vec![&param]).and_then(|v| {
+		self.make_rpc_call("getblockheader", &[&param]).and_then(|v| {
 			let deser_res: Result<GetHeaderResponse, _> = serde_json::from_value(v);
 			match deser_res {
 				Ok(resp) => Ok(resp),
