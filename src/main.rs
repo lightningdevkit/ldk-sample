@@ -39,10 +39,12 @@ use rand::{thread_rng, Rng};
 
 use lightning::chain;
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
+use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::util::events::{Event, EventsProvider};
 
 use bitcoin::blockdata;
 use bitcoin::network::{constants, serialize};
+use bitcoin::util::hash::Sha256dHash;
 
 use std::{env, mem};
 use std::collections::HashMap;
@@ -50,6 +52,7 @@ use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 use std::time::{Instant, Duration};
 use std::io::Write;
+use std::fs;
 
 const FEE_PROPORTIONAL_MILLIONTHS: u32 = 10;
 const ANNOUNCE_CHANNELS: bool = false;
@@ -165,9 +168,99 @@ impl EventHandler {
 	}
 }
 
+struct ChannelMonitor {
+	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
+	file_prefix: String,
+}
+impl ChannelMonitor {
+	fn load_from_disk(&self) {
+		for file_option in fs::read_dir(&self.file_prefix).unwrap() {
+			let mut loaded = false;
+			let file = file_option.unwrap();
+			if let Some(filename) = file.file_name().to_str() {
+				if filename.is_ascii() && filename.len() > 65 {
+					if let Ok(txid) = Sha256dHash::from_hex(filename.split_at(64).0) {
+						if let Ok(index) = filename.split_at(65).1.split('.').next().unwrap().parse() {
+							if let Ok(contents) = fs::read(&file.path()) {
+								if let Some(loaded_monitor) = channelmonitor::ChannelMonitor::deserialize(&contents) {
+									if let Ok(_) = self.monitor.add_update_monitor(chain::transaction::OutPoint { txid, index }, loaded_monitor) {
+										loaded = true;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			if !loaded {
+				println!("WARNING: Failed to read one of the channel monitor storage files! Check perms!");
+			}
+		}
+	}
+}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[error "OSX creatively eats your data, using Lightning on OSX is unsafe"]
+struct ERR {}
+
+impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
+	fn add_update_monitor(&self, funding_txo: chain::transaction::OutPoint, monitor: channelmonitor::ChannelMonitor) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
+		macro_rules! try_fs {
+			($res: expr) => {
+				match $res {
+					Ok(res) => res,
+					Err(_) => return Err(channelmonitor::ChannelMonitorUpdateErr::TemporaryFailure),
+				}
+			}
+		}
+		// Do a crazy dance with lots of fsync()s to be overly cautious here...
+		// We never want to end up in a state where we've lost the old data, or end up using the
+		// old data on power loss after we've returned
+		// Note that this actually *isn't* enough (at least on Linux)! We need to fsync an fd with
+		// the containing dir, but Rust doesn't let us do that directly, sadly. TODO: Fix this with
+		// the libc crate!
+		let new_channel_data = monitor.serialize_for_disk();
+		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.be_hex_string(), funding_txo.index);
+		let tmp_filename = filename.clone() + ".tmp";
+		{
+			let mut f = try_fs!(fs::File::create(&tmp_filename));
+			try_fs!(f.write_all(&new_channel_data));
+			try_fs!(f.sync_all());
+		}
+		// We don't need to create a backup if didn't already have the file, but in any other case
+		// try to create the backup and expect failure on fs::copy() if eg there's a perms issue.
+		let need_bk = match fs::metadata(&filename) {
+			Ok(data) => {
+				if !data.is_file() { return Err(channelmonitor::ChannelMonitorUpdateErr::TemporaryFailure); }
+				true
+			},
+			Err(e) => match e.kind() {
+				std::io::ErrorKind::NotFound => false,
+				_ => true,
+			}
+		};
+		let bk_filename = filename.clone() + ".bk";
+		if need_bk {
+			try_fs!(fs::copy(&filename, &bk_filename));
+			{
+				let f = try_fs!(fs::File::open(&bk_filename));
+				try_fs!(f.sync_all());
+			}
+		}
+		try_fs!(fs::rename(&tmp_filename, &filename));
+		{
+			let f = try_fs!(fs::File::open(&filename));
+			try_fs!(f.sync_all());
+		}
+		if need_bk {
+			try_fs!(fs::remove_file(&bk_filename));
+		}
+		self.monitor.add_update_monitor(funding_txo, monitor)
+	}
+}
+
 fn main() {
-	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port");
-	if env::args().len() < 2 { return; }
+	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port storage_directory_path");
+	if env::args().len() < 3 { return; }
 
 	let rpc_client = {
 		let path = env::args().skip(1).next().unwrap();
@@ -200,25 +293,36 @@ fn main() {
 		println!("Success! Starting up...");
 	}
 
+	let our_node_secret = {
+		let mut key = [0; 32];
+		thread_rng().fill_bytes(&mut key);
+		SecretKey::from_slice(&secp_ctx, &key).unwrap()
+	};
+
+	let data_path = env::args().skip(2).next().unwrap();
+	if !fs::metadata(&data_path).unwrap().is_dir() {
+		println!("Need storage_directory_path to exist and be a directory (or symlink to one)");
+		return;
+	}
+	let _ = fs::create_dir(data_path.clone() + "/monitors"); // If it already exists, ignore, hopefully perms are ok
+
+	let chain_monitor = Arc::new(ChainInterface::new());
+	let monitor = Arc::new(ChannelMonitor {
+		monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
+		file_prefix: data_path + "/monitors",
+	});
+	monitor.load_from_disk();
+
+	let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone()).unwrap();
+	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap()));
+
+	let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
+		chan_handler: channel_manager.clone(),
+		route_handler: router,
+	}, our_node_secret));
+
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
-		let our_node_secret = {
-			let mut key = [0; 32];
-			thread_rng().fill_bytes(&mut key);
-			SecretKey::from_slice(&secp_ctx, &key).unwrap()
-		};
-
-		let chain_monitor = Arc::new(ChainInterface::new());
-		let monitor = channelmonitor::SimpleManyChannelMonitor::<lightning::chain::transaction::OutPoint>::new(chain_monitor.clone(), chain_monitor.clone());
-
-		let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone()).unwrap();
-		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap()));
-
-		let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
-			chan_handler: channel_manager.clone(),
-			route_handler: router,
-		}, our_node_secret));
-
 		let event_notify = EventHandler::setup(network, rpc_client.clone(), peer_manager.clone(), channel_manager.clone(), chain_monitor.clone());
 
 		let listener = tokio::net::TcpListener::bind(&"0.0.0.0:9735".parse().unwrap()).unwrap();
