@@ -25,7 +25,7 @@ pub struct Connection {
 	writer: Option<mpsc::Sender<bytes::Bytes>>,
 	event_notify: mpsc::UnboundedSender<()>,
 	pending_read: Vec<u8>,
-	read_blocker: Option<futures::sync::oneshot::Sender<Result<(), std::io::Error>>>,
+	read_blocker: Option<futures::sync::oneshot::Sender<Result<(), ()>>>,
 	read_paused: bool,
 	need_disconnect: bool,
 	id: u64,
@@ -36,7 +36,6 @@ impl Connection {
 		let us_close_ref = us.clone();
 		let peer_manager_ref = peer_manager.clone();
 		tokio::spawn(reader.for_each(move |b| {
-			let unwrapper = |res: Result<Result<(), std::io::Error>, futures::sync::oneshot::Canceled>| { res.unwrap() };
 			let pending_read = b.to_vec();
 			{
 				let mut lock = us_ref.lock().unwrap();
@@ -45,9 +44,12 @@ impl Connection {
 					lock.pending_read = pending_read;
 					let (sender, blocker) = futures::sync::oneshot::channel();
 					lock.read_blocker = Some(sender);
-					return blocker.then(unwrapper);
+					return future::Either::A(blocker.then(|_| { Ok(()) }));
 				}
 			}
+			//TODO: There's a race where we don't meet the requirements of disconnect_socket if its
+			//called right here, after we release the us_ref lock in the scope above, but before we
+			//call read_event!
 			match peer_manager.read_event(&mut SocketDescriptor::new(us_ref.clone(), peer_manager.clone()), pending_read) {
 				Ok(pause_read) => {
 					if pause_read {
@@ -57,19 +59,13 @@ impl Connection {
 				},
 				Err(e) => {
 					us_ref.lock().unwrap().need_disconnect = false;
-					//TODO: This sucks, find a better way:
-					let (sender, blocker) = futures::sync::oneshot::channel();
-					sender.send(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))).unwrap();
-					return blocker.then(unwrapper);
+					return future::Either::B(future::result(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))));
 				}
 			}
 
 			us_ref.lock().unwrap().event_notify.unbounded_send(()).unwrap();
 
-			//TODO: This sucks, find a better way:
-			let (sender, blocker) = futures::sync::oneshot::channel();
-			sender.send(Ok(())).unwrap();
-			blocker.then(unwrapper)
+			future::Either::B(future::result(Ok(())))
 		}).then(move |_| {
 			if us_close_ref.lock().unwrap().need_disconnect {
 				peer_manager_ref.disconnect_event(&SocketDescriptor::new(us_close_ref, peer_manager_ref.clone()));
@@ -202,6 +198,12 @@ impl peer_handler::SocketDescriptor for SocketDescriptor {
 				0
 			},
 		}
+	}
+
+	fn disconnect_socket(&mut self) {
+		let mut us = self.conn.lock().unwrap();
+		us.need_disconnect = true;
+		us.read_paused = true;
 	}
 }
 impl Eq for SocketDescriptor {}
