@@ -54,7 +54,8 @@ impl RPCClient {
 	}
 
 	/// params entries must be pre-quoted if appropriate
-	pub fn make_rpc_call(&self, method: &str, params: &[&str]) -> impl Future<Item=serde_json::Value, Error=()> {
+	/// may_fail is only used to change loggin
+	pub fn make_rpc_call(&self, method: &str, params: &[&str], may_fail: bool) -> impl Future<Item=serde_json::Value, Error=()> {
 		let mut request = hyper::Request::post(&self.uri);
 		let auth: &str = &self.basic_auth;
 		request.header("Authorization", auth);
@@ -68,9 +69,11 @@ impl RPCClient {
 		self.client.request(request.body(hyper::Body::from("{\"method\":\"".to_string() + method + "\",\"params\":[" + &param_str + "],\"id\":" + &self.id.fetch_add(1, Ordering::AcqRel).to_string() + "}")).unwrap()).map_err(|_| {
 			println!("Failed to connect to RPC server!");
 			()
-		}).and_then(|res| {
+		}).and_then(move |res| {
 			if res.status() != hyper::StatusCode::OK {
-				println!("Failed to get RPC server response (probably bad auth)!");
+				if !may_fail {
+					println!("Failed to get RPC server response (probably bad auth)!");
+				}
 				future::Either::A(future::err(()))
 			} else {
 				future::Either::B(res.into_body().concat2().map_err(|_| {
@@ -106,7 +109,7 @@ impl RPCClient {
 
 	pub fn get_header(&self, header_hash: &str) -> impl Future<Item=GetHeaderResponse, Error=()> {
 		let param = "\"".to_string() + header_hash + "\"";
-		self.make_rpc_call("getblockheader", &[&param]).and_then(|v| {
+		self.make_rpc_call("getblockheader", &[&param], false).and_then(|v| {
 			let deser_res: Result<GetHeaderResponse, _> = serde_json::from_value(v);
 			match deser_res {
 				Ok(resp) => Ok(resp),

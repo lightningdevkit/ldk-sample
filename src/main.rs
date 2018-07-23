@@ -125,11 +125,11 @@ impl EventHandler {
 							}
 						).expect("LN funding tx should always be to a SegWit output").to_address();
 						let us = us.clone();
-						return future::Either::A(us.rpc_client.make_rpc_call("createrawtransaction", &["[]", &format!("{{\"{}\": {}}}", addr, channel_value_satoshis as f64 / 1_000_000_00.0)]).and_then(move |tx_hex| {
-							us.rpc_client.make_rpc_call("fundrawtransaction", &[&format!("\"{}\"", tx_hex.as_str().unwrap())]).and_then(move |funded_tx| {
+						return future::Either::A(us.rpc_client.make_rpc_call("createrawtransaction", &["[]", &format!("{{\"{}\": {}}}", addr, channel_value_satoshis as f64 / 1_000_000_00.0)], false).and_then(move |tx_hex| {
+							us.rpc_client.make_rpc_call("fundrawtransaction", &[&format!("\"{}\"", tx_hex.as_str().unwrap())], false).and_then(move |funded_tx| {
 								let changepos = funded_tx["changepos"].as_i64().unwrap();
 								assert!(changepos == 0 || changepos == 1);
-								us.rpc_client.make_rpc_call("signrawtransaction", &[&format!("\"{}\"", funded_tx["hex"].as_str().unwrap())]).and_then(move |signed_tx| {
+								us.rpc_client.make_rpc_call("signrawtransaction", &[&format!("\"{}\"", funded_tx["hex"].as_str().unwrap())], false).and_then(move |signed_tx| {
 									assert_eq!(signed_tx["complete"].as_bool().unwrap(), true);
 									let tx: blockdata::transaction::Transaction = serialize::deserialize(&hex_to_vec(&signed_tx["hex"].as_str().unwrap()).unwrap()).unwrap();
 									let outpoint = chain::transaction::OutPoint {
@@ -280,7 +280,7 @@ fn main() {
 	{
 		println!("Checking validity of RPC URL to bitcoind...");
 		let mut thread_rt = tokio::runtime::current_thread::Runtime::new().unwrap();
-		thread_rt.block_on(rpc_client.make_rpc_call("getblockchaininfo", &Vec::new()).and_then(|v| {
+		thread_rt.block_on(rpc_client.make_rpc_call("getblockchaininfo", &[], false).and_then(|v| {
 			assert!(v["verificationprogress"].as_f64().unwrap() > 0.99);
 			assert_eq!(v["bip9_softforks"]["segwit"]["status"].as_str().unwrap(), "active");
 			match v["chain"].as_str().unwrap() {
@@ -306,7 +306,7 @@ fn main() {
 	}
 	let _ = fs::create_dir(data_path.clone() + "/monitors"); // If it already exists, ignore, hopefully perms are ok
 
-	let chain_monitor = Arc::new(ChainInterface::new());
+	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone()));
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
 		file_prefix: data_path + "/monitors",
