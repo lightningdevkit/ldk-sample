@@ -293,6 +293,10 @@ fn main() {
 		println!("Success! Starting up...");
 	}
 
+	if network == constants::Network::Bitcoin {
+		panic!("LOL, you're insane");
+	}
+
 	let our_node_secret = {
 		let mut key = [0; 32];
 		thread_rng().fill_bytes(&mut key);
