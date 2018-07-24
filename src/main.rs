@@ -356,6 +356,9 @@ fn main() {
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 		println!("'n pubkey value' Create a channel with the given connected node (by pubkey) and value in satoshis");
+		println!("'k channel_id' Close a channel with the given id");
+		println!("'l p' List the node_ids of all connected peers");
+		println!("'l c' List details about all channels");
 		print!("> "); std::io::stdout().flush().unwrap();
 		tokio::spawn(tokio_codec::FramedRead::new(tokio_fs::stdin(), tokio_codec::LinesCodec::new()).for_each(move |line| {
 			if line.len() > 2 && line.as_bytes()[1] == ' ' as u8 {
@@ -398,6 +401,41 @@ fn main() {
 								} else { println!("Invalid line, should be n pubkey value"); }
 							},
 							None => println!("Bad PubKey for remote node"),
+						}
+					},
+					0x6b => { // 'k'
+						if line.len() == 64 + 2 {
+							if let Some(chan_id_vec) = hex_to_vec(line.split_at(2).1) {
+								let mut channel_id = [0; 32];
+								channel_id.copy_from_slice(&chan_id_vec);
+								match channel_manager.close_channel(&channel_id) {
+									Ok(()) => {
+										println!("Ok, channel closing!");
+										event_notify.unbounded_send(()).unwrap();
+									},
+									Err(e) => println!("Failed to close channel: {:?}", e),
+								}
+							} else { println!("Bad channel_id hex"); }
+						} else { println!("Bad channel_id hex"); }
+					},
+					0x6c => { // 'l'
+						if line.as_bytes()[2] == 'p' as u8 {
+							let mut nodes = String::new();
+							for node_id in peer_manager.get_peer_node_ids() {
+								nodes += &format!("{}, ", hex_str(&node_id.serialize()));
+							}
+							println!("Connected nodes: {}", nodes);
+						} else if line.as_bytes()[2] == 'c' as u8 {
+							println!("All channels:");
+							for chan_info in channel_manager.list_channels() {
+								if let Some(short_id) = chan_info.short_channel_id {
+									println!("id: {}, short_id: {}, peer: {}, value: {} sat", hex_str(&chan_info.channel_id[..]), short_id, hex_str(&chan_info.remote_network_id.serialize()), chan_info.channel_value_satoshis);
+								} else {
+									println!("id: {}, not yet confirmed, peer: {}, value: {} sat", hex_str(&chan_info.channel_id[..]), hex_str(&chan_info.remote_network_id.serialize()), chan_info.channel_value_satoshis);
+								}
+							}
+						} else {
+							println!("Listing of non-peer/channel objects not yet implemented");
 						}
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
