@@ -93,7 +93,8 @@ fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
 	}
 }
 
-fn hex_str(value: &[u8; 32]) -> String {
+#[inline]
+fn hex_str(value: &[u8]) -> String {
 	let mut res = String::with_capacity(64);
 	for v in value {
 		res += &format!("{:02x}", v);
@@ -113,6 +114,7 @@ impl EventHandler {
 	fn setup(network: constants::Network, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>) -> mpsc::UnboundedSender<()> {
 		let us = Arc::new(Self { network, rpc_client, peer_manager, channel_manager, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()) });
 		let (sender, receiver) = mpsc::unbounded();
+		let self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
 			let events = us.peer_manager.get_and_clear_pending_events();
@@ -125,6 +127,7 @@ impl EventHandler {
 							}
 						).expect("LN funding tx should always be to a SegWit output").to_address();
 						let us = us.clone();
+						let self_sender = self_sender.clone();
 						return future::Either::A(us.rpc_client.make_rpc_call("createrawtransaction", &["[]", &format!("{{\"{}\": {}}}", addr, channel_value_satoshis as f64 / 1_000_000_00.0)], false).and_then(move |tx_hex| {
 							us.rpc_client.make_rpc_call("fundrawtransaction", &[&format!("\"{}\"", tx_hex.as_str().unwrap())], false).and_then(move |funded_tx| {
 								let changepos = funded_tx["changepos"].as_i64().unwrap();
@@ -138,6 +141,7 @@ impl EventHandler {
 									};
 									us.channel_manager.funding_transaction_generated(&temporary_channel_id, outpoint);
 									us.txn_to_broadcast.lock().unwrap().insert(outpoint, tx);
+									self_sender.unbounded_send(()).unwrap();
 									println!("Generated funding tx!");
 									Ok(())
 								})
