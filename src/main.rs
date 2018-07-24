@@ -370,7 +370,7 @@ fn main() {
 									let parse_res: Result<std::net::SocketAddr, _> = line.split_at(2 + 33*2 + 1).1.parse();
 									if let Ok(addr) = parse_res {
 										print!("Attempting to connect to {}...", addr);
-										match std::net::TcpStream::connect(addr) {
+										match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
 											Ok(stream) => {
 												println!("connected, initiating handshake!");
 												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::current()).unwrap(), outbound_id);
