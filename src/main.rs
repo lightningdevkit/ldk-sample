@@ -177,6 +177,15 @@ impl EventHandler {
 					Event::PaymentFailed { payment_hash } => {
 						println!("Send failed id {}!", hex_str(&payment_hash));
 					},
+					Event::PendingHTLCsForwardable { time_forwardable } => {
+						let us = us.clone();
+						let self_sender = self_sender.clone();
+						tokio::spawn(tokio::timer::Delay::new(time_forwardable).then(move |_| {
+							us.channel_manager.process_pending_htlc_forwards();
+							self_sender.unbounded_send(()).unwrap();
+							Ok(())
+						}));
+					},
 					_ => panic!(),
 				}
 			}
