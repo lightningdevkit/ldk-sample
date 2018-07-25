@@ -19,6 +19,7 @@ use bitcoin::network::serialize::BitcoinHash;
 use bitcoin::network::serialize;
 
 use std::collections::HashMap;
+use std::cmp;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
@@ -44,7 +45,7 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""], false).and_then(move |v| {
 				if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
-					us.high_prio_est.store((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize + 3, Ordering::Release);
+					us.high_prio_est.store((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
 				}
 				Ok(())
 			})));
@@ -53,7 +54,7 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["18", "\"ECONOMICAL\""], false).and_then(move |v| {
 				if let Some(serde_json::Value::Number(np_btc_per_kb)) = v.get("feerate") {
-					us.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize + 3, Ordering::Release);
+					us.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
 				}
 				Ok(())
 			})));
@@ -62,7 +63,7 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["144", "\"ECONOMICAL\""], false).and_then(move |v| {
 				if let Some(serde_json::Value::Number(bp_btc_per_kb)) = v.get("feerate") {
-					us.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 1000.0) as usize + 3, Ordering::Release);
+					us.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
 				}
 				Ok(())
 			})));
@@ -71,12 +72,12 @@ impl FeeEstimator {
 	}
 }
 impl chaininterface::FeeEstimator for FeeEstimator {
-	fn get_est_sat_per_vbyte(&self, conf_target: chaininterface::ConfirmationTarget) -> u64 {
-		match conf_target {
+	fn get_est_sat_per_1000_weight(&self, conf_target: chaininterface::ConfirmationTarget) -> u64 {
+		cmp::max(match conf_target {
 			chaininterface::ConfirmationTarget::Background => self.background_est.load(Ordering::Acquire) as u64,
 			chaininterface::ConfirmationTarget::Normal => self.normal_est.load(Ordering::Acquire) as u64,
 			chaininterface::ConfirmationTarget::HighPriority => self.high_prio_est.load(Ordering::Acquire) as u64,
-		}
+		}, 253)
 	}
 }
 
