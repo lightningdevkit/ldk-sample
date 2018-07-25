@@ -214,6 +214,7 @@ impl EventHandler {
 struct ChannelMonitor {
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
 	file_prefix: String,
+	disk_write_mutex: Mutex<()>,
 }
 impl ChannelMonitor {
 	fn load_from_disk(&self) {
@@ -264,6 +265,14 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		let new_channel_data = monitor.serialize_for_disk();
 		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.be_hex_string(), funding_txo.index);
 		let tmp_filename = filename.clone() + ".tmp";
+
+		//TODO: This actually exposes a bug in the rust-lightning API...instead of
+		//SimpleManyChannelMonitor returning the *combined* filter, we blindly write the newest
+		//filter to disk (possibly due to races actually a slightly out-of-date one!). The API
+		//really should be something like calling SimpleManyChannelMonitor to update the filter and
+		//then getting back a serialized copy of it to be sent to watchtowers/disk!
+		let _lock = self.disk_write_mutex.lock().unwrap();
+
 		{
 			let mut f = try_fs!(fs::File::create(&tmp_filename));
 			try_fs!(f.write_all(&new_channel_data));
@@ -357,6 +366,7 @@ fn main() {
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
 		file_prefix: data_path + "/monitors",
+		disk_write_mutex: Mutex::new(()),
 	});
 	monitor.load_from_disk();
 
