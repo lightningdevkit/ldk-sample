@@ -2,6 +2,7 @@ extern crate futures;
 extern crate hyper;
 extern crate serde_json;
 extern crate lightning;
+extern crate lightning_invoice;
 extern crate rand;
 extern crate secp256k1;
 extern crate bitcoin;
@@ -48,6 +49,7 @@ use bitcoin::util::hash::Sha256dHash;
 
 use std::{env, mem};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 use std::time::{Instant, Duration};
@@ -100,6 +102,18 @@ fn hex_str(value: &[u8]) -> String {
 		res += &format!("{:02x}", v);
 	}
 	res
+}
+
+#[inline]
+pub fn slice_to_be64(v: &[u8]) -> u64 {
+	((v[0] as u64) << 8*7) |
+	((v[1] as u64) << 8*6) |
+	((v[2] as u64) << 8*5) |
+	((v[3] as u64) << 8*4) |
+	((v[4] as u64) << 8*3) |
+	((v[5] as u64) << 8*2) |
+	((v[6] as u64) << 8*1) |
+	((v[7] as u64) << 8*0)
 }
 
 struct EventHandler {
@@ -326,7 +340,7 @@ fn main() {
 
 	let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
 		chan_handler: channel_manager.clone(),
-		route_handler: router,
+		route_handler: router.clone(),
 	}, our_node_secret));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -339,6 +353,7 @@ fn main() {
 		let event_listener = event_notify.clone();
 		let mut inbound_id = 0;
 		tokio::spawn(listener.incoming().for_each(move |sock| {
+			println!("Got new inbound connection, waiting on them to start handshake...");
 			Connection::setup_inbound(peer_manager_listener.clone(), event_listener.clone(), sock, inbound_id);
 			inbound_id += 2;
 			Ok(())
@@ -353,14 +368,24 @@ fn main() {
 		}).then(|_| { Ok(()) }));
 
 		let mut outbound_id = 1;
+		println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap().serialize()));
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 		println!("'n pubkey value' Create a channel with the given connected node (by pubkey) and value in satoshis");
 		println!("'k channel_id' Close a channel with the given id");
 		println!("'l p' List the node_ids of all connected peers");
 		println!("'l c' List details about all channels");
+		//TODO: remove pubkey requirement but needs invoice upgrades
+		//(see https://github.com/rust-bitcoin/rust-lightning-invoice/issues/6)
+		println!("'s invoice pubkey [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
 		print!("> "); std::io::stdout().flush().unwrap();
 		tokio::spawn(tokio_codec::FramedRead::new(tokio_fs::stdin(), tokio_codec::LinesCodec::new()).for_each(move |line| {
+			macro_rules! fail_return {
+				() => {
+					print!("> "); std::io::stdout().flush().unwrap();
+					return Ok(());
+				}
+			}
 			if line.len() > 2 && line.as_bytes()[1] == ' ' as u8 {
 				match line.as_bytes()[0] {
 					0x63 => { // 'c'
@@ -436,6 +461,148 @@ fn main() {
 							}
 						} else {
 							println!("Listing of non-peer/channel objects not yet implemented");
+						}
+					},
+					0x73 => { // 's'
+						let mut args = line.split_at(2).1.split(' ');
+						match lightning_invoice::RawInvoice::from_str(args.next().unwrap()) {
+							Ok(invoice) => {
+								let target_node = Some(hex_to_compressed_pubkey(args.next().unwrap()).unwrap());
+
+								if match invoice.hrp.currency {
+									lightning_invoice::Currency::Bitcoin => constants::Network::Bitcoin,
+									lightning_invoice::Currency::BitcoinTestnet => constants::Network::Testnet,
+								} != network {
+									println!("Wrong network on invoice");
+								} else {
+									let arg2 = args.next();
+									let mut amt = if let Some(amt) = invoice.hrp.raw_amount {
+										if arg2.is_some() {
+											println!("Invoice contained an amount, can't specify it again");
+											fail_return!();
+										}
+										amt * 1_0000_0000 * 1000
+									} else {
+										if arg2.is_none() {
+											println!("Invoice was missing amount, you should specify one");
+											fail_return!();
+										}
+										if invoice.hrp.si_prefix.is_some() {
+											println!("Invoice had no amount but had a multiplier (ie was malformed)");
+											fail_return!();
+										}
+										match arg2.unwrap().parse() {
+											Ok(amt) => amt,
+											Err(_) => {
+												println!("Provided amount was garbage");
+												fail_return!();
+											}
+										}
+									};
+									if let Some(mult) = invoice.hrp.si_prefix {
+										amt /= match mult {
+											// 10^-3
+											lightning_invoice::SiPrefix::Milli => 1_000,
+											// 10^-6
+											lightning_invoice::SiPrefix::Micro => 1_000_000,
+											// 10^-9
+											lightning_invoice::SiPrefix::Nano =>  1_000_000_000,
+											// 10^-12
+											lightning_invoice::SiPrefix::Pico => {
+												if amt % 10 != 0 {
+													println!("Invoice had amount with non-round number of millisat (ie was malformed)");
+													fail_return!();
+												}
+												1_000_000_000_000
+											},
+										};
+									}
+									let mut payment_hash = None;
+									let mut final_cltv = None;
+									let mut route_hint = None;
+									for field in invoice.data.tagged_fields {
+										match field {
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::PaymentHash(invoice_hash)) => {
+												if payment_hash.is_some() {
+													println!("Invoice had duplicative payment hash (ie was malformed)");
+													fail_return!();
+												}
+												payment_hash = Some(invoice_hash);
+											},
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::Description(_)) => {}
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::PayeePubKey(invoice_target)) => {
+												if *target_node.as_ref().unwrap() != invoice_target {
+													println!("Invoice had wrong target node_id");
+													fail_return!();
+												}
+											},
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::DescriptionHash(_)) => {},
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::ExpiryTime(_)) => {
+												//TODO: Test against current system time
+											},
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::MinFinalCltvExpiry(invoice_cltv)) => {
+												if final_cltv.is_some() {
+													println!("Invoice had duplicative final cltv (ie was malformed)");
+													fail_return!();
+												}
+												if invoice_cltv > std::u32::MAX as u64 {
+													println!("Invoice had garbage final cltv");
+													fail_return!();
+												}
+												final_cltv = Some(invoice_cltv as u32);
+											},
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::Fallback(_)) => {
+												// We don't support fallbacks
+											},
+											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::Route(mut invoice_routes)) => {
+												if route_hint.is_some() {
+													println!("Invoice had duplicative target node_id (ie was malformed)");
+													fail_return!();
+												}
+												let mut routes_converted = Vec::with_capacity(invoice_routes.len());
+												for node in invoice_routes.drain(..) {
+													routes_converted.push(router::RouteHint {
+														src_node_id: node.pubkey,
+														short_channel_id: slice_to_be64(&node.short_channel_id),
+														fee_base_msat: node.fee_base_msat as u64,
+														fee_proportional_millionths: node.fee_proportional_millionths,
+														cltv_expiry_delta: node.cltv_expiry_delta,
+														htlc_minimum_msat: 0,
+													});
+												}
+												route_hint = Some(routes_converted);
+											},
+											lightning_invoice::RawTaggedField::UnknownTag(_, _) => {
+												println!("Warning: invoice contained unknown fields");
+											},
+										}
+									}
+									if route_hint.is_none() { route_hint = Some(Vec::new()); }
+									if payment_hash.is_none() || final_cltv.is_none() {
+										println!("Invoice was missing some key bits");
+										fail_return!();
+									}
+									match router.get_route(&target_node.unwrap(), Some(&channel_manager.list_usable_channels()), &route_hint.unwrap(), amt, final_cltv.unwrap()) {
+										Ok(route) => {
+											match channel_manager.send_payment(route, payment_hash.unwrap()) {
+												Ok(()) => {
+													println!("Sending {} msat", amt);
+													event_notify.unbounded_send(()).unwrap();
+												},
+												Err(e) => {
+													println!("Failed to send HTLC: {}", e.err);
+												}
+											}
+										},
+										Err(e) => {
+											println!("Failed to find route: {}", e.err);
+										}
+									}
+								}
+							},
+							Err(_) => {
+								println!("Bad invoice");
+							},
 						}
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
