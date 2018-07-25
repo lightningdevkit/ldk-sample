@@ -13,6 +13,7 @@ extern crate tokio_codec;
 extern crate bytes;
 extern crate base64;
 extern crate bitcoin_bech32;
+extern crate crypto;
 
 #[macro_use]
 extern crate serde_derive;
@@ -27,6 +28,9 @@ use chain_monitor::*;
 
 mod net_manager;
 use net_manager::{Connection, SocketDescriptor};
+
+use crypto::digest::Digest;
+use crypto::sha2::Sha256;
 
 use futures::future;
 use futures::future::Future;
@@ -123,10 +127,11 @@ struct EventHandler {
 	channel_manager: Arc<channelmanager::ChannelManager>,
 	broadcaster: Arc<chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
+	payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>,
 }
 impl EventHandler {
-	fn setup(network: constants::Network, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>) -> mpsc::UnboundedSender<()> {
-		let us = Arc::new(Self { network, rpc_client, peer_manager, channel_manager, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()) });
+	fn setup(network: constants::Network, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>) -> mpsc::UnboundedSender<()> {
+		let us = Arc::new(Self { network, rpc_client, peer_manager, channel_manager, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::unbounded();
 		let self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
@@ -169,7 +174,18 @@ impl EventHandler {
 						println!("Broadcast funding tx {}!", tx.txid());
 					},
 					Event::PaymentReceived { payment_hash, amt } => {
-						println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash));
+						let images = us.payment_preimages.lock().unwrap();
+						if let Some(payment_preimage) = images.get(&payment_hash) {
+							if us.channel_manager.claim_funds(payment_preimage.clone()) {
+								println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash));
+							} else {
+								println!("Failed to claim money we were told we had?");
+							}
+						} else {
+							us.channel_manager.fail_htlc_backwards(&payment_hash);
+							println!("Received payment but we didn't know the preimage :(");
+						}
+						self_sender.unbounded_send(()).unwrap();
 					},
 					Event::PaymentSent { payment_preimage } => {
 						println!("Less money :(, proof: {}", hex_str(&payment_preimage));
@@ -354,7 +370,8 @@ fn main() {
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
-		let event_notify = EventHandler::setup(network, rpc_client.clone(), peer_manager.clone(), channel_manager.clone(), chain_monitor.clone());
+		let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
+		let event_notify = EventHandler::setup(network, rpc_client.clone(), peer_manager.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
 
 		let listener = tokio::net::TcpListener::bind(&"0.0.0.0:9735".parse().unwrap()).unwrap();
 
@@ -387,6 +404,7 @@ fn main() {
 		//TODO: remove pubkey requirement but needs invoice upgrades
 		//(see https://github.com/rust-bitcoin/rust-lightning-invoice/issues/6)
 		println!("'s invoice pubkey [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
+		println!("'p' Gets a new payment_hash for receiving funds");
 		print!("> "); std::io::stdout().flush().unwrap();
 		tokio::spawn(tokio_codec::FramedRead::new(tokio_fs::stdin(), tokio_codec::LinesCodec::new()).for_each(move |line| {
 			macro_rules! fail_return {
@@ -613,6 +631,17 @@ fn main() {
 								println!("Bad invoice");
 							},
 						}
+					},
+					0x70 => { // 'p'
+						let mut payment_preimage = [0; 32];
+						thread_rng().fill_bytes(&mut payment_preimage);
+						let mut sha = Sha256::new();
+						sha.input(&payment_preimage);
+						let mut payment_hash = [0; 32];
+						sha.result(&mut payment_hash);
+						//TODO: Store this on disk somewhere!
+						println!("payment_hash: {}", hex_str(&payment_hash));
+						payment_preimages.lock().unwrap().insert(payment_hash, payment_preimage);
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
 				}
