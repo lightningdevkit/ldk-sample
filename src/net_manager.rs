@@ -85,7 +85,7 @@ impl Connection {
 		})).then(|_| {
 			future::result(Ok(()))
 		}));
-		let us = Arc::new(Mutex::new(Self { writer: Some(send_sink), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: true, need_disconnect: true, id }));
+		let us = Arc::new(Mutex::new(Self { writer: Some(send_sink), event_notify, pending_read: Vec::new(), read_blocker: None, read_paused: false, need_disconnect: true, id }));
 
 		(reader, us)
 	}
