@@ -203,7 +203,7 @@ fn find_fork(mut steps_tx: mpsc::Sender<ForkStep>, current_hash: String, target_
 
 	tokio::spawn(rpc_client.get_header(&current_hash).then(move |current_resp| {
 		let current_header = current_resp.unwrap();
-		assert!(steps_tx.start_send(ForkStep::ConnectBlock((current_hash, current_header.height - 1))).unwrap().is_ready());
+		assert!(steps_tx.start_send(ForkStep::ConnectBlock((current_hash, current_header.height))).unwrap().is_ready());
 
 		if current_header.previousblockhash == target_hash || current_header.height == 1 {
 			// Fastpath one-new-block-connected or reached block 1
