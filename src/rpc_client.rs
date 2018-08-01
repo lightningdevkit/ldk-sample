@@ -109,7 +109,13 @@ impl RPCClient {
 
 	pub fn get_header(&self, header_hash: &str) -> impl Future<Item=GetHeaderResponse, Error=()> {
 		let param = "\"".to_string() + header_hash + "\"";
-		self.make_rpc_call("getblockheader", &[&param], false).and_then(|v| {
+		self.make_rpc_call("getblockheader", &[&param], false).and_then(|mut v| {
+			if v.is_object() {
+				if let None = v.get("previousblockhash") {
+					// Got a request for genesis block, add a dummy previousblockhash
+					v.as_object_mut().unwrap().insert("previousblockhash".to_string(), serde_json::Value::String("".to_string()));
+				}
+			}
 			let deser_res: Result<GetHeaderResponse, _> = serde_json::from_value(v);
 			match deser_res {
 				Ok(resp) => Ok(resp),

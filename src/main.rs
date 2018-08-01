@@ -338,6 +338,7 @@ fn main() {
 			match v["chain"].as_str().unwrap() {
 				"main" => network = constants::Network::Bitcoin,
 				"test" => network = constants::Network::Testnet,
+				"regtest" => network = constants::Network::Regtest,
 				_ => panic!("Unknown network type"),
 			}
 			Ok(())
