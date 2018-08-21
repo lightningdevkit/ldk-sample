@@ -13,6 +13,7 @@ use futures::{Stream, Sink};
 use futures::sync::mpsc;
 
 use lightning::chain::chaininterface;
+use lightning::util::logger::Logger;
 
 use bitcoin::blockdata::block::Block;
 use bitcoin::network::serialize::BitcoinHash;
@@ -87,9 +88,9 @@ pub struct ChainInterface {
 	rpc_client: Arc<RPCClient>,
 }
 impl ChainInterface {
-	pub fn new(rpc_client: Arc<RPCClient>) -> Self {
+	pub fn new(rpc_client: Arc<RPCClient>, logger: Arc<Logger>) -> Self {
 		ChainInterface {
-			util: chaininterface::ChainWatchInterfaceUtil::new(),
+			util: chaininterface::ChainWatchInterfaceUtil::new(logger),
 			txn_to_broadcast: Mutex::new(HashMap::new()),
 			rpc_client,
 		}
