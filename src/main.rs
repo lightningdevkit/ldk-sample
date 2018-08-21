@@ -46,6 +46,7 @@ use lightning::chain;
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::util::events::{Event, EventsProvider};
+use lightning::util::logger::{Logger, Record};
 
 use bitcoin::blockdata;
 use bitcoin::network::{constants, serialize};
@@ -143,6 +144,7 @@ impl EventHandler {
 						let addr = bitcoin_bech32::WitnessProgram::from_scriptpubkey(&output_script[..], match us.network {
 								constants::Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
 								constants::Network::Testnet => bitcoin_bech32::constants::Network::Testnet,
+								constants::Network::Regtest => bitcoin_bech32::constants::Network::Regtest,
 							}
 						).expect("LN funding tx should always be to a SegWit output").to_address();
 						let us = us.clone();
@@ -310,6 +312,13 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 	}
 }
 
+struct LogPrinter {}
+impl Logger for LogPrinter {
+	fn log(&self, record: &Record) {
+		println!("{:<5} [{} : {}, {}] {}", record.level.to_string(), record.module_path, record.file, record.line, record.args);
+	}
+}
+
 fn main() {
 	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port storage_directory_path");
 	if env::args().len() < 3 { return; }
@@ -363,7 +372,8 @@ fn main() {
 	}
 	let _ = fs::create_dir(data_path.clone() + "/monitors"); // If it already exists, ignore, hopefully perms are ok
 
-	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone()));
+	let logger = Arc::new(LogPrinter {});
+	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), logger.clone()));
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
 		file_prefix: data_path + "/monitors",
@@ -371,13 +381,13 @@ fn main() {
 	});
 	monitor.load_from_disk();
 
-	let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone()).unwrap();
-	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap()));
+	let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone(), logger.clone()).unwrap();
+	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret), logger.clone()));
 
 	let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
 		chan_handler: channel_manager.clone(),
 		route_handler: router.clone(),
-	}, our_node_secret));
+	}, our_node_secret, logger.clone()));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
@@ -405,16 +415,14 @@ fn main() {
 		}).then(|_| { Ok(()) }));
 
 		let mut outbound_id = 1;
-		println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &our_node_secret).unwrap().serialize()));
+		println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &our_node_secret).serialize()));
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
-		println!("'n pubkey value' Create a channel with the given connected node (by pubkey) and value in satoshis");
+		println!("'n pubkey value push_value' Create a channel with the given connected node (by pubkey), value in satoshis, and push the given msat value");
 		println!("'k channel_id' Close a channel with the given id");
 		println!("'l p' List the node_ids of all connected peers");
 		println!("'l c' List details about all channels");
-		//TODO: remove pubkey requirement but needs invoice upgrades
-		//(see https://github.com/rust-bitcoin/rust-lightning-invoice/issues/6)
-		println!("'s invoice pubkey [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
+		println!("'s invoice [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
 		println!("'p' Gets a new payment_hash for receiving funds");
 		print!("> "); std::io::stdout().flush().unwrap();
 		tokio::spawn(tokio_codec::FramedRead::new(tokio_fs::stdin(), tokio_codec::LinesCodec::new()).for_each(move |line| {
@@ -453,13 +461,19 @@ fn main() {
 						match hex_to_compressed_pubkey(line.split_at(2).1) {
 							Some(pk) => {
 								if line.as_bytes()[2 + 33*2] == ' ' as u8 {
-									let parse_res: Result<u64, _> = line.split_at(2 + 33*2 + 1).1.parse();
-									if let Ok(value) = parse_res {
-										match channel_manager.create_channel(pk, value, 0) {
-											Ok(_) => println!("Channel created, sending open_channel!"),
-											Err(e) => println!("Failed to open channel: {:?}!", e),
-										}
-										event_notify.unbounded_send(()).unwrap();
+									let mut args = line.split_at(2).1.split(' ');
+									if let Some(value_str) = args.next() {
+										if let Some(push_str) = args.next() {
+											if let Ok(value) = value_str.parse() {
+												if let Ok(push) = push_str.parse() {
+													match channel_manager.create_channel(pk, value, push, 0) {
+														Ok(_) => println!("Channel created, sending open_channel!"),
+														Err(e) => println!("Failed to open channel: {:?}!", e),
+													}
+													event_notify.unbounded_send(()).unwrap();
+												} else { println!("Couldn't parse third argument into a push value"); }
+											} else { println!("Couldn't parse second argument into a value"); }
+										} else { println!("Couldn't parse third argument into a push value"); }
 									} else { println!("Couldn't parse second argument into a value"); }
 								} else { println!("Invalid line, should be n pubkey value"); }
 							},
@@ -503,32 +517,24 @@ fn main() {
 					},
 					0x73 => { // 's'
 						let mut args = line.split_at(2).1.split(' ');
-						match lightning_invoice::RawInvoice::from_str(args.next().unwrap()) {
+						match lightning_invoice::Invoice::from_str(args.next().unwrap()) {
 							Ok(invoice) => {
-								let target_node = Some(hex_to_compressed_pubkey(args.next().unwrap()).unwrap());
-
-								if match invoice.hrp.currency {
+								if match invoice.currency() {
 									lightning_invoice::Currency::Bitcoin => constants::Network::Bitcoin,
 									lightning_invoice::Currency::BitcoinTestnet => constants::Network::Testnet,
 								} != network {
 									println!("Wrong network on invoice");
 								} else {
 									let arg2 = args.next();
-									let mut amt = if let Some(amt) = invoice.hrp.raw_amount {
-										if arg2.is_some() {
-											println!("Invoice contained an amount, can't specify it again");
-											fail_return!();
-										}
-										amt * 1_0000_0000 * 1000
-									} else {
+									let amt = if let Some(amt) = invoice.amount_pico_btc().and_then(|amt| {
+										if amt % 10 != 0 { None } else { Some(amt / 10) }
+									}) {
 										if arg2.is_none() {
 											println!("Invoice was missing amount, you should specify one");
 											fail_return!();
 										}
-										if invoice.hrp.si_prefix.is_some() {
-											println!("Invoice had no amount but had a multiplier (ie was malformed)");
-											fail_return!();
-										}
+										amt
+									} else {
 										match arg2.unwrap().parse() {
 											Ok(amt) => amt,
 											Err(_) => {
@@ -537,92 +543,42 @@ fn main() {
 											}
 										}
 									};
-									if let Some(mult) = invoice.hrp.si_prefix {
-										amt /= match mult {
-											// 10^-3
-											lightning_invoice::SiPrefix::Milli => 1_000,
-											// 10^-6
-											lightning_invoice::SiPrefix::Micro => 1_000_000,
-											// 10^-9
-											lightning_invoice::SiPrefix::Nano =>  1_000_000_000,
-											// 10^-12
-											lightning_invoice::SiPrefix::Pico => {
-												if amt % 10 != 0 {
-													println!("Invoice had amount with non-round number of millisat (ie was malformed)");
-													fail_return!();
-												}
-												1_000_000_000_000
-											},
-										};
-									}
-									let mut payment_hash = None;
-									let mut final_cltv = None;
-									let mut route_hint = None;
-									for field in invoice.data.tagged_fields {
-										match field {
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::PaymentHash(invoice_hash)) => {
-												if payment_hash.is_some() {
-													println!("Invoice had duplicative payment hash (ie was malformed)");
-													fail_return!();
-												}
-												payment_hash = Some(invoice_hash);
-											},
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::Description(_)) => {}
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::PayeePubKey(invoice_target)) => {
-												if *target_node.as_ref().unwrap() != invoice_target {
-													println!("Invoice had wrong target node_id");
-													fail_return!();
-												}
-											},
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::DescriptionHash(_)) => {},
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::ExpiryTime(_)) => {
-												//TODO: Test against current system time
-											},
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::MinFinalCltvExpiry(invoice_cltv)) => {
-												if final_cltv.is_some() {
-													println!("Invoice had duplicative final cltv (ie was malformed)");
-													fail_return!();
-												}
-												if invoice_cltv > std::u32::MAX as u64 {
-													println!("Invoice had garbage final cltv");
-													fail_return!();
-												}
-												final_cltv = Some(invoice_cltv as u32);
-											},
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::Fallback(_)) => {
-												// We don't support fallbacks
-											},
-											lightning_invoice::RawTaggedField::KnownTag(lightning_invoice::TaggedField::Route(mut invoice_routes)) => {
-												if route_hint.is_some() {
-													println!("Invoice had duplicative target node_id (ie was malformed)");
-													fail_return!();
-												}
-												let mut routes_converted = Vec::with_capacity(invoice_routes.len());
-												for node in invoice_routes.drain(..) {
-													routes_converted.push(router::RouteHint {
-														src_node_id: node.pubkey,
-														short_channel_id: slice_to_be64(&node.short_channel_id),
-														fee_base_msat: node.fee_base_msat as u64,
-														fee_proportional_millionths: node.fee_proportional_millionths,
-														cltv_expiry_delta: node.cltv_expiry_delta,
-														htlc_minimum_msat: 0,
-													});
-												}
-												route_hint = Some(routes_converted);
-											},
-											lightning_invoice::RawTaggedField::UnknownTag(_, _) => {
-												println!("Warning: invoice contained unknown fields");
-											},
+
+									if let Some(pubkey) = invoice.payee_pub_key() {
+										if *pubkey != invoice.recover_payee_pub_key() {
+											println!("Invoice had non-equal duplicative target node_id (ie was malformed)");
+											fail_return!();
 										}
 									}
-									if route_hint.is_none() { route_hint = Some(Vec::new()); }
-									if payment_hash.is_none() || final_cltv.is_none() {
-										println!("Invoice was missing some key bits");
+
+									let mut route_hint = Vec::with_capacity(invoice.routes().len());
+									for route in invoice.routes() {
+										if route.len() != 1 {
+											println!("Invoice contained multi-hop non-public route, ignoring as yet unsupported");
+										} else {
+											route_hint.push(router::RouteHint {
+												src_node_id: route[0].pubkey,
+												short_channel_id: slice_to_be64(&route[0].short_channel_id),
+												fee_base_msat: route[0].fee_base_msat,
+												fee_proportional_millionths: route[0].fee_proportional_millionths,
+												cltv_expiry_delta: route[0].cltv_expiry_delta,
+												htlc_minimum_msat: 0,
+											});
+										}
+									}
+
+									let final_cltv = invoice.expiry_time();
+									if final_cltv.is_none() {
+										println!("Invoice was missing final CLTV");
 										fail_return!();
 									}
-									match router.get_route(&target_node.unwrap(), Some(&channel_manager.list_usable_channels()), &route_hint.unwrap(), amt, final_cltv.unwrap()) {
+									if final_cltv.unwrap().seconds > std::u32::MAX as u64 {
+										println!("Invoice had garbage final cltv");
+										fail_return!();
+									}
+									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.unwrap().seconds as u32) {
 										Ok(route) => {
-											match channel_manager.send_payment(route, payment_hash.unwrap()) {
+											match channel_manager.send_payment(route, invoice.payment_hash().0) {
 												Ok(()) => {
 													println!("Sending {} msat", amt);
 													event_notify.unbounded_send(()).unwrap();

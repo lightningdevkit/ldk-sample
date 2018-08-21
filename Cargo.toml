@@ -5,11 +5,11 @@ authors = ["Matt Corallo <git@bluematt.me>"]
 build = "build.rs"
 
 [dependencies]
-bitcoin = "0.13"
+bitcoin = "0.14"
 bitcoin-bech32 = "0.7"
 lightning = { path = "../rust-lightning" }
 lightning-invoice = { path = "../rust-lightning-invoice" }
-secp256k1 = "0.9"
+secp256k1 = "0.11"
 hyper = "0.12"
 tokio-io = "0.1"
 tokio-fs = "0.1"
