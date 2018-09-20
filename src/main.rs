@@ -13,6 +13,7 @@ extern crate tokio_codec;
 extern crate bytes;
 extern crate base64;
 extern crate bitcoin_bech32;
+extern crate bitcoin_hashes;
 extern crate crypto;
 
 #[macro_use]
@@ -47,10 +48,14 @@ use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::util::events::{Event, EventsProvider};
 use lightning::util::logger::{Logger, Record};
+use lightning::util::ser::Readable;
 
 use bitcoin::blockdata;
 use bitcoin::network::{constants, serialize};
 use bitcoin::util::hash::Sha256dHash;
+
+use bitcoin_hashes::sha256::Sha256Hash;
+use bitcoin_hashes::Hash;
 
 use std::{env, mem};
 use std::collections::HashMap;
@@ -58,7 +63,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 use std::time::{Instant, Duration};
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::fs;
 
 const FEE_PROPORTIONAL_MILLIONTHS: u32 = 10;
@@ -228,7 +233,7 @@ impl ChannelMonitor {
 					if let Ok(txid) = Sha256dHash::from_hex(filename.split_at(64).0) {
 						if let Ok(index) = filename.split_at(65).1.split('.').next().unwrap().parse() {
 							if let Ok(contents) = fs::read(&file.path()) {
-								if let Some(loaded_monitor) = channelmonitor::ChannelMonitor::deserialize(&contents) {
+								if let Ok(loaded_monitor) = channelmonitor::ChannelMonitor::read(&mut Cursor::new(&contents)) {
 									if let Ok(_) = self.monitor.add_update_monitor(chain::transaction::OutPoint { txid, index }, loaded_monitor) {
 										loaded = true;
 									}
@@ -264,7 +269,6 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		// Note that this actually *isn't* enough (at least on Linux)! We need to fsync an fd with
 		// the containing dir, but Rust doesn't let us do that directly, sadly. TODO: Fix this with
 		// the libc crate!
-		let new_channel_data = monitor.serialize_for_disk();
 		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.be_hex_string(), funding_txo.index);
 		let tmp_filename = filename.clone() + ".tmp";
 
@@ -277,7 +281,7 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 
 		{
 			let mut f = try_fs!(fs::File::create(&tmp_filename));
-			try_fs!(f.write_all(&new_channel_data));
+			try_fs!(monitor.write_for_disk(&mut f));
 			try_fs!(f.sync_all());
 		}
 		// We don't need to create a backup if didn't already have the file, but in any other case
@@ -373,7 +377,7 @@ fn main() {
 	let _ = fs::create_dir(data_path.clone() + "/monitors"); // If it already exists, ignore, hopefully perms are ok
 
 	let logger = Arc::new(LogPrinter {});
-	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), logger.clone()));
+	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), network, logger.clone()));
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
 		file_prefix: data_path + "/monitors",
@@ -382,7 +386,7 @@ fn main() {
 	monitor.load_from_disk();
 
 	let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone(), logger.clone()).unwrap();
-	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret), logger.clone()));
+	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret), chain_monitor.clone(), logger.clone()));
 
 	let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
 		chan_handler: channel_manager.clone(),
@@ -578,13 +582,15 @@ fn main() {
 									}
 									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.unwrap().seconds as u32) {
 										Ok(route) => {
-											match channel_manager.send_payment(route, invoice.payment_hash().0) {
+											let mut payment_hash = [0; 32];
+											payment_hash.copy_from_slice(&invoice.payment_hash().0[..]);
+											match channel_manager.send_payment(route, payment_hash) {
 												Ok(()) => {
 													println!("Sending {} msat", amt);
 													event_notify.unbounded_send(()).unwrap();
 												},
 												Err(e) => {
-													println!("Failed to send HTLC: {}", e.err);
+													println!("Failed to send HTLC: {:?}", e);
 												}
 											}
 										},

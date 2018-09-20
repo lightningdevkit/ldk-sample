@@ -13,11 +13,13 @@ use futures::{Stream, Sink};
 use futures::sync::mpsc;
 
 use lightning::chain::chaininterface;
+use lightning::chain::chaininterface::ChainError;
 use lightning::util::logger::Logger;
 
 use bitcoin::blockdata::block::Block;
 use bitcoin::network::serialize::BitcoinHash;
 use bitcoin::network::serialize;
+use bitcoin::network::constants::Network;
 
 use std::collections::HashMap;
 use std::cmp;
@@ -88,9 +90,9 @@ pub struct ChainInterface {
 	rpc_client: Arc<RPCClient>,
 }
 impl ChainInterface {
-	pub fn new(rpc_client: Arc<RPCClient>, logger: Arc<Logger>) -> Self {
+	pub fn new(rpc_client: Arc<RPCClient>, network: Network, logger: Arc<Logger>) -> Self {
 		ChainInterface {
-			util: chaininterface::ChainWatchInterfaceUtil::new(logger),
+			util: chaininterface::ChainWatchInterfaceUtil::new(network, logger),
 			txn_to_broadcast: Mutex::new(HashMap::new()),
 			rpc_client,
 		}
@@ -109,8 +111,8 @@ impl ChainInterface {
 	}
 }
 impl chaininterface::ChainWatchInterface for ChainInterface {
-	fn install_watch_script(&self, script: &bitcoin::blockdata::script::Script) {
-		self.util.install_watch_script(script);
+	fn install_watch_tx(&self, txid: &bitcoin::util::hash::Sha256dHash, script: &bitcoin::blockdata::script::Script) {
+		self.util.install_watch_tx(txid, script);
 	}
 
 	fn install_watch_outpoint(&self, outpoint: (bitcoin::util::hash::Sha256dHash, u32), script_pubkey: &bitcoin::blockdata::script::Script) {
@@ -123,6 +125,10 @@ impl chaininterface::ChainWatchInterface for ChainInterface {
 
 	fn register_listener(&self, listener: std::sync::Weak<lightning::chain::chaininterface::ChainListener + 'static>) {
 		self.util.register_listener(listener);
+	}
+
+	fn get_chain_utxo(&self, genesis_hash: bitcoin::util::hash::Sha256dHash, unspent_tx_output_identifier: u64) -> Result<(bitcoin::blockdata::script::Script, u64), ChainError> {
+		self.util.get_chain_utxo(genesis_hash, unspent_tx_output_identifier)
 	}
 }
 impl chaininterface::BroadcasterInterface for ChainInterface {
