@@ -8,7 +8,7 @@ build = "build.rs"
 bitcoin = "0.14"
 bitcoin-bech32 = "0.7"
 bitcoin_hashes = { git = "https://github.com/rust-bitcoin/bitcoin_hashes" }
-lightning = "0.0.5"
+lightning = "0.0.6"
 lightning-invoice = { git = "https://github.com/rust-bitcoin/rust-lightning-invoice" }
 secp256k1 = "0.11"
 hyper = "0.12"

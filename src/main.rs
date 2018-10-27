@@ -39,17 +39,20 @@ use futures::future::Future;
 use futures::Stream;
 use futures::sync::mpsc;
 
-use secp256k1::key::{PublicKey, SecretKey};
+use secp256k1::key::PublicKey;
 use secp256k1::Secp256k1;
 
 use rand::{thread_rng, Rng};
 
 use lightning::chain;
+use lightning::chain::chaininterface;
+use lightning::chain::chaininterface::ChainWatchInterface;
+use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor};
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::util::events::{Event, EventsProvider};
 use lightning::util::logger::{Logger, Record};
-use lightning::util::ser::Readable;
+use lightning::util::ser::{ReadableArgs, Writeable};
 
 use bitcoin::blockdata;
 use bitcoin::network::{constants, serialize};
@@ -75,21 +78,24 @@ fn _check_usize_is_64() {
 
 struct EventHandler {
 	network: constants::Network,
+	file_prefix: String,
 	rpc_client: Arc<RPCClient>,
 	peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>,
 	channel_manager: Arc<channelmanager::ChannelManager>,
+	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
 	broadcaster: Arc<chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 	payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>,
 }
 impl EventHandler {
-	fn setup(network: constants::Network, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>) -> mpsc::UnboundedSender<()> {
-		let us = Arc::new(Self { network, rpc_client, peer_manager, channel_manager, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
+	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>) -> mpsc::UnboundedSender<()> {
+		let us = Arc::new(Self { network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::unbounded();
 		let self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
-			let events = us.peer_manager.get_and_clear_pending_events();
+			let mut events = us.channel_manager.get_and_clear_pending_events();
+			events.append(&mut us.monitor.get_and_clear_pending_events());
 			for event in events {
 				match event {
 					Event::FundingGenerationReady { temporary_channel_id, channel_value_satoshis, output_script, .. } => {
@@ -105,7 +111,7 @@ impl EventHandler {
 							us.rpc_client.make_rpc_call("fundrawtransaction", &[&format!("\"{}\"", tx_hex.as_str().unwrap())], false).and_then(move |funded_tx| {
 								let changepos = funded_tx["changepos"].as_i64().unwrap();
 								assert!(changepos == 0 || changepos == 1);
-								us.rpc_client.make_rpc_call("signrawtransaction", &[&format!("\"{}\"", funded_tx["hex"].as_str().unwrap())], false).and_then(move |signed_tx| {
+								us.rpc_client.make_rpc_call("signrawtransactionwithwallet", &[&format!("\"{}\"", funded_tx["hex"].as_str().unwrap())], false).and_then(move |signed_tx| {
 									assert_eq!(signed_tx["complete"].as_bool().unwrap(), true);
 									let tx: blockdata::transaction::Transaction = serialize::deserialize(&hex_to_vec(&signed_tx["hex"].as_str().unwrap()).unwrap()).unwrap();
 									let outpoint = chain::transaction::OutPoint {
@@ -136,7 +142,7 @@ impl EventHandler {
 								println!("Failed to claim money we were told we had?");
 							}
 						} else {
-							us.channel_manager.fail_htlc_backwards(&payment_hash);
+							us.channel_manager.fail_htlc_backwards(&payment_hash, channelmanager::PaymentFailReason::PreimageUnknown);
 							println!("Received payment but we didn't know the preimage :(");
 						}
 						self_sender.unbounded_send(()).unwrap();
@@ -144,8 +150,8 @@ impl EventHandler {
 					Event::PaymentSent { payment_preimage } => {
 						println!("Less money :(, proof: {}", hex_str(&payment_preimage));
 					},
-					Event::PaymentFailed { payment_hash } => {
-						println!("Send failed id {}!", hex_str(&payment_hash));
+					Event::PaymentFailed { payment_hash, rejected_by_dest } => {
+						println!("{} failed id {}!", if rejected_by_dest { "Send" } else { "Route" }, hex_str(&payment_hash));
 					},
 					Event::PendingHTLCsForwardable { time_forwardable } => {
 						let us = us.clone();
@@ -156,9 +162,32 @@ impl EventHandler {
 							Ok(())
 						}));
 					},
-					_ => panic!(),
+					Event::SpendableOutputs { mut outputs } => {
+						for output in outputs.drain(..) {
+							match output {
+								SpendableOutputDescriptor:: StaticOutput { outpoint, output } => {
+									println!("Got on-chain output we should claim...");
+									//TODO: Send back to Bitcoin Core!
+								},
+								SpendableOutputDescriptor::DynamicOutput { .. } => {
+									println!("Got on-chain output we should claim...");
+									//TODO: Send back to Bitcoin Core!
+								},
+							}
+						}
+					},
 				}
 			}
+
+			let filename = format!("{}/manager_data", us.file_prefix);
+			let tmp_filename = filename.clone() + ".tmp";
+
+			{
+				let mut f = fs::File::create(&tmp_filename).unwrap();
+				us.channel_manager.write(&mut f).unwrap();
+			}
+			fs::rename(&tmp_filename, &filename).unwrap();
+
 			future::Either::B(future::result(Ok(())))
 		}).then(|_| { Ok(()) }));
 		sender
@@ -168,11 +197,11 @@ impl EventHandler {
 struct ChannelMonitor {
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
 	file_prefix: String,
-	disk_write_mutex: Mutex<()>,
 }
 impl ChannelMonitor {
-	fn load_from_disk(&self) {
-		for file_option in fs::read_dir(&self.file_prefix).unwrap() {
+	fn load_from_disk(file_prefix: &String) -> Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor)> {
+		let mut res = Vec::new();
+		for file_option in fs::read_dir(file_prefix).unwrap() {
 			let mut loaded = false;
 			let file = file_option.unwrap();
 			if let Some(filename) = file.file_name().to_str() {
@@ -180,10 +209,10 @@ impl ChannelMonitor {
 					if let Ok(txid) = Sha256dHash::from_hex(filename.split_at(64).0) {
 						if let Ok(index) = filename.split_at(65).1.split('.').next().unwrap().parse() {
 							if let Ok(contents) = fs::read(&file.path()) {
-								if let Ok(loaded_monitor) = channelmonitor::ChannelMonitor::read(&mut Cursor::new(&contents)) {
-									if let Ok(_) = self.monitor.add_update_monitor(chain::transaction::OutPoint { txid, index }, loaded_monitor) {
-										loaded = true;
-									}
+								if let Ok((last_block_hash, loaded_monitor)) = <(Sha256dHash, channelmonitor::ChannelMonitor)>::read(&mut Cursor::new(&contents), Arc::new(LogPrinter{})) {
+									// TODO: Rescan from last_block_hash
+									res.push((chain::transaction::OutPoint { txid, index }, loaded_monitor));
+									loaded = true;
 								}
 							}
 						}
@@ -192,6 +221,15 @@ impl ChannelMonitor {
 			}
 			if !loaded {
 				println!("WARNING: Failed to read one of the channel monitor storage files! Check perms!");
+			}
+		}
+		res
+	}
+
+	fn load_from_vec(&self, mut monitors: Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor)>) {
+		for (outpoint, monitor) in monitors.drain(..) {
+			if let Err(_) = self.monitor.add_update_monitor(outpoint, monitor) {
+				panic!("Failed to load monitor that deserialized");
 			}
 		}
 	}
@@ -206,7 +244,7 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 			($res: expr) => {
 				match $res {
 					Ok(res) => res,
-					Err(_) => return Err(channelmonitor::ChannelMonitorUpdateErr::TemporaryFailure),
+					Err(_) => return Err(channelmonitor::ChannelMonitorUpdateErr::PermanentFailure),
 				}
 			}
 		}
@@ -219,13 +257,6 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.be_hex_string(), funding_txo.index);
 		let tmp_filename = filename.clone() + ".tmp";
 
-		//TODO: This actually exposes a bug in the rust-lightning API...instead of
-		//SimpleManyChannelMonitor returning the *combined* filter, we blindly write the newest
-		//filter to disk (possibly due to races actually a slightly out-of-date one!). The API
-		//really should be something like calling SimpleManyChannelMonitor to update the filter and
-		//then getting back a serialized copy of it to be sent to watchtowers/disk!
-		let _lock = self.disk_write_mutex.lock().unwrap();
-
 		{
 			let mut f = try_fs!(fs::File::create(&tmp_filename));
 			try_fs!(monitor.write_for_disk(&mut f));
@@ -235,7 +266,7 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		// try to create the backup and expect failure on fs::copy() if eg there's a perms issue.
 		let need_bk = match fs::metadata(&filename) {
 			Ok(data) => {
-				if !data.is_file() { return Err(channelmonitor::ChannelMonitorUpdateErr::TemporaryFailure); }
+				if !data.is_file() { return Err(channelmonitor::ChannelMonitorUpdateErr::PermanentFailure); }
 				true
 			},
 			Err(e) => match e.kind() {
@@ -266,7 +297,9 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 struct LogPrinter {}
 impl Logger for LogPrinter {
 	fn log(&self, record: &Record) {
-		println!("{:<5} [{} : {}, {}] {}", record.level.to_string(), record.module_path, record.file, record.line, record.args);
+		if !record.args.to_string().contains("Received message of type 258") && !record.args.to_string().contains("Received message of type 256") && !record.args.to_string().contains("Received message of type 257") {
+			println!("{:<5} [{} : {}, {}] {}", record.level.to_string(), record.module_path, record.file, record.line, record.args);
+		}
 	}
 }
 
@@ -310,12 +343,6 @@ fn main() {
 		panic!("LOL, you're insane");
 	}
 
-	let our_node_secret = {
-		let mut key = [0; 32];
-		thread_rng().fill_bytes(&mut key);
-		SecretKey::from_slice(&secp_ctx, &key).unwrap()
-	};
-
 	let data_path = env::args().skip(2).next().unwrap();
 	if !fs::metadata(&data_path).unwrap().is_dir() {
 		println!("Need storage_directory_path to exist and be a directory (or symlink to one)");
@@ -324,26 +351,68 @@ fn main() {
 	let _ = fs::create_dir(data_path.clone() + "/monitors"); // If it already exists, ignore, hopefully perms are ok
 
 	let logger = Arc::new(LogPrinter {});
+
+	let our_node_seed = if let Ok(seed) = fs::read(data_path.clone() + "/key_seed") {
+		assert_eq!(seed.len(), 32);
+		let mut key = [0; 32];
+		key.copy_from_slice(&seed);
+		key
+	} else {
+		let mut key = [0; 32];
+		thread_rng().fill_bytes(&mut key);
+		let mut f = fs::File::create(data_path.clone() + "/key_seed").unwrap();
+		f.write_all(&key).expect("Failed to write seed to disk");
+		f.sync_all().expect("Failed to sync seed to disk");
+		key
+	};
+	let keys = Arc::new(KeysManager::new(&our_node_seed, network, logger.clone()));
 	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), network, logger.clone()));
-	let monitor = Arc::new(ChannelMonitor {
-		monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
-		file_prefix: data_path + "/monitors",
-		disk_write_mutex: Mutex::new(()),
-	});
-	monitor.load_from_disk();
-
-	let channel_manager: Arc<_> = channelmanager::ChannelManager::new(our_node_secret, FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor, chain_monitor.clone(), chain_monitor.clone(), logger.clone()).unwrap();
-	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &our_node_secret), chain_monitor.clone(), logger.clone()));
-
-	let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
-		chan_handler: channel_manager.clone(),
-		route_handler: router.clone(),
-	}, our_node_secret, logger.clone()));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
+		let monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
+		let monitor = Arc::new(ChannelMonitor {
+			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
+			file_prefix: data_path.clone() + "/monitors",
+		});
+
+		let channel_manager = if let Ok(mut f) = fs::File::open(data_path.clone() + "/manager_data") {
+			let (last_block_hash, manager) = {
+				let mut monitors_refs = HashMap::new();
+				for (outpoint, monitor) in monitors_loaded.iter() {
+					monitors_refs.insert(*outpoint, monitor);
+				}
+				<(Sha256dHash, channelmanager::ChannelManager)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
+					keys_manager: keys.clone(),
+					fee_estimator: fee_estimator.clone(),
+					monitor: monitor.clone(),
+					chain_monitor: chain_monitor.clone(),
+					tx_broadcaster: chain_monitor.clone(),
+					logger: logger.clone(),
+					channel_monitors: &monitors_refs,
+				}).expect("Failed to deserialize channel manager")
+			};
+			monitor.load_from_vec(monitors_loaded);
+			//TODO: Rescan
+			let manager = Arc::new(manager);
+			let manager_as_listener: Arc<chaininterface::ChainListener> = manager.clone();
+			chain_monitor.register_listener(Arc::downgrade(&manager_as_listener));
+			manager
+		} else {
+			if !monitors_loaded.is_empty() {
+				panic!("Found some channel monitors but no channel state!");
+			}
+			channelmanager::ChannelManager::new(FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone()).unwrap()
+		};
+		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()));
+
+		let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
+			chan_handler: channel_manager.clone(),
+			route_handler: router.clone(),
+		}, keys.get_node_secret(), logger.clone()));
+
 		let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
-		let event_notify = EventHandler::setup(network, rpc_client.clone(), peer_manager.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
+		let event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
 
 		let listener = tokio::net::TcpListener::bind(&"0.0.0.0:9735".parse().unwrap()).unwrap();
 
@@ -360,13 +429,12 @@ fn main() {
 		spawn_chain_monitor(fee_estimator, rpc_client, chain_monitor, event_notify.clone());
 
 		tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::new(1, 0)).for_each(move |_| {
-			//TODO: Blocked on adding txn broadcasting to rest interface:
-			//      Regularly poll chain_monitor.txn_to_broadcast and send them out
+			//TODO: Regularly poll chain_monitor.txn_to_broadcast and send them out
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
 		let mut outbound_id = 1;
-		println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &our_node_secret).serialize()));
+		println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()).serialize()));
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 		println!("'n pubkey value push_value' Create a channel with the given connected node (by pubkey), value in satoshis, and push the given msat value");
@@ -412,7 +480,7 @@ fn main() {
 						match hex_to_compressed_pubkey(line.split_at(2).1) {
 							Some(pk) => {
 								if line.as_bytes()[2 + 33*2] == ' ' as u8 {
-									let mut args = line.split_at(2).1.split(' ');
+									let mut args = line.split_at(2 + 33*2 + 1).1.split(' ');
 									if let Some(value_str) = args.next() {
 										if let Some(push_str) = args.next() {
 											if let Ok(value) = value_str.parse() {
@@ -424,8 +492,8 @@ fn main() {
 													event_notify.unbounded_send(()).unwrap();
 												} else { println!("Couldn't parse third argument into a push value"); }
 											} else { println!("Couldn't parse second argument into a value"); }
-										} else { println!("Couldn't parse third argument into a push value"); }
-									} else { println!("Couldn't parse second argument into a value"); }
+										} else { println!("Couldn't read third argument"); }
+									} else { println!("Couldn't read second argument"); }
 								} else { println!("Invalid line, should be n pubkey value"); }
 							},
 							None => println!("Bad PubKey for remote node"),
