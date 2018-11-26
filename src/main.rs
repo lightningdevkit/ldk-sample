@@ -55,6 +55,7 @@ use bitcoin::blockdata;
 use bitcoin::network::constants;
 use bitcoin::consensus::encode;
 use bitcoin::util::hash::Sha256dHash;
+use bitcoin::util;
 
 use bitcoin_hashes::Hash;
 
@@ -165,9 +166,8 @@ impl EventHandler {
 					Event::SpendableOutputs { mut outputs } => {
 						for output in outputs.drain(..) {
 							match output {
-								SpendableOutputDescriptor:: StaticOutput { outpoint, output } => {
-									println!("Got on-chain output we should claim...");
-									//TODO: Send back to Bitcoin Core!
+								SpendableOutputDescriptor:: StaticOutput { outpoint, .. } => {
+									println!("Got on-chain output Bitcoin Core should know how to claim at {}:{}", hex_str(&outpoint.txid[..]), outpoint.vout);
 								},
 								SpendableOutputDescriptor::DynamicOutputP2WSH { .. } => {
 									println!("Got on-chain output we should claim...");
@@ -370,10 +370,21 @@ fn main() {
 		key
 	};
 	let keys = Arc::new(KeysManager::new(&our_node_seed, network, logger.clone()));
+	let (import_key_1, import_key_2) = util::bip32::ExtendedPrivKey::new_master(&secp_ctx, network, &our_node_seed).map(|extpriv| {
+		(extpriv.ckd_priv(&secp_ctx, util::bip32::ChildNumber::from_hardened_idx(1)).unwrap().secret_key,
+		 extpriv.ckd_priv(&secp_ctx, util::bip32::ChildNumber::from_hardened_idx(2)).unwrap().secret_key)
+	}).unwrap();
 	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), network, logger.clone()));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
+		tokio::spawn(rpc_client.make_rpc_call("importprivkey",
+				&[&("\"".to_string() + &util::privkey::Privkey::from_secret_key(import_key_1, true, network).to_wif() + "\""), "\"rust-lightning ChannelMonitor claim\"", "false"], false)
+				.then(|_| Ok(())));
+		tokio::spawn(rpc_client.make_rpc_call("importprivkey",
+				&[&("\"".to_string() + &util::privkey::Privkey::from_secret_key(import_key_2, true, network).to_wif() + "\""), "\"rust-lightning cooperative close\"", "false"], false)
+				.then(|_| Ok(())));
+
 		let monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
 		let monitor = Arc::new(ChannelMonitor {
 			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone()),
