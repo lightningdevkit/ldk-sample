@@ -14,7 +14,6 @@ extern crate bytes;
 extern crate base64;
 extern crate bitcoin_bech32;
 extern crate bitcoin_hashes;
-extern crate crypto;
 
 #[macro_use]
 extern crate serde_derive;
@@ -30,9 +29,6 @@ use chain_monitor::*;
 
 mod net_manager;
 use net_manager::{Connection, SocketDescriptor};
-
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
 
 use futures::future;
 use futures::future::Future;
@@ -53,10 +49,14 @@ use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::util::events::{Event, EventsProvider};
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning::util::config;
 
 use bitcoin::blockdata;
-use bitcoin::network::{constants, serialize};
+use bitcoin::network::constants;
+use bitcoin::consensus::encode;
 use bitcoin::util::hash::Sha256dHash;
+
+use bitcoin_hashes::Hash;
 
 use std::{env, mem};
 use std::collections::HashMap;
@@ -113,7 +113,7 @@ impl EventHandler {
 								assert!(changepos == 0 || changepos == 1);
 								us.rpc_client.make_rpc_call("signrawtransactionwithwallet", &[&format!("\"{}\"", funded_tx["hex"].as_str().unwrap())], false).and_then(move |signed_tx| {
 									assert_eq!(signed_tx["complete"].as_bool().unwrap(), true);
-									let tx: blockdata::transaction::Transaction = serialize::deserialize(&hex_to_vec(&signed_tx["hex"].as_str().unwrap()).unwrap()).unwrap();
+									let tx: blockdata::transaction::Transaction = encode::deserialize(&hex_to_vec(&signed_tx["hex"].as_str().unwrap()).unwrap()).unwrap();
 									let outpoint = chain::transaction::OutPoint {
 										txid: tx.txid(),
 										index: if changepos == 0 { 1 } else { 0 },
@@ -169,7 +169,11 @@ impl EventHandler {
 									println!("Got on-chain output we should claim...");
 									//TODO: Send back to Bitcoin Core!
 								},
-								SpendableOutputDescriptor::DynamicOutput { .. } => {
+								SpendableOutputDescriptor::DynamicOutputP2WSH { .. } => {
+									println!("Got on-chain output we should claim...");
+									//TODO: Send back to Bitcoin Core!
+								},
+								SpendableOutputDescriptor::DynamicOutputP2WPKH { .. } => {
 									println!("Got on-chain output we should claim...");
 									//TODO: Send back to Bitcoin Core!
 								},
@@ -235,7 +239,7 @@ impl ChannelMonitor {
 	}
 }
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-#[error "OSX creatively eats your data, using Lightning on OSX is unsafe"]
+#[error("OSX creatively eats your data, using Lightning on OSX is unsafe")]
 struct ERR {}
 
 impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
@@ -372,9 +376,13 @@ fn main() {
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
 		let monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
 		let monitor = Arc::new(ChannelMonitor {
-			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone()),
+			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone()),
 			file_prefix: data_path.clone() + "/monitors",
 		});
+
+		let mut config = config::UserConfig::new();
+		config.channel_options.fee_proportional_millionths = FEE_PROPORTIONAL_MILLIONTHS;
+		config.channel_options.announced_channel = ANNOUNCE_CHANNELS;
 
 		let channel_manager = if let Ok(mut f) = fs::File::open(data_path.clone() + "/manager_data") {
 			let (last_block_hash, manager) = {
@@ -389,6 +397,7 @@ fn main() {
 					chain_monitor: chain_monitor.clone(),
 					tx_broadcaster: chain_monitor.clone(),
 					logger: logger.clone(),
+					default_config: config,
 					channel_monitors: &monitors_refs,
 				}).expect("Failed to deserialize channel manager")
 			};
@@ -402,7 +411,7 @@ fn main() {
 			if !monitors_loaded.is_empty() {
 				panic!("Found some channel monitors but no channel state!");
 			}
-			channelmanager::ChannelManager::new(FEE_PROPORTIONAL_MILLIONTHS, ANNOUNCE_CHANNELS, network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone()).unwrap()
+			channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config).unwrap()
 		};
 		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()));
 
@@ -623,13 +632,10 @@ fn main() {
 					0x70 => { // 'p'
 						let mut payment_preimage = [0; 32];
 						thread_rng().fill_bytes(&mut payment_preimage);
-						let mut sha = Sha256::new();
-						sha.input(&payment_preimage);
-						let mut payment_hash = [0; 32];
-						sha.result(&mut payment_hash);
+						let payment_hash = bitcoin_hashes::sha256::Sha256Hash::hash(&payment_preimage);
 						//TODO: Store this on disk somewhere!
-						println!("payment_hash: {}", hex_str(&payment_hash));
-						payment_preimages.lock().unwrap().insert(payment_hash, payment_preimage);
+						payment_preimages.lock().unwrap().insert(payment_hash.0, payment_preimage);
+						println!("payment_hash: {}", hex_str(&payment_hash.0));
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
 				}

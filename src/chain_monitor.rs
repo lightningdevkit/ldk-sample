@@ -17,9 +17,9 @@ use lightning::chain::chaininterface::ChainError;
 use lightning::util::logger::Logger;
 
 use bitcoin::blockdata::block::Block;
-use bitcoin::network::serialize::BitcoinHash;
-use bitcoin::network::serialize;
+use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
+use bitcoin::util::hash::BitcoinHash;
 
 use std::collections::HashMap;
 use std::cmp;
@@ -103,7 +103,7 @@ impl ChainInterface {
 		{
 			let txn = self.txn_to_broadcast.lock().unwrap();
 			for (_, tx) in txn.iter() {
-				let tx_ser = "\"".to_string() + &serialize::serialize_hex(tx).unwrap() + "\"";
+				let tx_ser = "\"".to_string() + &encode::serialize_hex(tx) + "\"";
 				send_futures.push(self.rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).then(|_| -> Result<(), ()> { Ok(()) }));
 			}
 		}
@@ -133,8 +133,8 @@ impl chaininterface::ChainWatchInterface for ChainInterface {
 }
 impl chaininterface::BroadcasterInterface for ChainInterface {
 	fn broadcast_transaction (&self, tx: &bitcoin::blockdata::transaction::Transaction) {
-		self.txn_to_broadcast.lock().unwrap().insert(tx.bitcoin_hash(), tx.clone());
-		let tx_ser = "\"".to_string() + &serialize::serialize_hex(tx).unwrap() + "\"";
+		self.txn_to_broadcast.lock().unwrap().insert(tx.txid(), tx.clone());
+		let tx_ser = "\"".to_string() + &encode::serialize_hex(tx) + "\"";
 		tokio::spawn(self.rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).then(|_| { Ok(()) }));
 	}
 }
@@ -264,7 +264,7 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 						let block_height = *height;
 						let chain_monitor = chain_monitor.clone();
 						connect_futures.push(rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).then(move |blockhex| {
-							let block: Block = bitcoin::network::serialize::deserialize(&hex_to_vec(blockhex.unwrap().as_str().unwrap()).unwrap()).unwrap();
+							let block: Block = encode::deserialize(&hex_to_vec(blockhex.unwrap().as_str().unwrap()).unwrap()).unwrap();
 							println!("Connecting block {}", block.bitcoin_hash().be_hex_string());
 							chain_monitor.util.block_connected_with_filtering(&block, block_height);
 							Ok(())
