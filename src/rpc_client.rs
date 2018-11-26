@@ -54,7 +54,7 @@ impl RPCClient {
 	}
 
 	/// params entries must be pre-quoted if appropriate
-	/// may_fail is only used to change loggin
+	/// may_fail is only used to change logging
 	pub fn make_rpc_call(&self, method: &str, params: &[&str], may_fail: bool) -> impl Future<Item=serde_json::Value, Error=()> {
 		let mut request = hyper::Request::post(&self.uri);
 		let auth: &str = &self.basic_auth;
