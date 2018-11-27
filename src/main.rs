@@ -568,13 +568,13 @@ fn main() {
 									let amt = if let Some(amt) = invoice.amount_pico_btc().and_then(|amt| {
 										if amt % 10 != 0 { None } else { Some(amt / 10) }
 									}) {
-										if arg2.is_none() {
-											println!("Invoice was missing amount, you should specify one");
+										if arg2.is_some() {
+											println!("Invoice had amount, you shouldn't specify one");
 											fail_return!();
 										}
 										amt
 									} else {
-										match arg2.unwrap().parse() {
+										match arg2.expect("Invoice didn't have an amount, you should specify one").parse() {
 											Ok(amt) => amt,
 											Err(_) => {
 												println!("Provided amount was garbage");
