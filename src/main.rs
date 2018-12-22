@@ -46,6 +46,7 @@ use lightning::chain::chaininterface::ChainWatchInterface;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor};
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
+use lightning::ln::channelmanager::{PaymentHash, PaymentPreimage};
 use lightning::util::events::{Event, EventsProvider};
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
@@ -86,10 +87,10 @@ struct EventHandler {
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
 	broadcaster: Arc<chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
-	payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>,
+	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<[u8; 32], [u8; 32]>>>) -> mpsc::UnboundedSender<()> {
+	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::UnboundedSender<()> {
 		let us = Arc::new(Self { network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::unbounded();
 		let self_sender = sender.clone();
@@ -143,16 +144,16 @@ impl EventHandler {
 								println!("Failed to claim money we were told we had?");
 							}
 						} else {
-							us.channel_manager.fail_htlc_backwards(&payment_hash, channelmanager::PaymentFailReason::PreimageUnknown);
+							us.channel_manager.fail_htlc_backwards(&payment_hash, 0);
 							println!("Received payment but we didn't know the preimage :(");
 						}
 						self_sender.unbounded_send(()).unwrap();
 					},
 					Event::PaymentSent { payment_preimage } => {
-						println!("Less money :(, proof: {}", hex_str(&payment_preimage));
+						println!("Less money :(, proof: {}", hex_str(&payment_preimage.0));
 					},
 					Event::PaymentFailed { payment_hash, rejected_by_dest } => {
-						println!("{} failed id {}!", if rejected_by_dest { "Send" } else { "Route" }, hex_str(&payment_hash));
+						println!("{} failed id {}!", if rejected_by_dest { "Send" } else { "Route" }, hex_str(&payment_hash.0));
 					},
 					Event::PendingHTLCsForwardable { time_forwardable } => {
 						let us = us.clone();
@@ -295,6 +296,10 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 			try_fs!(fs::remove_file(&bk_filename));
 		}
 		self.monitor.add_update_monitor(funding_txo, monitor)
+	}
+
+	fn fetch_pending_htlc_updated(&self) -> Vec<channelmonitor::HTLCUpdate> {
+		self.monitor.fetch_pending_htlc_updated()
 	}
 }
 
@@ -611,14 +616,14 @@ fn main() {
 										println!("Invoice was missing final CLTV");
 										fail_return!();
 									}
-									if final_cltv.unwrap().seconds > std::u32::MAX as u64 {
+									if final_cltv.unwrap().as_seconds() > std::u32::MAX as u64 {
 										println!("Invoice had garbage final cltv");
 										fail_return!();
 									}
-									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.unwrap().seconds as u32) {
+									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.unwrap().as_seconds() as u32) {
 										Ok(route) => {
-											let mut payment_hash = [0; 32];
-											payment_hash.copy_from_slice(&invoice.payment_hash().0[..]);
+											let mut payment_hash = PaymentHash([0; 32]);
+											payment_hash.0.copy_from_slice(&invoice.payment_hash().0[..]);
 											match channel_manager.send_payment(route, payment_hash) {
 												Ok(()) => {
 													println!("Sending {} msat", amt);
@@ -643,9 +648,9 @@ fn main() {
 					0x70 => { // 'p'
 						let mut payment_preimage = [0; 32];
 						thread_rng().fill_bytes(&mut payment_preimage);
-						let payment_hash = bitcoin_hashes::sha256::Sha256Hash::hash(&payment_preimage);
+						let payment_hash = bitcoin_hashes::sha256::Hash::hash(&payment_preimage);
 						//TODO: Store this on disk somewhere!
-						payment_preimages.lock().unwrap().insert(payment_hash.0, payment_preimage);
+						payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.0), PaymentPreimage(payment_preimage));
 						println!("payment_hash: {}", hex_str(&payment_hash.0));
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
