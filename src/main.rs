@@ -139,12 +139,12 @@ impl EventHandler {
 						let images = us.payment_preimages.lock().unwrap();
 						if let Some(payment_preimage) = images.get(&payment_hash) {
 							if us.channel_manager.claim_funds(payment_preimage.clone()) {
-								println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash));
+								println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash.0));
 							} else {
 								println!("Failed to claim money we were told we had?");
 							}
 						} else {
-							us.channel_manager.fail_htlc_backwards(&payment_hash, 0);
+							us.channel_manager.fail_htlc_backwards(&payment_hash);
 							println!("Received payment but we didn't know the preimage :(");
 						}
 						self_sender.unbounded_send(()).unwrap();
@@ -375,7 +375,7 @@ fn main() {
 		key
 	};
 	let keys = Arc::new(KeysManager::new(&our_node_seed, network, logger.clone()));
-	let (import_key_1, import_key_2) = util::bip32::ExtendedPrivKey::new_master(&secp_ctx, network, &our_node_seed).map(|extpriv| {
+	let (import_key_1, import_key_2) = util::bip32::ExtendedPrivKey::new_master(network, &our_node_seed).map(|extpriv| {
 		(extpriv.ckd_priv(&secp_ctx, util::bip32::ChildNumber::from_hardened_idx(1)).unwrap().secret_key,
 		 extpriv.ckd_priv(&secp_ctx, util::bip32::ChildNumber::from_hardened_idx(2)).unwrap().secret_key)
 	}).unwrap();
@@ -488,7 +488,7 @@ fn main() {
 										match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
 											Ok(stream) => {
 												println!("connected, initiating handshake!");
-												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::current()).unwrap(), outbound_id);
+												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::default()).unwrap(), outbound_id);
 												outbound_id += 2;
 											},
 											Err(e) => {
@@ -650,8 +650,8 @@ fn main() {
 						thread_rng().fill_bytes(&mut payment_preimage);
 						let payment_hash = bitcoin_hashes::sha256::Hash::hash(&payment_preimage);
 						//TODO: Store this on disk somewhere!
-						payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.0), PaymentPreimage(payment_preimage));
-						println!("payment_hash: {}", hex_str(&payment_hash.0));
+						payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.into_inner()), PaymentPreimage(payment_preimage));
+						println!("payment_hash: {}", hex_str(&payment_hash.into_inner()));
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
 				}
