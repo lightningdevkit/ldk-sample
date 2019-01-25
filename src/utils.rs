@@ -1,6 +1,5 @@
 use bitcoin::util::hash::Sha256dHash;
 use secp256k1::key::PublicKey;
-use secp256k1::Secp256k1;
 
 pub fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
 	let mut out = Vec::with_capacity(hex.len() / 2);
@@ -53,7 +52,7 @@ pub fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
 		Some(bytes) => bytes,
 		None => return None
 	};
-	match PublicKey::from_slice(&Secp256k1::without_caps(), &data) {
+	match PublicKey::from_slice(&data) {
 		Ok(pk) => Some(pk),
 		Err(_) => None,
 	}
