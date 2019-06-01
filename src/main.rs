@@ -364,10 +364,7 @@ fn main() {
 
 	let port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
 		Some(Ok(p)) => p,
-		Some(Err(e)) => {
-			println!("Error parsing port.");
-			return;
-		},
+		Some(Err(e)) => panic!(e),
 		None => 9735,
 	};
 
