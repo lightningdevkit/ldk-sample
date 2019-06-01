@@ -586,7 +586,11 @@ fn main() {
 										}
 										amt
 									} else {
-										match arg2.expect("Invoice didn't have an amount, you should specify one").parse() {
+										if arg2.is_none() {
+											println!("Invoice didn't have an amount, you should specify one");
+											fail_return!();
+										}
+										match arg2.unwrap().parse() {
 											Ok(amt) => amt,
 											Err(_) => {
 												println!("Provided amount was garbage");
