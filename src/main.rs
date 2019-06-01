@@ -467,7 +467,7 @@ fn main() {
 		println!("'l p' List the node_ids of all connected peers");
 		println!("'l c' List details about all channels");
 		println!("'s invoice [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
-		println!("'p' Gets a new payment_hash for receiving funds");
+		println!("'p' Gets a new invoice for receiving funds");
 		print!("> "); std::io::stdout().flush().unwrap();
 		tokio::spawn(tokio_codec::FramedRead::new(tokio_fs::stdin(), tokio_codec::LinesCodec::new()).for_each(move |line| {
 			macro_rules! fail_return {
@@ -647,6 +647,21 @@ fn main() {
 						//TODO: Store this on disk somewhere!
 						payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.into_inner()), PaymentPreimage(payment_preimage));
 						println!("payment_hash: {}", hex_str(&payment_hash.into_inner()));
+
+						let invoice_res = lightning_invoice::InvoiceBuilder::new(match network {
+								constants::Network::Bitcoin => lightning_invoice::Currency::Bitcoin,
+								constants::Network::Testnet => lightning_invoice::Currency::BitcoinTestnet,
+								constants::Network::Regtest => lightning_invoice::Currency::BitcoinTestnet, //TODO
+							}).payment_hash(payment_hash).description("rust-lightning-bitcoinrpc invoice".to_string())
+							//.route(chans)
+							.current_timestamp()
+							.build_signed(|msg_hash| {
+								secp_ctx.sign_recoverable(msg_hash, &keys.get_node_secret())
+							});
+						match invoice_res {
+							Ok(invoice) => println!("Invoice: {}", invoice),
+							Err(e) => println!("Error creating invoice: {:?}", e),
+						}
 					},
 					_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
 				}
