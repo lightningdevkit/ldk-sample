@@ -1,4 +1,3 @@
-use bitcoin::util::hash::Sha256dHash;
 use secp256k1::key::PublicKey;
 
 pub fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
@@ -20,31 +19,6 @@ pub fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
 	}
 
 	Some(out)
-}
-
-pub fn hex_to_u256_rev(hex: &str) -> Option<Sha256dHash> {
-	if hex.len() != 64 { return None; }
-
-	let mut out = [0; 32];
-
-	let mut b = 0;
-	let mut outpos = 32;
-	for (idx, c) in hex.as_bytes().iter().enumerate() {
-		b <<= 4;
-		match *c {
-			b'A'...b'F' => b |= c - b'A' + 10,
-			b'a'...b'f' => b |= c - b'a' + 10,
-			b'0'...b'9' => b |= c - b'0',
-			_ => return None,
-		}
-		if (idx & 1) == 1 {
-			outpos -= 1;
-			out[outpos] = b;
-			b = 0;
-		}
-	}
-
-	Some(Sha256dHash::from_data(&out))
 }
 
 pub fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
