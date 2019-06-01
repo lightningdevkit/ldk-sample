@@ -52,6 +52,8 @@ use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
 use lightning::util::config;
 
+use lightning_invoice::MinFinalCltvExpiry;
+
 use bitcoin::util::bip32;
 use bitcoin::blockdata;
 use bitcoin::network::constants;
@@ -608,16 +610,12 @@ fn main() {
 										}
 									}
 
-									let final_cltv = invoice.expiry_time();
-									if final_cltv.is_none() {
-										println!("Invoice was missing final CLTV");
-										fail_return!();
-									}
-									if final_cltv.unwrap().as_seconds() > std::u32::MAX as u64 {
+									let final_cltv = invoice.min_final_cltv_expiry().unwrap_or(&MinFinalCltvExpiry(9));
+									if final_cltv.0 > std::u32::MAX as u64 {
 										println!("Invoice had garbage final cltv");
 										fail_return!();
 									}
-									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.unwrap().as_seconds() as u32) {
+									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.0 as u32) {
 										Ok(route) => {
 											let mut payment_hash = PaymentHash([0; 32]);
 											payment_hash.0.copy_from_slice(&invoice.payment_hash().0[..]);
