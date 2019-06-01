@@ -464,6 +464,7 @@ fn main() {
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 		println!("'n pubkey value push_value' Create a channel with the given connected node (by pubkey), value in satoshis, and push the given msat value");
 		println!("'k channel_id' Close a channel with the given id");
+		println!("'f all' Force close all channels, closing to chain");
 		println!("'l p' List the node_ids of all connected peers");
 		println!("'l c' List details about all channels");
 		println!("'s invoice [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
@@ -537,6 +538,13 @@ fn main() {
 								}
 							} else { println!("Bad channel_id hex"); }
 						} else { println!("Bad channel_id hex"); }
+					},
+					0x66 => { // 'f'
+						if line.len() == 5 && line.as_bytes()[2] == 'a' as u8 && line.as_bytes()[3] == 'l' as u8 && line.as_bytes()[4] == 'l' as u8 {
+							channel_manager.force_close_all_channels();
+						} else {
+							println!("Single-channel force-close not yet implemented");
+						}
 					},
 					0x6c => { // 'l'
 						if line.as_bytes()[2] == 'p' as u8 {
