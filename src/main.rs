@@ -2,6 +2,7 @@ extern crate futures;
 extern crate hyper;
 extern crate serde_json;
 extern crate lightning;
+extern crate lightning_net_tokio;
 extern crate lightning_invoice;
 extern crate rand;
 extern crate secp256k1;
@@ -27,8 +28,7 @@ use utils::*;
 mod chain_monitor;
 use chain_monitor::*;
 
-mod net_manager;
-use net_manager::{Connection, SocketDescriptor};
+use lightning_net_tokio::{Connection, SocketDescriptor};
 
 use futures::future;
 use futures::future::Future;
@@ -52,13 +52,14 @@ use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
 use lightning::util::config;
 
+use bitcoin::util::bip32;
 use bitcoin::blockdata;
 use bitcoin::network::constants;
 use bitcoin::consensus::encode;
-use bitcoin::util::hash::Sha256dHash;
-use bitcoin::util;
 
 use bitcoin_hashes::Hash;
+use bitcoin_hashes::sha256d::Hash as Sha256dHash;
+use bitcoin_hashes::hex::{ToHex, FromHex};
 
 use std::{env, mem};
 use std::collections::HashMap;
@@ -90,10 +91,10 @@ struct EventHandler {
 	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::UnboundedSender<()> {
+	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
 		let us = Arc::new(Self { network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
-		let (sender, receiver) = mpsc::unbounded();
-		let self_sender = sender.clone();
+		let (sender, receiver) = mpsc::channel(2);
+		let mut self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
 			let mut events = us.channel_manager.get_and_clear_pending_events();
@@ -108,7 +109,7 @@ impl EventHandler {
 							}
 						).expect("LN funding tx should always be to a SegWit output").to_address();
 						let us = us.clone();
-						let self_sender = self_sender.clone();
+						let mut self_sender = self_sender.clone();
 						return future::Either::A(us.rpc_client.make_rpc_call("createrawtransaction", &["[]", &format!("{{\"{}\": {}}}", addr, channel_value_satoshis as f64 / 1_000_000_00.0)], false).and_then(move |tx_hex| {
 							us.rpc_client.make_rpc_call("fundrawtransaction", &[&format!("\"{}\"", tx_hex.as_str().unwrap())], false).and_then(move |funded_tx| {
 								let changepos = funded_tx["changepos"].as_i64().unwrap();
@@ -122,7 +123,7 @@ impl EventHandler {
 									};
 									us.channel_manager.funding_transaction_generated(&temporary_channel_id, outpoint);
 									us.txn_to_broadcast.lock().unwrap().insert(outpoint, tx);
-									self_sender.unbounded_send(()).unwrap();
+									let _ = self_sender.try_send(());
 									println!("Generated funding tx!");
 									Ok(())
 								})
@@ -147,7 +148,7 @@ impl EventHandler {
 							us.channel_manager.fail_htlc_backwards(&payment_hash);
 							println!("Received payment but we didn't know the preimage :(");
 						}
-						self_sender.unbounded_send(()).unwrap();
+						let _ = self_sender.try_send(());
 					},
 					Event::PaymentSent { payment_preimage } => {
 						println!("Less money :(, proof: {}", hex_str(&payment_preimage.0));
@@ -157,10 +158,10 @@ impl EventHandler {
 					},
 					Event::PendingHTLCsForwardable { time_forwardable } => {
 						let us = us.clone();
-						let self_sender = self_sender.clone();
+						let mut self_sender = self_sender.clone();
 						tokio::spawn(tokio::timer::Delay::new(time_forwardable).then(move |_| {
 							us.channel_manager.process_pending_htlc_forwards();
-							self_sender.unbounded_send(()).unwrap();
+							let _ = self_sender.try_send(());
 							Ok(())
 						}));
 					},
@@ -259,7 +260,7 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		// Note that this actually *isn't* enough (at least on Linux)! We need to fsync an fd with
 		// the containing dir, but Rust doesn't let us do that directly, sadly. TODO: Fix this with
 		// the libc crate!
-		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.be_hex_string(), funding_txo.index);
+		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.to_hex(), funding_txo.index);
 		let tmp_filename = filename.clone() + ".tmp";
 
 		{
@@ -375,24 +376,24 @@ fn main() {
 		key
 	};
 	let keys = Arc::new(KeysManager::new(&our_node_seed, network, logger.clone()));
-	let (import_key_1, import_key_2) = util::bip32::ExtendedPrivKey::new_master(network, &our_node_seed).map(|extpriv| {
-		(extpriv.ckd_priv(&secp_ctx, util::bip32::ChildNumber::from_hardened_idx(1)).unwrap().secret_key,
-		 extpriv.ckd_priv(&secp_ctx, util::bip32::ChildNumber::from_hardened_idx(2)).unwrap().secret_key)
+	let (import_key_1, import_key_2) = bip32::ExtendedPrivKey::new_master(network, &our_node_seed).map(|extpriv| {
+		(extpriv.ckd_priv(&secp_ctx, bip32::ChildNumber::from_hardened_idx(1).unwrap()).unwrap().private_key.key,
+		 extpriv.ckd_priv(&secp_ctx, bip32::ChildNumber::from_hardened_idx(2).unwrap()).unwrap().private_key.key)
 	}).unwrap();
 	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), network, logger.clone()));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
 		tokio::spawn(rpc_client.make_rpc_call("importprivkey",
-				&[&("\"".to_string() + &util::privkey::Privkey::from_secret_key(import_key_1, true, network).to_wif() + "\""), "\"rust-lightning ChannelMonitor claim\"", "false"], false)
+				&[&("\"".to_string() + &bitcoin::util::key::PrivateKey{ key: import_key_1, compressed: true, network}.to_wif() + "\""), "\"rust-lightning ChannelMonitor claim\"", "false"], false)
 				.then(|_| Ok(())));
 		tokio::spawn(rpc_client.make_rpc_call("importprivkey",
-				&[&("\"".to_string() + &util::privkey::Privkey::from_secret_key(import_key_2, true, network).to_wif() + "\""), "\"rust-lightning cooperative close\"", "false"], false)
+				&[&("\"".to_string() + &bitcoin::util::key::PrivateKey{ key: import_key_2, compressed: true, network}.to_wif() + "\""), "\"rust-lightning cooperative close\"", "false"], false)
 				.then(|_| Ok(())));
 
 		let monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
 		let monitor = Arc::new(ChannelMonitor {
-			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone()),
+			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone()),
 			file_prefix: data_path.clone() + "/monitors",
 		});
 
@@ -437,17 +438,15 @@ fn main() {
 		}, keys.get_node_secret(), logger.clone()));
 
 		let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
-		let event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
+		let mut event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
 
 		let listener = tokio::net::TcpListener::bind(&"0.0.0.0:9735".parse().unwrap()).unwrap();
 
 		let peer_manager_listener = peer_manager.clone();
 		let event_listener = event_notify.clone();
-		let mut inbound_id = 0;
 		tokio::spawn(listener.incoming().for_each(move |sock| {
 			println!("Got new inbound connection, waiting on them to start handshake...");
-			Connection::setup_inbound(peer_manager_listener.clone(), event_listener.clone(), sock, inbound_id);
-			inbound_id += 2;
+			Connection::setup_inbound(peer_manager_listener.clone(), event_listener.clone(), sock);
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
@@ -458,7 +457,6 @@ fn main() {
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
-		let mut outbound_id = 1;
 		println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()).serialize()));
 		println!("Started interactive shell! Commands:");
 		println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
@@ -488,8 +486,7 @@ fn main() {
 										match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
 											Ok(stream) => {
 												println!("connected, initiating handshake!");
-												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::default()).unwrap(), outbound_id);
-												outbound_id += 2;
+												Connection::setup_outbound(peer_manager.clone(), event_notify.clone(), pk, tokio::net::TcpStream::from_std(stream, &tokio::reactor::Handle::default()).unwrap());
 											},
 											Err(e) => {
 												println!("connection failed {:?}!", e);
@@ -514,7 +511,7 @@ fn main() {
 														Ok(_) => println!("Channel created, sending open_channel!"),
 														Err(e) => println!("Failed to open channel: {:?}!", e),
 													}
-													event_notify.unbounded_send(()).unwrap();
+													let _ = event_notify.try_send(());
 												} else { println!("Couldn't parse third argument into a push value"); }
 											} else { println!("Couldn't parse second argument into a value"); }
 										} else { println!("Couldn't read third argument"); }
@@ -532,7 +529,7 @@ fn main() {
 								match channel_manager.close_channel(&channel_id) {
 									Ok(()) => {
 										println!("Ok, channel closing!");
-										event_notify.unbounded_send(()).unwrap();
+										let _ = event_notify.try_send(());
 									},
 									Err(e) => println!("Failed to close channel: {:?}", e),
 								}
@@ -627,7 +624,7 @@ fn main() {
 											match channel_manager.send_payment(route, payment_hash) {
 												Ok(()) => {
 													println!("Sending {} msat", amt);
-													event_notify.unbounded_send(()).unwrap();
+													let _ = event_notify.try_send(());
 												},
 												Err(e) => {
 													println!("Failed to send HTLC: {:?}", e);

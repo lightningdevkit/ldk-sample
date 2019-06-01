@@ -2,11 +2,12 @@ use base64;
 use hyper;
 use serde_json;
 
+use bitcoin_hashes::sha256d::Hash as Sha256dHash;
+use bitcoin_hashes::hex::FromHex;
+
 use bitcoin::blockdata::block::BlockHeader;
 
 use futures::{future, Future, Stream};
-
-use utils::hex_to_u256_rev;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -27,8 +28,8 @@ impl GetHeaderResponse {
 	pub fn to_block_header(&self) -> BlockHeader {
 		BlockHeader {
 			version: self.version,
-			prev_blockhash: hex_to_u256_rev(&self.previousblockhash).unwrap(),
-			merkle_root: hex_to_u256_rev(&self.merkleroot).unwrap(),
+			prev_blockhash: Sha256dHash::from_hex(&self.previousblockhash).unwrap(),
+			merkle_root: Sha256dHash::from_hex(&self.merkleroot).unwrap(),
 			time: self.time,
 			bits: self.bits.parse().unwrap(),
 			nonce: self.nonce,
