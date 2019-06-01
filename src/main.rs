@@ -316,7 +316,7 @@ impl Logger for LogPrinter {
 }
 
 fn main() {
-	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port storage_directory_path");
+	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port storage_directory_path [port]");
 	if env::args().len() < 3 { return; }
 
 	let rpc_client = {
@@ -361,6 +361,15 @@ fn main() {
 		return;
 	}
 	let _ = fs::create_dir(data_path.clone() + "/monitors"); // If it already exists, ignore, hopefully perms are ok
+
+	let port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
+		Some(Ok(p)) => p,
+		Some(Err(e)) => {
+			println!("Error parsing port.");
+			return;
+		},
+		None => 9735,
+	};
 
 	let logger = Arc::new(LogPrinter {});
 
@@ -442,7 +451,7 @@ fn main() {
 		let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
 		let mut event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
 
-		let listener = tokio::net::TcpListener::bind(&"0.0.0.0:9735".parse().unwrap()).unwrap();
+		let listener = tokio::net::TcpListener::bind(&format!("0.0.0.0:{}", port).parse().unwrap()).unwrap();
 
 		let peer_manager_listener = peer_manager.clone();
 		let event_listener = event_notify.clone();
