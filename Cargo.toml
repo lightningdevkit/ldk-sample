@@ -27,8 +27,3 @@ base64 = "0.9"
 
 [build-dependencies]
 cc = "1.0"
-
-[profile.dev]
-panic = "abort"
-[profile.release]
-panic = "abort"
