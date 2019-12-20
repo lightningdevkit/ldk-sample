@@ -3,7 +3,6 @@ use rpc_client::*;
 use utils::hex_to_vec;
 
 use bitcoin;
-use lightning;
 use serde_json;
 use tokio;
 
@@ -16,10 +15,11 @@ use futures::{Stream, Sink};
 use futures::sync::mpsc;
 
 use lightning::chain::chaininterface;
-use lightning::chain::chaininterface::ChainError;
+use lightning::chain::chaininterface::{BlockNotifier, ChainError};
 use lightning::util::logger::Logger;
 
 use bitcoin::blockdata::block::Block;
+use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
 use bitcoin::util::hash::BitcoinHash;
@@ -30,7 +30,6 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 use std::time::{Instant, Duration};
-use std;
 
 pub struct FeeEstimator {
 	background_est: AtomicUsize,
@@ -46,7 +45,7 @@ impl FeeEstimator {
 		}
 	}
 	fn update_values(us: Arc<Self>, rpc_client: &RPCClient) -> impl Future<Item=(), Error=()> {
-		let mut reqs: Vec<Box<Future<Item=(), Error=()> + Send>> = Vec::with_capacity(3);
+		let mut reqs: Vec<Box<dyn Future<Item=(), Error=()> + Send>> = Vec::with_capacity(3);
 		{
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""], false).and_then(move |v| {
@@ -93,7 +92,7 @@ pub struct ChainInterface {
 	rpc_client: Arc<RPCClient>,
 }
 impl ChainInterface {
-	pub fn new(rpc_client: Arc<RPCClient>, network: Network, logger: Arc<Logger>) -> Self {
+	pub fn new(rpc_client: Arc<RPCClient>, network: Network, logger: Arc<dyn Logger>) -> Self {
 		ChainInterface {
 			util: chaininterface::ChainWatchInterfaceUtil::new(network, logger),
 			txn_to_broadcast: Mutex::new(HashMap::new()),
@@ -126,12 +125,16 @@ impl chaininterface::ChainWatchInterface for ChainInterface {
 		self.util.watch_all_txn();
 	}
 
-	fn register_listener(&self, listener: std::sync::Weak<lightning::chain::chaininterface::ChainListener + 'static>) {
-		self.util.register_listener(listener);
-	}
-
 	fn get_chain_utxo(&self, genesis_hash: bitcoin_hashes::sha256d::Hash, unspent_tx_output_identifier: u64) -> Result<(bitcoin::blockdata::script::Script, u64), ChainError> {
 		self.util.get_chain_utxo(genesis_hash, unspent_tx_output_identifier)
+	}
+
+	fn filter_block<'a>(&self, block: &'a Block) -> (Vec<&'a Transaction>, Vec<u32>) {
+		self.util.filter_block(block)
+	}
+
+	fn reentered(&self) -> usize {
+		self.util.reentered()
 	}
 }
 impl chaininterface::BroadcasterInterface for ChainInterface {
@@ -143,7 +146,7 @@ impl chaininterface::BroadcasterInterface for ChainInterface {
 }
 
 enum ForkStep {
-	DisconnectBlock(bitcoin::blockdata::block::BlockHeader),
+	DisconnectBlock((bitcoin::blockdata::block::BlockHeader, u32)),
 	ConnectBlock((String, u32)),
 }
 fn find_fork_step(steps_tx: mpsc::Sender<ForkStep>, current_header: GetHeaderResponse, target_header_opt: Option<(String, GetHeaderResponse)>, rpc_client: Arc<RPCClient>) {
@@ -167,7 +170,7 @@ fn find_fork_step(steps_tx: mpsc::Sender<ForkStep>, current_header: GetHeaderRes
 	} else {
 		let target_header = target_header_opt.unwrap().1;
 		// Everything below needs to disconnect target, so go ahead and do that now
-		tokio::spawn(steps_tx.send(ForkStep::DisconnectBlock(target_header.to_block_header())).then(move |send_res| {
+		tokio::spawn(steps_tx.send(ForkStep::DisconnectBlock((target_header.to_block_header(), target_header.height))).then(move |send_res| {
 			if let Ok(steps_tx) = send_res {
 				future::Either::A(if target_header.previousblockhash == current_header.previousblockhash {
 					// Found the fork, also connect current and finish!
@@ -233,14 +236,15 @@ fn find_fork(mut steps_tx: mpsc::Sender<ForkStep>, current_hash: String, target_
 	}));
 }
 
-pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_monitor: Arc<ChainInterface>, event_notify: mpsc::Sender<()>) {
+pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: Arc<BlockNotifier>, event_notify: mpsc::Sender<()>) {
 	tokio::spawn(FeeEstimator::update_values(fee_estimator.clone(), &rpc_client));
 	let cur_block = Arc::new(Mutex::new(String::from("")));
 	tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::from_secs(1)).for_each(move |_| {
 		let cur_block = cur_block.clone();
 		let fee_estimator = fee_estimator.clone();
 		let rpc_client = rpc_client.clone();
-		let chain_monitor = chain_monitor.clone();
+		let chain_interface = chain_interface.clone();
+		let chain_notifier = chain_notifier.clone();
 		let mut event_notify = event_notify.clone();
 		rpc_client.make_rpc_call("getblockchaininfo", &[], false).and_then(move |v| {
 			let new_block = v["bestblockhash"].as_str().unwrap().to_string();
@@ -256,20 +260,20 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 			future::Either::B(events_rx.collect().then(move |events_res| {
 				let events = events_res.unwrap();
 				for event in events.iter().rev() {
-					if let &ForkStep::DisconnectBlock(ref header) = &event {
+					if let &ForkStep::DisconnectBlock((ref header, ref height)) = &event {
 						println!("Disconnecting block {}", header.bitcoin_hash().to_hex());
-						chain_monitor.util.block_disconnected(header);
+						chain_notifier.block_disconnected(header, *height);
 					}
 				}
 				let mut connect_futures = Vec::with_capacity(events.len());
 				for event in events.iter().rev() {
 					if let &ForkStep::ConnectBlock((ref hash, height)) = &event {
 						let block_height = *height;
-						let chain_monitor = chain_monitor.clone();
+						let chain_notifier = chain_notifier.clone();
 						connect_futures.push(rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).then(move |blockhex| {
 							let block: Block = encode::deserialize(&hex_to_vec(blockhex.unwrap().as_str().unwrap()).unwrap()).unwrap();
 							println!("Connecting block {}", block.bitcoin_hash().to_hex());
-							chain_monitor.util.block_connected_with_filtering(&block, block_height);
+							chain_notifier.block_connected(&block, block_height);
 							Ok(())
 						}));
 					}
@@ -277,7 +281,7 @@ pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPC
 				future::join_all(connect_futures)
 					.then(move |_: Result<Vec<()>, ()>| { FeeEstimator::update_values(fee_estimator, &rpc_client) })
 					.then(move |_| { let _ = event_notify.try_send(()); Ok(()) })
-					.then(move |_: Result<(), ()>| { chain_monitor.rebroadcast_txn() })
+					.then(move |_: Result<(), ()>| { chain_interface.rebroadcast_txn() })
 					.then(|_| { Ok(()) })
 			}))
 		}).then(|_| { Ok(()) })
