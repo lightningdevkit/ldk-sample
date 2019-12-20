@@ -42,8 +42,7 @@ use rand::{thread_rng, Rng};
 
 use lightning::chain;
 use lightning::chain::chaininterface;
-use lightning::chain::chaininterface::ChainWatchInterface;
-use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor};
+use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor, InMemoryChannelKeys};
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::ln::channelmanager::{PaymentHash, PaymentPreimage};
@@ -51,8 +50,6 @@ use lightning::util::events::{Event, EventsProvider};
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
 use lightning::util::config;
-
-use lightning_invoice::MinFinalCltvExpiry;
 
 use bitcoin::util::bip32;
 use bitcoin::blockdata;
@@ -68,7 +65,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
-use std::time::{Instant, Duration};
+use std::time::{Instant, Duration, SystemTime};
 use std::io::{Cursor, Write};
 use std::fs;
 
@@ -86,17 +83,17 @@ struct EventHandler {
 	file_prefix: String,
 	rpc_client: Arc<RPCClient>,
 	peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>,
-	channel_manager: Arc<channelmanager::ChannelManager>,
+	channel_manager: Arc<channelmanager::ChannelManager<InMemoryChannelKeys>>,
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
-	broadcaster: Arc<chain::chaininterface::BroadcasterInterface>,
+	broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager>, broadcaster: Arc<chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
+	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager<InMemoryChannelKeys>>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
 		let us = Arc::new(Self { network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::channel(2);
-		let mut self_sender = sender.clone();
+		let self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
 			let mut events = us.channel_manager.get_and_clear_pending_events();
@@ -141,7 +138,7 @@ impl EventHandler {
 					Event::PaymentReceived { payment_hash, amt } => {
 						let images = us.payment_preimages.lock().unwrap();
 						if let Some(payment_preimage) = images.get(&payment_hash) {
-							if us.channel_manager.claim_funds(payment_preimage.clone()) {
+							if us.channel_manager.claim_funds(payment_preimage.clone(), amt) { // Cheating by using amt here!
 								println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash.0));
 							} else {
 								println!("Failed to claim money we were told we had?");
@@ -161,7 +158,7 @@ impl EventHandler {
 					Event::PendingHTLCsForwardable { time_forwardable } => {
 						let us = us.clone();
 						let mut self_sender = self_sender.clone();
-						tokio::spawn(tokio::timer::Delay::new(time_forwardable).then(move |_| {
+						tokio::spawn(tokio::timer::Delay::new(Instant::now() + time_forwardable).then(move |_| {
 							us.channel_manager.process_pending_htlc_forwards();
 							let _ = self_sender.try_send(());
 							Ok(())
@@ -319,6 +316,8 @@ fn main() {
 	println!("USAGE: rust-lightning-jsonrpc user:pass@rpc_host:port storage_directory_path [port]");
 	if env::args().len() < 3 { return; }
 
+	lightning_invoice::check_platform();
+
 	let rpc_client = {
 		let path = env::args().skip(1).next().unwrap();
 		let path_parts: Vec<&str> = path.split('@').collect();
@@ -383,12 +382,14 @@ fn main() {
 		f.sync_all().expect("Failed to sync seed to disk");
 		key
 	};
-	let keys = Arc::new(KeysManager::new(&our_node_seed, network, logger.clone()));
+	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+	let keys = Arc::new(KeysManager::new(&our_node_seed, network, logger.clone(), cur.as_secs(), cur.subsec_nanos()));
 	let (import_key_1, import_key_2) = bip32::ExtendedPrivKey::new_master(network, &our_node_seed).map(|extpriv| {
 		(extpriv.ckd_priv(&secp_ctx, bip32::ChildNumber::from_hardened_idx(1).unwrap()).unwrap().private_key.key,
 		 extpriv.ckd_priv(&secp_ctx, bip32::ChildNumber::from_hardened_idx(2).unwrap()).unwrap().private_key.key)
 	}).unwrap();
 	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), network, logger.clone()));
+	let block_notifier = Arc::new(chaininterface::BlockNotifier::new(chain_monitor.clone()));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
@@ -404,8 +405,9 @@ fn main() {
 			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone()),
 			file_prefix: data_path.clone() + "/monitors",
 		});
+		block_notifier.register_listener(Arc::downgrade(&(monitor.monitor.clone() as Arc<dyn chaininterface::ChainListener>)));
 
-		let mut config = config::UserConfig::new();
+		let mut config: config::UserConfig = Default::default();
 		config.channel_options.fee_proportional_millionths = FEE_PROPORTIONAL_MILLIONTHS;
 		config.channel_options.announced_channel = ANNOUNCE_CHANNELS;
 
@@ -415,11 +417,11 @@ fn main() {
 				for (outpoint, monitor) in monitors_loaded.iter() {
 					monitors_refs.insert(*outpoint, monitor);
 				}
-				<(Sha256dHash, channelmanager::ChannelManager)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
+				<(Sha256dHash, channelmanager::ChannelManager<InMemoryChannelKeys>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
 					keys_manager: keys.clone(),
 					fee_estimator: fee_estimator.clone(),
 					monitor: monitor.clone(),
-					chain_monitor: chain_monitor.clone(),
+					//chain_monitor: chain_monitor.clone(),
 					tx_broadcaster: chain_monitor.clone(),
 					logger: logger.clone(),
 					default_config: config,
@@ -429,21 +431,22 @@ fn main() {
 			monitor.load_from_vec(monitors_loaded);
 			//TODO: Rescan
 			let manager = Arc::new(manager);
-			let manager_as_listener: Arc<chaininterface::ChainListener> = manager.clone();
-			chain_monitor.register_listener(Arc::downgrade(&manager_as_listener));
 			manager
 		} else {
 			if !monitors_loaded.is_empty() {
 				panic!("Found some channel monitors but no channel state!");
 			}
-			channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config).unwrap()
+			channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config, 0).unwrap() //TODO: Get blockchain height
 		};
+		block_notifier.register_listener(Arc::downgrade(&(channel_manager.clone() as Arc<dyn chaininterface::ChainListener>)));
 		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()));
 
+		let mut ephemeral_data = [0; 32];
+		rand::thread_rng().fill_bytes(&mut ephemeral_data);
 		let peer_manager = Arc::new(peer_handler::PeerManager::new(peer_handler::MessageHandler {
 			chan_handler: channel_manager.clone(),
 			route_handler: router.clone(),
-		}, keys.get_node_secret(), logger.clone()));
+		}, keys.get_node_secret(), &ephemeral_data, logger.clone()));
 
 		let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
 		let mut event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone());
@@ -458,7 +461,7 @@ fn main() {
 			Ok(())
 		}).then(|_| { Ok(()) }));
 
-		spawn_chain_monitor(fee_estimator, rpc_client, chain_monitor, event_notify.clone());
+		spawn_chain_monitor(fee_estimator, rpc_client, chain_monitor, block_notifier, event_notify.clone());
 
 		tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::new(1, 0)).for_each(move |_| {
 			//TODO: Regularly poll chain_monitor.txn_to_broadcast and send them out
@@ -579,6 +582,7 @@ fn main() {
 								if match invoice.currency() {
 									lightning_invoice::Currency::Bitcoin => constants::Network::Bitcoin,
 									lightning_invoice::Currency::BitcoinTestnet => constants::Network::Testnet,
+									lightning_invoice::Currency::Regtest => constants::Network::Regtest,
 								} != network {
 									println!("Wrong network on invoice");
 								} else {
@@ -628,15 +632,15 @@ fn main() {
 										}
 									}
 
-									let final_cltv = invoice.min_final_cltv_expiry().unwrap_or(&MinFinalCltvExpiry(9));
-									if final_cltv.0 > std::u32::MAX as u64 {
+									let final_cltv = invoice.min_final_cltv_expiry().unwrap_or(&9);
+									if *final_cltv > std::u32::MAX as u64 {
 										println!("Invoice had garbage final cltv");
 										fail_return!();
 									}
-									match router.get_route(&*invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, final_cltv.0 as u32) {
+									match router.get_route(&invoice.recover_payee_pub_key(), Some(&channel_manager.list_usable_channels()), &route_hint, amt, *final_cltv as u32) {
 										Ok(route) => {
 											let mut payment_hash = PaymentHash([0; 32]);
-											payment_hash.0.copy_from_slice(&invoice.payment_hash().0[..]);
+											payment_hash.0.copy_from_slice(&invoice.payment_hash()[..]);
 											match channel_manager.send_payment(route, payment_hash) {
 												Ok(()) => {
 													println!("Sending {} msat", amt);
