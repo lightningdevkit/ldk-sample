@@ -93,7 +93,7 @@ impl EventHandler {
 	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager<InMemoryChannelKeys>>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
 		let us = Arc::new(Self { network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::channel(2);
-		let self_sender = sender.clone();
+		let mut self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
 			let mut events = us.channel_manager.get_and_clear_pending_events();
