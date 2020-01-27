@@ -51,7 +51,7 @@ use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{ReadableArgs, Writeable};
 use lightning::util::config;
 
-use bitcoin::util::bip32;
+use bitcoin::util::{bip32, bip143};
 use bitcoin::blockdata;
 use bitcoin::network::constants;
 use bitcoin::consensus::encode;
@@ -96,7 +96,7 @@ impl EventHandler {
 	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
 		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::channel(2);
-		let self_sender = sender.clone();
+		let mut self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
 			us.peer_manager.process_events();
 			let mut events = us.channel_manager.get_and_clear_pending_events();
@@ -138,16 +138,16 @@ impl EventHandler {
 						us.broadcaster.broadcast_transaction(&tx);
 						println!("Broadcast funding tx {}!", tx.txid());
 					},
-					Event::PaymentReceived { payment_hash, amt } => {
+					Event::PaymentReceived { payment_hash, payment_secret, amt } => {
 						let images = us.payment_preimages.lock().unwrap();
 						if let Some(payment_preimage) = images.get(&payment_hash) {
-							if us.channel_manager.claim_funds(payment_preimage.clone(), amt) { // Cheating by using amt here!
+							if us.channel_manager.claim_funds(payment_preimage.clone(), &payment_secret, amt) { // Cheating by using amt here!
 								println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash.0));
 							} else {
 								println!("Failed to claim money we were told we had?");
 							}
 						} else {
-							us.channel_manager.fail_htlc_backwards(&payment_hash);
+							us.channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
 							println!("Received payment but we didn't know the preimage :(");
 						}
 						let _ = self_sender.try_send(());
@@ -173,13 +173,38 @@ impl EventHandler {
 								SpendableOutputDescriptor:: StaticOutput { outpoint, .. } => {
 									println!("Got on-chain output Bitcoin Core should know how to claim at {}:{}", hex_str(&outpoint.txid[..]), outpoint.vout);
 								},
-								SpendableOutputDescriptor::DynamicOutputP2WSH { .. } => {
-									println!("Got on-chain output we should claim...");
-									//TODO: Send back to Bitcoin Core!
+								SpendableOutputDescriptor::DynamicOutputP2WSH { outpoint, key, witness_script, to_self_delay, output } => {
+									println!("Got on-chain output ({}:{}) to redeemScript {} spendable with key {} at time {}...", hex_str(&outpoint.txid[..]), outpoint.vout, hex_str(&witness_script[..]), hex_str(&key[..]), to_self_delay);
+									let mut tx = bitcoin::Transaction {
+										input: vec![bitcoin::TxIn {
+											previous_output: outpoint,
+											script_sig: bitcoin::Script::new(),
+											sequence: to_self_delay as u32,
+											witness: vec![vec![0], witness_script.to_bytes()],
+										}],
+										lock_time: 0,
+										output: vec![bitcoin::TxOut {
+											script_pubkey: bitcoin::Script::new(), //XXX
+											value: output.value,
+										}],
+										version: 2,
+									};
+									let sighash = secp256k1::Message::from_slice(&bip143::SighashComponents::new(&tx).sighash_all(&tx.input[0], &witness_script, output.value)).unwrap();
+									tx.input[0].witness.insert(0, us.secp_ctx.sign(&sighash, &key).serialize_der()[..].to_vec());
+									let tx_ser = "\"".to_string() + &encode::serialize_hex(&tx) + "\"";
+									println!("Spending it with {}", tx_ser);
+									tokio::spawn(us.rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).then(|_| { Ok(()) }));
 								},
-								SpendableOutputDescriptor::DynamicOutputP2WPKH { .. } => {
-									println!("Got on-chain output we should claim...");
-									//TODO: Send back to Bitcoin Core!
+								SpendableOutputDescriptor::DynamicOutputP2WPKH { outpoint, key, output: _ } => {
+									println!("Got on-chain output ({}:{}) we should claim directly with key {}", hex_str(&outpoint.txid[..]), outpoint.vout, hex_str(&key[..]));
+									let us_clone = Arc::clone(&us);
+									tokio::spawn(us.rpc_client.make_rpc_call("importprivkey",
+											&[&("\"".to_string() + &bitcoin::util::key::PrivateKey{ key, compressed: true, network}.to_wif() + "\""), "\"rust-lightning dynamic output p2wpkh\"", "false"], false)
+											.then(move |_| {
+												us_clone.rpc_client.make_rpc_call("rescanblockchain",
+												&["610000"], false)
+												.then(|_| Ok(()))
+											}));
 								},
 							}
 						}
