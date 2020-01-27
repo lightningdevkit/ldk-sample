@@ -28,7 +28,7 @@ use utils::*;
 mod chain_monitor;
 use chain_monitor::*;
 
-use lightning_net_tokio::{Connection, SocketDescriptor};
+use lightning_net_tokio::Connection;
 
 use futures::future;
 use futures::future::Future;
@@ -78,20 +78,23 @@ fn _check_usize_is_64() {
 	unsafe { mem::transmute::<*const usize, [u8; 8]>(panic!()); }
 }
 
+type SocketDescriptor = lightning_net_tokio::SocketDescriptor<channelmanager::ChannelManager<InMemoryChannelKeys, Arc<ChannelMonitor>>>;
+
 struct EventHandler {
+	secp_ctx: Secp256k1<secp256k1::All>,
 	network: constants::Network,
 	file_prefix: String,
 	rpc_client: Arc<RPCClient>,
-	peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>,
-	channel_manager: Arc<channelmanager::ChannelManager<InMemoryChannelKeys>>,
+	peer_manager: peer_handler::SimpleArcPeerManager<SocketDescriptor, ChannelMonitor>,
+	channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>,
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
 	broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: Arc<channelmanager::ChannelManager<InMemoryChannelKeys>>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
-		let us = Arc::new(Self { network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
+	fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
+		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, receiver) = mpsc::channel(2);
 		let self_sender = sender.clone();
 		tokio::spawn(receiver.for_each(move |_| {
@@ -389,7 +392,7 @@ fn main() {
 		 extpriv.ckd_priv(&secp_ctx, bip32::ChildNumber::from_hardened_idx(2).unwrap()).unwrap().private_key.key)
 	}).unwrap();
 	let chain_monitor = Arc::new(ChainInterface::new(rpc_client.clone(), network, logger.clone()));
-	let block_notifier = Arc::new(chaininterface::BlockNotifier::new(chain_monitor.clone()));
+	let block_notifier: chaininterface::BlockNotifierArc = Arc::new(chaininterface::BlockNotifier::new(chain_monitor.clone()));
 
 	let mut rt = tokio::runtime::Runtime::new().unwrap();
 	rt.spawn(future::lazy(move || -> Result<(), ()> {
@@ -400,12 +403,12 @@ fn main() {
 				&[&("\"".to_string() + &bitcoin::util::key::PrivateKey{ key: import_key_2, compressed: true, network}.to_wif() + "\""), "\"rust-lightning cooperative close\"", "false"], false)
 				.then(|_| Ok(())));
 
-		let monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
+		let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
 		let monitor = Arc::new(ChannelMonitor {
-			monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone()),
+			monitor: Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone())),
 			file_prefix: data_path.clone() + "/monitors",
 		});
-		block_notifier.register_listener(Arc::downgrade(&(monitor.monitor.clone() as Arc<dyn chaininterface::ChainListener>)));
+		block_notifier.register_listener(Arc::clone(&(monitor.monitor.clone() as Arc<dyn chaininterface::ChainListener>)));
 
 		let mut config: config::UserConfig = Default::default();
 		config.channel_options.fee_proportional_millionths = FEE_PROPORTIONAL_MILLIONTHS;
@@ -414,10 +417,10 @@ fn main() {
 		let channel_manager = if let Ok(mut f) = fs::File::open(data_path.clone() + "/manager_data") {
 			let (last_block_hash, manager) = {
 				let mut monitors_refs = HashMap::new();
-				for (outpoint, monitor) in monitors_loaded.iter() {
+				for (outpoint, monitor) in monitors_loaded.iter_mut() {
 					monitors_refs.insert(*outpoint, monitor);
 				}
-				<(Sha256dHash, channelmanager::ChannelManager<InMemoryChannelKeys>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
+				<(Sha256dHash, channelmanager::SimpleArcChannelManager<ChannelMonitor>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
 					keys_manager: keys.clone(),
 					fee_estimator: fee_estimator.clone(),
 					monitor: monitor.clone(),
@@ -425,20 +428,19 @@ fn main() {
 					tx_broadcaster: chain_monitor.clone(),
 					logger: logger.clone(),
 					default_config: config,
-					channel_monitors: &monitors_refs,
+					channel_monitors: &mut monitors_refs,
 				}).expect("Failed to deserialize channel manager")
 			};
 			monitor.load_from_vec(monitors_loaded);
 			//TODO: Rescan
-			let manager = Arc::new(manager);
 			manager
 		} else {
 			if !monitors_loaded.is_empty() {
 				panic!("Found some channel monitors but no channel state!");
 			}
-			channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config, 0).unwrap() //TODO: Get blockchain height
+			Arc::new(channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config, 0).unwrap()) //TODO: Get blockchain height
 		};
-		block_notifier.register_listener(Arc::downgrade(&(channel_manager.clone() as Arc<dyn chaininterface::ChainListener>)));
+		block_notifier.register_listener(Arc::clone(&(channel_manager.clone() as Arc<dyn chaininterface::ChainListener>)));
 		let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()));
 
 		let mut ephemeral_data = [0; 32];
@@ -641,7 +643,7 @@ fn main() {
 										Ok(route) => {
 											let mut payment_hash = PaymentHash([0; 32]);
 											payment_hash.0.copy_from_slice(&invoice.payment_hash()[..]);
-											match channel_manager.send_payment(route, payment_hash) {
+											match channel_manager.send_payment(route, payment_hash, None) {
 												Ok(()) => {
 													println!("Sending {} msat", amt);
 													let _ = event_notify.try_send(());

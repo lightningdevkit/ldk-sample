@@ -15,7 +15,7 @@ use futures::{Stream, Sink};
 use futures::sync::mpsc;
 
 use lightning::chain::chaininterface;
-use lightning::chain::chaininterface::{BlockNotifier, ChainError};
+use lightning::chain::chaininterface::{BlockNotifierArc, ChainError};
 use lightning::util::logger::Logger;
 
 use bitcoin::blockdata::block::Block;
@@ -236,7 +236,7 @@ fn find_fork(mut steps_tx: mpsc::Sender<ForkStep>, current_hash: String, target_
 	}));
 }
 
-pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: Arc<BlockNotifier>, event_notify: mpsc::Sender<()>) {
+pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: BlockNotifierArc, event_notify: mpsc::Sender<()>) {
 	tokio::spawn(FeeEstimator::update_values(fee_estimator.clone(), &rpc_client));
 	let cur_block = Arc::new(Mutex::new(String::from("")));
 	tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::from_secs(1)).for_each(move |_| {
