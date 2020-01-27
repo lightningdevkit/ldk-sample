@@ -50,7 +50,12 @@ impl FeeEstimator {
 			let us = us.clone();
 			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""], false).and_then(move |v| {
 				if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
-					us.high_prio_est.store((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
+					us.high_prio_est.store(
+						// Because we often don't have have good fee estimates on testnet, and we
+						// don't want to prevent opening channels with peers that have even worse
+						// fee estimates on testnet (eg LND), add an absurd fudge factor here:
+						10 * ((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3),
+						Ordering::Release);
 				}
 				Ok(())
 			})));
