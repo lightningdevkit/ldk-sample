@@ -568,9 +568,9 @@ fn main() {
 							println!("All channels:");
 							for chan_info in channel_manager.list_channels() {
 								if let Some(short_id) = chan_info.short_channel_id {
-									println!("id: {}, short_id: {}, peer: {}, value: {} sat", hex_str(&chan_info.channel_id[..]), short_id, hex_str(&chan_info.remote_network_id.serialize()), chan_info.channel_value_satoshis);
+									println!("id: {}, short_id: {}, peer: {}, value: {} sat, live: {}", hex_str(&chan_info.channel_id[..]), short_id, hex_str(&chan_info.remote_network_id.serialize()), chan_info.channel_value_satoshis, chan_info.is_live);
 								} else {
-									println!("id: {}, not yet confirmed, peer: {}, value: {} sat", hex_str(&chan_info.channel_id[..]), hex_str(&chan_info.remote_network_id.serialize()), chan_info.channel_value_satoshis);
+									println!("id: {}, not yet confirmed, peer: {}, value: {} sat, live: {}", hex_str(&chan_info.channel_id[..]), hex_str(&chan_info.remote_network_id.serialize()), chan_info.channel_value_satoshis, chan_info.is_live);
 								}
 							}
 						} else {
