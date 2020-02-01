@@ -1,6 +1,5 @@
-use rpc_client::*;
-
-use utils::hex_to_vec;
+use crate::rpc_client::*;
+use crate::utils::hex_to_vec;
 
 use bitcoin;
 use serde_json;
@@ -8,11 +7,6 @@ use tokio;
 
 use bitcoin_hashes::sha256d::Hash as Sha256dHash;
 use bitcoin_hashes::hex::ToHex;
-
-use futures::future;
-use futures::future::Future;
-use futures::{Stream, Sink};
-use futures::sync::mpsc;
 
 use lightning::chain::chaininterface;
 use lightning::chain::chaininterface::{BlockNotifierArc, ChainError};
@@ -24,12 +18,19 @@ use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
 use bitcoin::util::hash::BitcoinHash;
 
+use futures_util::future;
+use futures_util::future::FutureExt;
+
+use tokio::sync::mpsc;
+
 use std::collections::HashMap;
 use std::cmp;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
-use std::time::{Instant, Duration};
+use std::time::Duration;
+use std::pin::Pin;
 
 pub struct FeeEstimator {
 	background_est: AtomicUsize,
@@ -44,41 +45,27 @@ impl FeeEstimator {
 			high_prio_est: AtomicUsize::new(0),
 		}
 	}
-	fn update_values(us: Arc<Self>, rpc_client: &RPCClient) -> impl Future<Item=(), Error=()> {
-		let mut reqs: Vec<Box<dyn Future<Item=(), Error=()> + Send>> = Vec::with_capacity(3);
-		{
-			let us = us.clone();
-			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""], false).and_then(move |v| {
-				if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
-					us.high_prio_est.store(
-						// Because we often don't have have good fee estimates on testnet, and we
-						// don't want to prevent opening channels with peers that have even worse
-						// fee estimates on testnet (eg LND), add an absurd fudge factor here:
-						10 * ((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3),
-						Ordering::Release);
-				}
-				Ok(())
-			})));
+	async fn update_values(&self, rpc_client: &RPCClient) {
+		if let Ok(v) = rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""], false).await {
+			if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
+				self.high_prio_est.store(
+					// Because we often don't have have good fee estimates on testnet, and we
+					// don't want to prevent opening channels with peers that have even worse
+					// fee estimates on testnet (eg LND), add an absurd fudge factor here:
+					10 * ((hp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3),
+					Ordering::Release);
+			}
 		}
-		{
-			let us = us.clone();
-			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["18", "\"ECONOMICAL\""], false).and_then(move |v| {
-				if let Some(serde_json::Value::Number(np_btc_per_kb)) = v.get("feerate") {
-					us.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
-				}
-				Ok(())
-			})));
+		if let Ok(v) = rpc_client.make_rpc_call("estimatesmartfee", &vec!["18", "\"ECONOMICAL\""], false).await {
+			if let Some(serde_json::Value::Number(np_btc_per_kb)) = v.get("feerate") {
+				self.normal_est.store((np_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
+			}
 		}
-		{
-			let us = us.clone();
-			reqs.push(Box::new(rpc_client.make_rpc_call("estimatesmartfee", &vec!["144", "\"ECONOMICAL\""], false).and_then(move |v| {
-				if let Some(serde_json::Value::Number(bp_btc_per_kb)) = v.get("feerate") {
-					us.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
-				}
-				Ok(())
-			})));
+		if let Ok(v) = rpc_client.make_rpc_call("estimatesmartfee", &vec!["144", "\"ECONOMICAL\""], false).await {
+			if let Some(serde_json::Value::Number(bp_btc_per_kb)) = v.get("feerate") {
+				self.background_est.store((bp_btc_per_kb.as_f64().unwrap() * 100_000_000.0 / 250.0) as usize + 3, Ordering::Release);
+			}
 		}
-		future::join_all(reqs).then(|_| { Ok(()) })
 	}
 }
 impl chaininterface::FeeEstimator for FeeEstimator {
@@ -105,16 +92,19 @@ impl ChainInterface {
 		}
 	}
 
-	fn rebroadcast_txn(&self) -> impl Future {
+	async fn rebroadcast_txn(&self) {
 		let mut send_futures = Vec::new();
 		{
 			let txn = self.txn_to_broadcast.lock().unwrap();
 			for (_, tx) in txn.iter() {
 				let tx_ser = "\"".to_string() + &encode::serialize_hex(tx) + "\"";
-				send_futures.push(self.rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).then(|_| -> Result<(), ()> { Ok(()) }));
+				let rpc_client = Arc::clone(&self.rpc_client);
+				send_futures.push(tokio::spawn(async move {
+					rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).await
+				}));
 			}
 		}
-		future::join_all(send_futures).then(|_| -> Result<(), ()> { Ok(()) })
+		future::join_all(send_futures).await;
 	}
 }
 impl chaininterface::ChainWatchInterface for ChainInterface {
@@ -146,7 +136,14 @@ impl chaininterface::BroadcasterInterface for ChainInterface {
 	fn broadcast_transaction (&self, tx: &bitcoin::blockdata::transaction::Transaction) {
 		self.txn_to_broadcast.lock().unwrap().insert(tx.txid(), tx.clone());
 		let tx_ser = "\"".to_string() + &encode::serialize_hex(tx) + "\"";
-		tokio::spawn(self.rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).then(|_| { Ok(()) }));
+		let rpc_client = Arc::clone(&self.rpc_client);
+		// TODO: New tokio has largely endeavored to do away with the concept of spawn-and-forget,
+		// which was the primary method of executing in 0.1. Sadly, in a non-async context, there
+		// is no way to block on a future completion. In some future version, this may break, see
+		// https://github.com/tokio-rs/tokio/issues/1830.
+		tokio::spawn(async move {
+			rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).await
+		});
 	}
 }
 
@@ -154,141 +151,98 @@ enum ForkStep {
 	DisconnectBlock((bitcoin::blockdata::block::BlockHeader, u32)),
 	ConnectBlock((String, u32)),
 }
-fn find_fork_step(steps_tx: mpsc::Sender<ForkStep>, current_header: GetHeaderResponse, target_header_opt: Option<(String, GetHeaderResponse)>, rpc_client: Arc<RPCClient>) {
-	if target_header_opt.is_some() && target_header_opt.as_ref().unwrap().0 == current_header.previousblockhash {
-		// Target is the parent of current, we're done!
-		return;
-	} else if current_header.height == 1 {
-		return;
-	} else if target_header_opt.is_none() || target_header_opt.as_ref().unwrap().1.height < current_header.height {
-		tokio::spawn(steps_tx.send(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1))).then(move |send_res| {
-			if let Ok(steps_tx) = send_res {
-				future::Either::A(rpc_client.get_header(&current_header.previousblockhash).then(move |new_cur_header| {
-					find_fork_step(steps_tx, new_cur_header.unwrap(), target_header_opt, rpc_client);
-					Ok(())
-				}))
+fn find_fork_step<'a>(steps_tx: &'a mut Vec<ForkStep>, current_header: GetHeaderResponse, target_header_opt: Option<(String, GetHeaderResponse)>, rpc_client: Arc<RPCClient>) -> Pin<Box<dyn Future<Output=()> + Send + 'a>> {
+	async move {
+		if target_header_opt.is_some() && target_header_opt.as_ref().unwrap().0 == current_header.previousblockhash {
+			// Target is the parent of current, we're done!
+		} else if current_header.height == 1 {
+		} else if target_header_opt.is_none() || target_header_opt.as_ref().unwrap().1.height < current_header.height {
+			steps_tx.push(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1)));
+			let new_cur_header = rpc_client.get_header(&current_header.previousblockhash).await.unwrap();
+			find_fork_step(steps_tx, new_cur_header, target_header_opt, rpc_client).await;
+		} else {
+			let target_header = target_header_opt.unwrap().1;
+			// Everything below needs to disconnect target, so go ahead and do that now
+			steps_tx.push(ForkStep::DisconnectBlock((target_header.to_block_header(), target_header.height)));
+			if target_header.previousblockhash == current_header.previousblockhash {
+				// Found the fork, also connect current and finish!
+				steps_tx.push(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1)));
+			} else if target_header.height > current_header.height {
+				// Target is higher, walk it back and recurse
+				let new_target_header = rpc_client.get_header(&target_header.previousblockhash).await.unwrap();
+				find_fork_step(steps_tx, current_header, Some((target_header.previousblockhash, new_target_header)), rpc_client).await;
 			} else {
-				// Caller droped the receiver, we should give up now
-				future::Either::B(future::result(Ok(())))
+				// Target and current are at the same height, but we're not at fork yet, walk
+				// both back and recurse
+				steps_tx.push(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1)));
+				let new_cur_header = rpc_client.get_header(&current_header.previousblockhash).await.unwrap();
+				let new_target_header = rpc_client.get_header(&target_header.previousblockhash).await.unwrap();
+				find_fork_step(steps_tx, new_cur_header, Some((target_header.previousblockhash, new_target_header)), rpc_client).await;
 			}
-		}));
-	} else {
-		let target_header = target_header_opt.unwrap().1;
-		// Everything below needs to disconnect target, so go ahead and do that now
-		tokio::spawn(steps_tx.send(ForkStep::DisconnectBlock((target_header.to_block_header(), target_header.height))).then(move |send_res| {
-			if let Ok(steps_tx) = send_res {
-				future::Either::A(if target_header.previousblockhash == current_header.previousblockhash {
-					// Found the fork, also connect current and finish!
-					future::Either::A(future::Either::A(
-						steps_tx.send(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1))).then(|_| { Ok(()) })))
-				} else if target_header.height > current_header.height {
-					// Target is higher, walk it back and recurse
-					future::Either::B(rpc_client.get_header(&target_header.previousblockhash).then(move |new_target_header| {
-						find_fork_step(steps_tx, current_header, Some((target_header.previousblockhash, new_target_header.unwrap())), rpc_client);
-						Ok(())
-					}))
-				} else {
-					// Target and current are at the same height, but we're not at fork yet, walk
-					// both back and recurse
-					future::Either::A(future::Either::B(
-						steps_tx.send(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1))).then(move |send_res| {
-							if let Ok(steps_tx) = send_res {
-								future::Either::A(rpc_client.get_header(&current_header.previousblockhash).then(move |new_cur_header| {
-									rpc_client.get_header(&target_header.previousblockhash).then(move |new_target_header| {
-										find_fork_step(steps_tx, new_cur_header.unwrap(), Some((target_header.previousblockhash, new_target_header.unwrap())), rpc_client);
-										Ok(())
-									})
-								}))
-							} else {
-								// Caller droped the receiver, we should give up now
-								future::Either::B(future::result(Ok(())))
-							}
-						})
-					))
-				})
-			} else {
-				// Caller droped the receiver, we should give up now
-				future::Either::B(future::result(Ok(())))
-			}
-		}));
-	}
+		}
+	}.boxed()
 }
 /// Walks backwards from current_hash and target_hash finding the fork and sending ForkStep events
 /// into the steps_tx Sender. There is no ordering guarantee between different ForkStep types, but
 /// DisconnectBlock and ConnectBlock events are each in reverse, height-descending order.
-fn find_fork(mut steps_tx: mpsc::Sender<ForkStep>, current_hash: String, target_hash: String, rpc_client: Arc<RPCClient>) {
+async fn find_fork(steps_tx: &mut Vec<ForkStep>, current_hash: String, target_hash: String, rpc_client: Arc<RPCClient>) {
 	if current_hash == target_hash { return; }
 
-	tokio::spawn(rpc_client.get_header(&current_hash).then(move |current_resp| {
-		let current_header = current_resp.unwrap();
-		assert!(steps_tx.start_send(ForkStep::ConnectBlock((current_hash, current_header.height))).unwrap().is_ready());
+	let current_header = rpc_client.get_header(&current_hash).await.unwrap();
+	steps_tx.push(ForkStep::ConnectBlock((current_hash, current_header.height)));
 
-		if current_header.previousblockhash == target_hash || current_header.height == 1 {
-			// Fastpath one-new-block-connected or reached block 1
-			future::Either::A(future::result(Ok(())))
-		} else {
-			future::Either::B(rpc_client.get_header(&target_hash).then(move |target_resp| {
-				match target_resp {
-					Ok(target_header) => find_fork_step(steps_tx, current_header, Some((target_hash, target_header)), rpc_client),
-					Err(_) => {
-						assert_eq!(target_hash, "");
-						find_fork_step(steps_tx, current_header, None, rpc_client)
-					},
-				}
-				Ok(())
-			}))
+	if current_header.previousblockhash == target_hash || current_header.height == 1 {
+		// Fastpath one-new-block-connected or reached block 1
+		return;
+	} else {
+		match rpc_client.get_header(&target_hash).await {
+			Ok(target_header) =>
+				find_fork_step(steps_tx, current_header, Some((target_hash, target_header)), rpc_client).await,
+			Err(_) => {
+				assert_eq!(target_hash, "");
+				find_fork_step(steps_tx, current_header, None, rpc_client).await;
+			},
 		}
-	}));
+	}
 }
 
-pub fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: BlockNotifierArc, event_notify: mpsc::Sender<()>) {
-	tokio::spawn(FeeEstimator::update_values(fee_estimator.clone(), &rpc_client));
-	let cur_block = Arc::new(Mutex::new(String::from("")));
-	tokio::spawn(tokio::timer::Interval::new(Instant::now(), Duration::from_secs(1)).for_each(move |_| {
-		let cur_block = cur_block.clone();
-		let fee_estimator = fee_estimator.clone();
-		let rpc_client = rpc_client.clone();
-		let chain_interface = chain_interface.clone();
-		let chain_notifier = chain_notifier.clone();
-		let mut event_notify = event_notify.clone();
-		rpc_client.make_rpc_call("getblockchaininfo", &[], false).and_then(move |v| {
-			let new_block = v["bestblockhash"].as_str().unwrap().to_string();
-			let old_block = cur_block.lock().unwrap().clone();
-			if new_block == old_block { return future::Either::A(future::result(Ok(()))); }
+pub async fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: BlockNotifierArc, mut event_notify: mpsc::Sender<()>) {
+	tokio::spawn(async move {
+		fee_estimator.update_values(&rpc_client).await;
+		let mut interval = tokio::time::interval(Duration::from_secs(1));
+		let mut cur_block = String::from("");
+		loop {
+			interval.tick().await;
+			if let Ok(v) = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await {
+				let new_block = v["bestblockhash"].as_str().unwrap().to_string();
+				let old_block = cur_block.clone();
 
-			*cur_block.lock().unwrap() = new_block.clone();
-			if old_block == "" { return future::Either::A(future::result(Ok(()))); }
+				if new_block == old_block { continue; }
+				cur_block = cur_block.clone();
+				if old_block == "" { continue; }
 
-			let (events_tx, events_rx) = mpsc::channel(1);
-			find_fork(events_tx, new_block, old_block, rpc_client.clone());
-			println!("NEW BEST BLOCK!");
-			future::Either::B(events_rx.collect().then(move |events_res| {
-				let events = events_res.unwrap();
+				let mut events = Vec::new();
+				find_fork(&mut events, new_block, old_block, rpc_client.clone()).await;
+				println!("NEW BEST BLOCK!");
 				for event in events.iter().rev() {
 					if let &ForkStep::DisconnectBlock((ref header, ref height)) = &event {
 						println!("Disconnecting block {}", header.bitcoin_hash().to_hex());
 						chain_notifier.block_disconnected(header, *height);
 					}
 				}
-				let mut connect_futures = Vec::with_capacity(events.len());
 				for event in events.iter().rev() {
-					if let &ForkStep::ConnectBlock((ref hash, height)) = &event {
-						let block_height = *height;
+					if let &ForkStep::ConnectBlock((ref hash, block_height)) = &event {
 						let chain_notifier = chain_notifier.clone();
-						connect_futures.push(rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).then(move |blockhex| {
-							let block: Block = encode::deserialize(&hex_to_vec(blockhex.unwrap().as_str().unwrap()).unwrap()).unwrap();
-							println!("Connecting block {}", block.bitcoin_hash().to_hex());
-							chain_notifier.block_connected(&block, block_height);
-							Ok(())
-						}));
+						let blockhex = rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).await.unwrap();
+						let block: Block = encode::deserialize(&hex_to_vec(blockhex.as_str().unwrap()).unwrap()).unwrap();
+						println!("Connecting block {}", block.bitcoin_hash().to_hex());
+						chain_notifier.block_connected(&block, *block_height);
 					}
 				}
-				future::join_all(connect_futures)
-					.then(move |_: Result<Vec<()>, ()>| { FeeEstimator::update_values(fee_estimator, &rpc_client) })
-					.then(move |_| { let _ = event_notify.try_send(()); Ok(()) })
-					.then(move |_: Result<(), ()>| { chain_interface.rebroadcast_txn() })
-					.then(|_| { Ok(()) })
-			}))
-		}).then(|_| { Ok(()) })
-	}).then(|_| { Ok(()) }));
+				fee_estimator.update_values(&rpc_client).await;
+				let _ = event_notify.try_send(());
+				chain_interface.rebroadcast_txn().await;
+			}
+		}
+	}).await.unwrap()
 }

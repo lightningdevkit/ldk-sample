@@ -3,26 +3,23 @@ name = "rust-lightning-bitcoinrpc"
 version = "0.0.1"
 authors = ["Matt Corallo <git@bluematt.me>"]
 build = "build.rs"
+edition = "2018"
 
 [dependencies]
 bitcoin = "0.21"
 bitcoin-bech32 = "0.7"
 bitcoin_hashes = "0.7"
-lightning = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "db5b2cd1d4c59677742043654a5fd62dd31ca908" }
-lightning-net-tokio = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "db5b2cd1d4c59677742043654a5fd62dd31ca908" }
+lightning = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "1572698d42192a13c8002b06b1f094f970336e43" }
+lightning-net-tokio = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "1572698d42192a13c8002b06b1f094f970336e43" }
 lightning-invoice = { git = "https://github.com/rust-bitcoin/rust-lightning-invoice", rev = "e738b463d041eb6236997c5f78fd1bc1c612af27" }
 secp256k1 = "0.15"
-hyper = "0.12"
-tokio-io = "0.1"
-tokio-fs = "0.1"
-tokio-codec = "0.1"
-futures = "0.1"
+hyper = "0.13"
 serde = "1"
 serde_json = "1"
 serde_derive = "1"
 rand = "0.4"
-tokio = "0.1"
-bytes = "0.4"
+futures-util = "0.3"
+tokio = { version = "0.2", features = ["io-std", "io-util", "rt-threaded", "tcp", "time", "sync"] }
 base64 = "0.9"
 
 [build-dependencies]
