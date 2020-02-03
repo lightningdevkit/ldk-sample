@@ -347,7 +347,9 @@ async fn main() {
 	println!("Checking validity of RPC URL to bitcoind...");
 	if let Ok(v) = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await {
 		assert!(v["verificationprogress"].as_f64().unwrap() > 0.99);
-		assert_eq!(v["bip9_softforks"]["segwit"]["status"].as_str().unwrap(), "active");
+		assert!(
+			v["bip9_softforks"]["segwit"]["status"].as_str() == Some("active") ||
+			v["softforks"]["segwit"]["type"].as_str() == Some("buried"));
 		match v["chain"].as_str().unwrap() {
 			"main" => network = constants::Network::Bitcoin,
 			"test" => network = constants::Network::Testnet,
