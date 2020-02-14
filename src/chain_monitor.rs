@@ -8,11 +8,13 @@ use tokio;
 use bitcoin_hashes::sha256d::Hash as Sha256dHash;
 use bitcoin_hashes::hex::ToHex;
 
-use lightning::chain::chaininterface;
-use lightning::chain::chaininterface::{BlockNotifierArc, ChainError};
+use lightning::chain::{chaininterface, keysinterface};
+use lightning::chain::chaininterface::{BlockNotifierArc, ChainError, ChainListener};
 use lightning::util::logger::Logger;
+use lightning::ln::channelmonitor::{ChannelMonitor, ManyChannelMonitor};
+use lightning::ln::channelmanager::ChannelManager;
 
-use bitcoin::blockdata::block::Block;
+use bitcoin::blockdata::block::{Block, BlockHeader};
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
@@ -198,19 +200,79 @@ async fn find_fork(steps_tx: &mut Vec<ForkStep>, current_hash: String, target_ha
 		match rpc_client.get_header(&target_hash).await {
 			Ok(target_header) =>
 				find_fork_step(steps_tx, current_header, Some((target_hash, target_header)), rpc_client).await,
-			Err(_) => {
-				assert_eq!(target_hash, "");
-				find_fork_step(steps_tx, current_header, None, rpc_client).await;
-			},
+			Err(_) => panic!(),
 		}
 	}
 }
 
-pub async fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: BlockNotifierArc, mut event_notify: mpsc::Sender<()>) {
+pub trait AChainListener {
+	fn a_block_connected(&mut self, block: &Block, height: u32);
+	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32);
+}
+
+impl AChainListener for &BlockNotifierArc {
+	fn a_block_connected(&mut self, block: &Block, height: u32) {
+		self.block_connected(block, height);
+	}
+	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32) {
+		self.block_disconnected(header, height);
+	}
+}
+
+impl<M> AChainListener for &Arc<ChannelManager<keysinterface::InMemoryChannelKeys, Arc<M>>>
+		where M: ManyChannelMonitor<keysinterface::InMemoryChannelKeys> {
+	fn a_block_connected(&mut self, block: &Block, height: u32) {
+		let mut txn = Vec::with_capacity(block.txdata.len());
+		let mut idxn = Vec::with_capacity(block.txdata.len());
+		for (i, tx) in block.txdata.iter().enumerate() {
+			txn.push(tx);
+			idxn.push(i as u32);
+		}
+		self.block_connected(&block.header, height, &txn, &idxn);
+	}
+	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32) {
+		self.block_disconnected(header, height);
+	}
+}
+
+impl<CS: keysinterface::ChannelKeys> AChainListener for (&mut ChannelMonitor<CS>, &ChainInterface, &FeeEstimator) {
+	fn a_block_connected(&mut self, block: &Block, height: u32) {
+		let mut txn = Vec::with_capacity(block.txdata.len());
+		for tx in block.txdata.iter() {
+			txn.push(tx);
+		}
+		self.0.block_connected(&txn, height, &block.bitcoin_hash(), self.1, self.2);
+	}
+	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32) {
+		self.0.block_disconnected(height, &header.bitcoin_hash(), self.1, self.2);
+	}
+}
+
+pub async fn sync_chain_monitor<CL : AChainListener + Sized>(new_block: String, old_block: String, rpc_client: &Arc<RPCClient>, mut chain_notifier: CL) {
+	let mut events = Vec::new();
+	find_fork(&mut events, new_block, old_block, rpc_client.clone()).await;
+	println!("NEW BEST BLOCK!");
+	for event in events.iter().rev() {
+		if let &ForkStep::DisconnectBlock((ref header, ref height)) = &event {
+			println!("Disconnecting block {}", header.bitcoin_hash().to_hex());
+			chain_notifier.a_block_disconnected(header, *height);
+		}
+	}
+	for event in events.iter().rev() {
+		if let &ForkStep::ConnectBlock((ref hash, block_height)) = &event {
+			let blockhex = rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).await.unwrap();
+			let block: Block = encode::deserialize(&hex_to_vec(blockhex.as_str().unwrap()).unwrap()).unwrap();
+			println!("Connecting block {}", block.bitcoin_hash().to_hex());
+			chain_notifier.a_block_connected(&block, *block_height);
+		}
+	}
+}
+
+pub async fn spawn_chain_monitor(starting_blockhash: String, fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: BlockNotifierArc, mut event_notify: mpsc::Sender<()>) {
 	tokio::spawn(async move {
 		fee_estimator.update_values(&rpc_client).await;
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
-		let mut cur_block = String::from("");
+		let mut cur_block = starting_blockhash;
 		loop {
 			interval.tick().await;
 			if let Ok(v) = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await {
@@ -218,27 +280,9 @@ pub async fn spawn_chain_monitor(fee_estimator: Arc<FeeEstimator>, rpc_client: A
 				let old_block = cur_block.clone();
 
 				if new_block == old_block { continue; }
-				cur_block = cur_block.clone();
-				if old_block == "" { continue; }
+				cur_block = new_block.clone();
 
-				let mut events = Vec::new();
-				find_fork(&mut events, new_block, old_block, rpc_client.clone()).await;
-				println!("NEW BEST BLOCK!");
-				for event in events.iter().rev() {
-					if let &ForkStep::DisconnectBlock((ref header, ref height)) = &event {
-						println!("Disconnecting block {}", header.bitcoin_hash().to_hex());
-						chain_notifier.block_disconnected(header, *height);
-					}
-				}
-				for event in events.iter().rev() {
-					if let &ForkStep::ConnectBlock((ref hash, block_height)) = &event {
-						let chain_notifier = chain_notifier.clone();
-						let blockhex = rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).await.unwrap();
-						let block: Block = encode::deserialize(&hex_to_vec(blockhex.as_str().unwrap()).unwrap()).unwrap();
-						println!("Connecting block {}", block.bitcoin_hash().to_hex());
-						chain_notifier.block_connected(&block, *block_height);
-					}
-				}
+				sync_chain_monitor(new_block, old_block, &rpc_client, &chain_notifier).await;
 				fee_estimator.update_values(&rpc_client).await;
 				let _ = event_notify.try_send(());
 				chain_interface.rebroadcast_txn().await;
