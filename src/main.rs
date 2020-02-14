@@ -407,6 +407,7 @@ async fn main() {
 	rpc_client.make_rpc_call("importprivkey",
 			&[&("\"".to_string() + &bitcoin::util::key::PrivateKey{ key: import_key_2, compressed: true, network}.to_wif() + "\""), "\"rust-lightning cooperative close\"", "false"], false).await.unwrap();
 
+	let starting_blockhash = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await.unwrap()["bestblockhash"].as_str().unwrap().to_string();
 	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone())),
@@ -474,7 +475,7 @@ async fn main() {
 	}));
 
 	join_handles.push(tokio::spawn(
-		spawn_chain_monitor(fee_estimator, rpc_client, chain_monitor, block_notifier, event_notify.clone())
+		spawn_chain_monitor(starting_blockhash, fee_estimator, rpc_client, chain_monitor, block_notifier, event_notify.clone())
 	));
 
 	join_handles.push(tokio::spawn(async move {
