@@ -509,6 +509,17 @@ async fn main() {
 		}
 	}));
 
+	let peer_manager_timer = peer_manager.clone();
+	let chan_manager_timer = channel_manager.clone();
+	join_handles.push(tokio::spawn(async move {
+		let mut intvl = tokio::time::interval(Duration::from_secs(60));
+		loop {
+			intvl.tick().await;
+			//TODO: This seems to break our connections: peer_manager_timer.timer_tick_occured();
+			chan_manager_timer.timer_chan_freshness_every_min();
+		}
+	}));
+
 	println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()).serialize()));
 	println!("Started interactive shell! Commands:");
 	println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
