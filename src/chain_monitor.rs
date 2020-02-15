@@ -251,7 +251,6 @@ impl<CS: keysinterface::ChannelKeys> AChainListener for (&mut ChannelMonitor<CS>
 pub async fn sync_chain_monitor<CL : AChainListener + Sized>(new_block: String, old_block: String, rpc_client: &Arc<RPCClient>, mut chain_notifier: CL) {
 	let mut events = Vec::new();
 	find_fork(&mut events, new_block, old_block, rpc_client.clone()).await;
-	println!("NEW BEST BLOCK!");
 	for event in events.iter().rev() {
 		if let &ForkStep::DisconnectBlock((ref header, ref height)) = &event {
 			println!("Disconnecting block {}", header.bitcoin_hash().to_hex());
@@ -280,6 +279,7 @@ pub async fn spawn_chain_monitor(starting_blockhash: String, fee_estimator: Arc<
 				let old_block = cur_block.clone();
 
 				if new_block == old_block { continue; }
+				println!("NEW BEST BLOCK: {}!", new_block);
 				cur_block = new_block.clone();
 
 				sync_chain_monitor(new_block, old_block, &rpc_client, &chain_notifier).await;
