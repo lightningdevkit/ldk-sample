@@ -43,6 +43,7 @@ use bitcoin_hashes::hex::{ToHex, FromHex};
 
 use std::{env, mem};
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
@@ -526,6 +527,7 @@ async fn main() {
 	println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 	println!("'n pubkey value push_value' Create a channel with the given connected node (by pubkey), value in satoshis, and push the given msat value");
 	println!("'k channel_id' Close a channel with the given id");
+	println!("'f channel_id' Force close the given channel");
 	println!("'f all' Force close all channels, closing to chain");
 	println!("'l p' List the node_ids of all connected peers");
 	println!("'l c' List details about all channels");
@@ -610,8 +612,14 @@ async fn main() {
 				0x66 => { // 'f'
 					if line.len() == 5 && line.as_bytes()[2] == 'a' as u8 && line.as_bytes()[3] == 'l' as u8 && line.as_bytes()[4] == 'l' as u8 {
 						channel_manager.force_close_all_channels();
+					} else if line.len() == 66 {
+						if let Some(channel_id) = hex_to_vec(&line[2..]) {
+							channel_manager.force_close_channel(&channel_id[..].try_into().unwrap());
+						} else {
+							println!("Invalid channel id");
+						}
 					} else {
-						println!("Single-channel force-close not yet implemented");
+						println!("Force close should either be all or a channel id");
 					}
 				},
 				0x6c => { // 'l'
