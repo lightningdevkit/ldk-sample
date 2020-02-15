@@ -437,6 +437,7 @@ async fn main() {
 	let mut config: config::UserConfig = Default::default();
 	config.channel_options.fee_proportional_millionths = FEE_PROPORTIONAL_MILLIONTHS;
 	config.channel_options.announced_channel = ANNOUNCE_CHANNELS;
+	config.own_channel_config.minimum_depth = 1;
 
 	let channel_manager = if let Ok(mut f) = fs::File::open(data_path.clone() + "/manager_data") {
 		let (last_block_hash, manager) = {
