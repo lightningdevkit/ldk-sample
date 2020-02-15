@@ -476,6 +476,8 @@ async fn main() {
 	let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
 	let mut event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone()).await;
 
+	println!("Initial setup complete, binding port and running!");
+
 	let mut listener = tokio::net::TcpListener::bind(("::".parse::<std::net::Ipv6Addr>().unwrap(), port)).await.unwrap();
 
 	let peer_manager_listener = peer_manager.clone();
