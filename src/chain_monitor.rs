@@ -249,6 +249,8 @@ impl<CS: keysinterface::ChannelKeys> AChainListener for (&mut ChannelMonitor<CS>
 }
 
 pub async fn sync_chain_monitor<CL : AChainListener + Sized>(new_block: String, old_block: String, rpc_client: &Arc<RPCClient>, mut chain_notifier: CL) {
+	if old_block == "0000000000000000000000000000000000000000000000000000000000000000" { return; }
+
 	let mut events = Vec::new();
 	find_fork(&mut events, new_block, old_block, rpc_client.clone()).await;
 	for event in events.iter().rev() {
