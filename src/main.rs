@@ -333,7 +333,7 @@ struct LogPrinter {}
 impl Logger for LogPrinter {
 	fn log(&self, record: &Record) {
 		if !record.args.to_string().contains("Received message of type 258") && !record.args.to_string().contains("Received message of type 256") && !record.args.to_string().contains("Received message of type 257") {
-			println!("{:<5} [{} : {}, {}] {}", record.level.to_string(), record.module_path, record.file, record.line, record.args);
+			eprintln!("{:<5} [{} : {}, {}] {}", record.level.to_string(), record.module_path, record.file, record.line, record.args);
 		}
 	}
 }
