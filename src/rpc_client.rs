@@ -8,8 +8,7 @@ use bitcoin_hashes::hex::FromHex;
 use bitcoin::blockdata::block::BlockHeader;
 
 use futures_util::future::TryFutureExt;
-
-use hyper::body::HttpBody;
+use futures_util::stream::TryStreamExt;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -78,7 +77,7 @@ impl RPCClient {
 				}
 				Err(())
 			} else {
-				if let Some(Ok(body)) = res.into_body().data().await {
+				if let Ok(body) = res.into_body().map_ok(|b| b.to_vec()).try_concat().await {
 					let v: serde_json::Value = match serde_json::from_slice(&body[..]) {
 						Ok(v) => v,
 						Err(_) => {
