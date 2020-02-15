@@ -280,7 +280,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "lightning"
 version = "0.0.10"
-source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4#30c54a9e93d0493e454ef224af09a00394b845f4"
+source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc#7d6b98ffecceb26e2f916b3fda91e9551514aefc"
 dependencies = [
  "bitcoin 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitcoin_hashes 0.7.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -301,11 +301,11 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.0.3"
-source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4#30c54a9e93d0493e454ef224af09a00394b845f4"
+source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc#7d6b98ffecceb26e2f916b3fda91e9551514aefc"
 dependencies = [
  "bitcoin 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitcoin_hashes 0.7.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4)",
+ "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc)",
  "secp256k1 0.15.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio 0.2.11 (git+https://github.com/tokio-rs/tokio)",
 ]
@@ -570,9 +570,9 @@ dependencies = [
  "cc 1.0.41 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-util 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper 0.13.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4)",
+ "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc)",
  "lightning-invoice 0.2.0 (git+https://github.com/rust-bitcoin/rust-lightning-invoice?rev=e738b463d041eb6236997c5f78fd1bc1c612af27)",
- "lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4)",
+ "lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc)",
  "rand 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "secp256k1 0.15.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.104 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -790,9 +790,9 @@ dependencies = [
 "checksum kernel32-sys 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "7507624b29483431c0ba2d82aece8ca6cdba9382bff4ddd0f7490560c056098d"
 "checksum lazy_static 1.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 "checksum libc 0.2.66 (registry+https://github.com/rust-lang/crates.io-index)" = "d515b1f41455adea1313a4a2ac8a8a477634fbae63cc6100e3aebb207ce61558"
-"checksum lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4)" = "<none>"
+"checksum lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc)" = "<none>"
 "checksum lightning-invoice 0.2.0 (git+https://github.com/rust-bitcoin/rust-lightning-invoice?rev=e738b463d041eb6236997c5f78fd1bc1c612af27)" = "<none>"
-"checksum lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=30c54a9e93d0493e454ef224af09a00394b845f4)" = "<none>"
+"checksum lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=7d6b98ffecceb26e2f916b3fda91e9551514aefc)" = "<none>"
 "checksum log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)" = "14b6052be84e6b71ab17edffc2eeabf5c2c3ae1fdb464aae35ac50c67a44e1f7"
 "checksum memchr 2.3.2 (registry+https://github.com/rust-lang/crates.io-index)" = "53445de381a1f436797497c61d851644d0e8e88e6140f22872ad33a704933978"
 "checksum mio 0.6.21 (registry+https://github.com/rust-lang/crates.io-index)" = "302dec22bcf6bae6dfb69c647187f4b4d0fb6f535521f7bc022430ce8e12008f"
