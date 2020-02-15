@@ -167,6 +167,9 @@ impl EventHandler {
 							},
 							SpendableOutputDescriptor::DynamicOutputP2WSH { outpoint, key, witness_script, to_self_delay, output } => {
 								println!("Got on-chain output ({}:{}) to redeemScript {} spendable with key {} at time {}...", hex_str(&outpoint.txid[..]), outpoint.vout, hex_str(&witness_script[..]), hex_str(&key[..]), to_self_delay);
+								let addr = us.rpc_client.make_rpc_call("getnewaddress",
+									&["\"rust-lightning dynamic output p2wsh claim\"", "\"bech32\""], false).await.unwrap();
+								let address = bitcoin::util::address::Address::from_str(addr.as_str().unwrap()).unwrap();
 								let mut tx = bitcoin::Transaction {
 									input: vec![bitcoin::TxIn {
 										previous_output: outpoint,
@@ -176,7 +179,7 @@ impl EventHandler {
 									}],
 									lock_time: 0,
 									output: vec![bitcoin::TxOut {
-										script_pubkey: bitcoin::Script::new(), //XXX
+										script_pubkey: address.script_pubkey(),
 										value: output.value,
 									}],
 									version: 2,
