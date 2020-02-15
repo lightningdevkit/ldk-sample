@@ -144,7 +144,9 @@ impl chaininterface::BroadcasterInterface for ChainInterface {
 		// is no way to block on a future completion. In some future version, this may break, see
 		// https://github.com/tokio-rs/tokio/issues/1830.
 		tokio::spawn(async move {
-			rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).await
+			if let Ok(txid) = rpc_client.make_rpc_call("sendrawtransaction", &[&tx_ser], true).await {
+				println!("Broadcasted transaction {}", txid);
+			}
 		});
 	}
 }
