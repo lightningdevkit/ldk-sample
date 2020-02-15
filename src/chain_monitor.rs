@@ -47,7 +47,7 @@ impl FeeEstimator {
 			high_prio_est: AtomicUsize::new(0),
 		}
 	}
-	async fn update_values(&self, rpc_client: &RPCClient) {
+	pub async fn update_values(&self, rpc_client: &RPCClient) {
 		if let Ok(v) = rpc_client.make_rpc_call("estimatesmartfee", &vec!["6", "\"CONSERVATIVE\""], false).await {
 			if let Some(serde_json::Value::Number(hp_btc_per_kb)) = v.get("feerate") {
 				self.high_prio_est.store(

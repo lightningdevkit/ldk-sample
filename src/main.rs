@@ -23,7 +23,7 @@ use rand::{thread_rng, Rng};
 
 use lightning::chain;
 use lightning::chain::chaininterface;
-use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor};
+use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor, InMemoryChannelKeys};
 use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::ln::channelmanager::{PaymentHash, PaymentPreimage};
@@ -69,13 +69,13 @@ struct EventHandler {
 	rpc_client: Arc<RPCClient>,
 	peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>,
 	channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>,
-	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
+	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>,
 	broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
+	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
 		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, mut receiver) = mpsc::channel(2);
 		let mut self_sender = sender.clone();
@@ -210,11 +210,11 @@ impl EventHandler {
 }
 
 struct ChannelMonitor {
-	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint>>,
+	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>,
 	file_prefix: String,
 }
 impl ChannelMonitor {
-	fn load_from_disk(file_prefix: &String) -> Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor)> {
+	async fn load_from_disk(file_prefix: &String, cur_tip_hash: String, rpc_client: Arc<RPCClient>, broadcaster: Arc<ChainInterface>, feeest: Arc<FeeEstimator>) -> Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)> {
 		let mut res = Vec::new();
 		for file_option in fs::read_dir(file_prefix).unwrap() {
 			let mut loaded = false;
@@ -224,8 +224,10 @@ impl ChannelMonitor {
 					if let Ok(txid) = Sha256dHash::from_hex(filename.split_at(64).0) {
 						if let Ok(index) = filename.split_at(65).1.split('.').next().unwrap().parse() {
 							if let Ok(contents) = fs::read(&file.path()) {
-								if let Ok((last_block_hash, loaded_monitor)) = <(Sha256dHash, channelmonitor::ChannelMonitor)>::read(&mut Cursor::new(&contents), Arc::new(LogPrinter{})) {
-									// TODO: Rescan from last_block_hash
+								if let Ok((last_block_hash, mut loaded_monitor)) = <(Sha256dHash, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)>::read(&mut Cursor::new(&contents), Arc::new(LogPrinter{})) {
+									let monitor_data = (&mut loaded_monitor, &*broadcaster, &*feeest);
+									sync_chain_monitor(cur_tip_hash.clone(), format!("{:x}", last_block_hash), &rpc_client, monitor_data).await;
+
 									res.push((chain::transaction::OutPoint { txid, index }, loaded_monitor));
 									loaded = true;
 								}
@@ -241,20 +243,15 @@ impl ChannelMonitor {
 		res
 	}
 
-	fn load_from_vec(&self, mut monitors: Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor)>) {
+	fn load_from_vec(&self, mut monitors: Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)>) {
 		for (outpoint, monitor) in monitors.drain(..) {
-			if let Err(_) = self.monitor.add_update_monitor(outpoint, monitor) {
+			if let Err(_) = self.monitor.add_monitor(outpoint, monitor) {
 				panic!("Failed to load monitor that deserialized");
 			}
 		}
 	}
-}
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-#[error("OSX creatively eats your data, using Lightning on OSX is unsafe")]
-struct ERR {}
 
-impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
-	fn add_update_monitor(&self, funding_txo: chain::transaction::OutPoint, monitor: channelmonitor::ChannelMonitor) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
+	fn write_monitor(&self, monitor: &channelmonitor::ChannelMonitor<InMemoryChannelKeys>) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
 		macro_rules! try_fs {
 			($res: expr) => {
 				match $res {
@@ -269,6 +266,7 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		// Note that this actually *isn't* enough (at least on Linux)! We need to fsync an fd with
 		// the containing dir, but Rust doesn't let us do that directly, sadly. TODO: Fix this with
 		// the libc crate!
+		let funding_txo = monitor.get_funding_txo().unwrap();
 		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.to_hex(), funding_txo.index);
 		let tmp_filename = filename.clone() + ".tmp";
 
@@ -305,11 +303,26 @@ impl channelmonitor::ManyChannelMonitor for ChannelMonitor {
 		if need_bk {
 			try_fs!(fs::remove_file(&bk_filename));
 		}
-		self.monitor.add_update_monitor(funding_txo, monitor)
+		Ok(())
+	}
+}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[error("OSX creatively eats your data, using Lightning on OSX is unsafe")]
+struct ERR {}
+
+impl channelmonitor::ManyChannelMonitor<InMemoryChannelKeys> for ChannelMonitor {
+	fn add_monitor(&self, funding_txo: chain::transaction::OutPoint, monitor: channelmonitor::ChannelMonitor<InMemoryChannelKeys>) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
+		self.monitor.add_monitor(funding_txo, monitor)?;
+		self.write_monitor(&self.monitor.get_monitor_ref_by_key(&funding_txo).unwrap())
 	}
 
-	fn fetch_pending_htlc_updated(&self) -> Vec<channelmonitor::HTLCUpdate> {
-		self.monitor.fetch_pending_htlc_updated()
+	fn update_monitor(&self, funding_txo: chain::transaction::OutPoint, update: channelmonitor::ChannelMonitorUpdate) -> Result<(), channelmonitor::ChannelMonitorUpdateErr> {
+		self.monitor.update_monitor(funding_txo, update)?;
+		self.write_monitor(&self.monitor.get_monitor_ref_by_key(&funding_txo).unwrap())
+	}
+
+	fn get_and_clear_pending_htlcs_updated(&self) -> Vec<channelmonitor::HTLCUpdate> {
+		self.monitor.get_and_clear_pending_htlcs_updated()
 	}
 }
 
@@ -407,8 +420,11 @@ async fn main() {
 	rpc_client.make_rpc_call("importprivkey",
 			&[&("\"".to_string() + &bitcoin::util::key::PrivateKey{ key: import_key_2, compressed: true, network}.to_wif() + "\""), "\"rust-lightning cooperative close\"", "false"], false).await.unwrap();
 
+	fee_estimator.update_values(&rpc_client).await;
+
 	let starting_blockhash = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await.unwrap()["bestblockhash"].as_str().unwrap().to_string();
-	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"));
+
+	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"), starting_blockhash.clone(), rpc_client.clone(), chain_monitor.clone(), fee_estimator.clone()).await;
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone())),
 		file_prefix: data_path.clone() + "/monitors",
@@ -437,7 +453,9 @@ async fn main() {
 			}).expect("Failed to deserialize channel manager")
 		};
 		monitor.load_from_vec(monitors_loaded);
-		//TODO: Rescan
+		if format!("{:x}", last_block_hash) != starting_blockhash {
+			sync_chain_monitor(starting_blockhash.clone(), format!("{:x}", last_block_hash), &rpc_client, &manager).await;
+		}
 		manager
 	} else {
 		if !monitors_loaded.is_empty() {
