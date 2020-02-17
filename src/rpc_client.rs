@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Deserialize)]
 pub struct GetHeaderResponse {
 	pub hash: String,
-	pub confirmations: u64,
+	pub confirmations: i64,
 	pub height: u32,
 	pub version: u32,
 	pub merkleroot: String,
@@ -32,7 +32,7 @@ impl GetHeaderResponse {
 			prev_blockhash: Sha256dHash::from_hex(&self.previousblockhash).unwrap(),
 			merkle_root: Sha256dHash::from_hex(&self.merkleroot).unwrap(),
 			time: self.time,
-			bits: self.bits.parse().unwrap(),
+			bits: u32::from_str_radix(&self.bits, 16).unwrap(),
 			nonce: self.nonce,
 		}
 	}
@@ -121,8 +121,8 @@ impl RPCClient {
 			let deser_res: Result<GetHeaderResponse, _> = serde_json::from_value(v);
 			match deser_res {
 				Ok(resp) => Ok(resp),
-				Err(_) => {
-					println!("Got invalid header message from RPC server!");
+				Err(e) => {
+					println!("Got invalid header message from RPC server for {}: {:?}!", header_hash, e);
 					Err(())
 				},
 			}
