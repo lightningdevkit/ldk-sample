@@ -505,14 +505,6 @@ async fn main() {
 		spawn_chain_monitor(starting_blockhash, fee_estimator, rpc_client, chain_monitor, block_notifier, event_notify.clone())
 	));
 
-	join_handles.push(tokio::spawn(async move {
-		let mut intvl = tokio::time::interval(Duration::from_secs(1));
-		loop {
-			intvl.tick().await;
-			//TODO: Regularly poll chain_monitor.txn_to_broadcast and send them out
-		}
-	}));
-
 	let peer_manager_timer = peer_manager.clone();
 	let chan_manager_timer = channel_manager.clone();
 	join_handles.push(tokio::spawn(async move {
