@@ -426,7 +426,9 @@ async fn main() {
 
 	fee_estimator.update_values(&rpc_client).await;
 
-	let starting_blockhash = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await.unwrap()["bestblockhash"].as_str().unwrap().to_string();
+	let starting_chaininfo = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await.unwrap();
+	let starting_blockhash = starting_chaininfo["bestblockhash"].as_str().unwrap().to_string();
+	let starting_blockheight: usize = starting_chaininfo["blocks"].as_u64().unwrap().try_into().unwrap();
 
 	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"), starting_blockhash.clone(), rpc_client.clone(), chain_monitor.clone(), fee_estimator.clone()).await;
 	let monitor = Arc::new(ChannelMonitor {
@@ -466,7 +468,7 @@ async fn main() {
 		if !monitors_loaded.is_empty() {
 			panic!("Found some channel monitors but no channel state!");
 		}
-		Arc::new(channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config, 0).unwrap()) //TODO: Get blockchain height
+		Arc::new(channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config, starting_blockheight).unwrap())
 	};
 	block_notifier.register_listener(Arc::clone(&(channel_manager.clone() as Arc<dyn chaininterface::ChainListener>)));
 	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()));
