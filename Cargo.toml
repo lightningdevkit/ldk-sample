@@ -25,5 +25,11 @@ base64 = "0.9"
 [patch.crates-io]
 tokio = { git = "https://github.com/tokio-rs/tokio" }
 
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
 [build-dependencies]
 cc = "1.0"
