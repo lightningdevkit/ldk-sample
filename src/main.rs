@@ -10,7 +10,7 @@ use utils::*;
 mod chain_monitor;
 use chain_monitor::*;
 
-use lightning_net_tokio::Connection;
+use lightning_net_tokio::*;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -494,7 +494,7 @@ async fn main() {
 			let peer_manager_listener = peer_manager_listener.clone();
 			let event_listener = event_listener.clone();
 			tokio::spawn(async move {
-				Connection::setup_inbound(peer_manager_listener, event_listener, sock).await;
+				setup_inbound(peer_manager_listener, event_listener, sock).await;
 			});
 		}
 	}));
@@ -517,7 +517,7 @@ async fn main() {
 		let mut intvl = tokio::time::interval(Duration::from_secs(60));
 		loop {
 			intvl.tick().await;
-			//TODO: This seems to break our connections: peer_manager_timer.timer_tick_occured();
+			peer_manager_timer.timer_tick_occured();
 			chan_manager_timer.timer_chan_freshness_every_min();
 		}
 	}));
@@ -557,7 +557,7 @@ async fn main() {
 											let peer_manager = peer_manager.clone();
 											let event_notify = event_notify.clone();
 											join_handles.push(tokio::spawn(async move {
-												Connection::setup_outbound(peer_manager, event_notify, pk,
+												setup_outbound(peer_manager, event_notify, pk,
 													tokio::net::TcpStream::from_std(stream).unwrap()).await;
 											}));
 										},
