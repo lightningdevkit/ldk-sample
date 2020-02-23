@@ -516,7 +516,7 @@ async fn main() {
 		}
 	}));
 
-	println!("Bound on port 9735! Our node_id: {}", hex_str(&PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()).serialize()));
+	println!("Bound on port {}! Our node_id: {}", port, hex_str(&PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()).serialize()));
 	println!("Started interactive shell! Commands:");
 	println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 	println!("'n pubkey value push_value' Create a channel with the given connected node (by pubkey), value in satoshis, and push the given msat value");
