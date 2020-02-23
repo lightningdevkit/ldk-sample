@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "hermit-abi"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "libc 0.2.67 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -280,7 +280,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "lightning"
 version = "0.0.10"
-source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663#04ec736eec214e8e9cbb7760b8f45d0903493663"
+source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42#6d408ef935b5e4111f5e4ee1309358da42501a42"
 dependencies = [
  "bitcoin 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitcoin_hashes 0.7.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -301,11 +301,11 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.0.3"
-source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663#04ec736eec214e8e9cbb7760b8f45d0903493663"
+source = "git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42#6d408ef935b5e4111f5e4ee1309358da42501a42"
 dependencies = [
  "bitcoin 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitcoin_hashes 0.7.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663)",
+ "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42)",
  "secp256k1 0.15.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio 0.2.11 (git+https://github.com/tokio-rs/tokio)",
 ]
@@ -375,7 +375,7 @@ name = "num_cpus"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
- "hermit-abi 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hermit-abi 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.67 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -570,9 +570,9 @@ dependencies = [
  "cc 1.0.41 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-util 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper 0.13.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663)",
+ "lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42)",
  "lightning-invoice 0.2.0 (git+https://github.com/rust-bitcoin/rust-lightning-invoice?rev=e738b463d041eb6236997c5f78fd1bc1c612af27)",
- "lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663)",
+ "lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42)",
  "rand 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "secp256k1 0.15.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.104 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -653,7 +653,7 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "0.2.11"
-source = "git+https://github.com/tokio-rs/tokio#7b8ce356c31aa8887ba4aa84fbceb3d64114785c"
+source = "git+https://github.com/tokio-rs/tokio#4213b794611d706beb0ad244a1ad03086bb8a94d"
 dependencies = [
  "bytes 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "fnv 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -670,7 +670,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "0.2.4"
-source = "git+https://github.com/tokio-rs/tokio#7b8ce356c31aa8887ba4aa84fbceb3d64114785c"
+source = "git+https://github.com/tokio-rs/tokio#4213b794611d706beb0ad244a1ad03086bb8a94d"
 dependencies = [
  "proc-macro2 1.0.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -778,7 +778,7 @@ dependencies = [
 "checksum futures-task 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)" = "7b0a34e53cf6cdcd0178aa573aed466b646eb3db769570841fda0c7ede375a27"
 "checksum futures-util 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)" = "22766cf25d64306bedf0384da004d05c9974ab104fcc4528f1236181c18004c5"
 "checksum h2 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "b9433d71e471c1736fd5a61b671fc0b148d7a2992f666c958d03cd8feb3b88d1"
-"checksum hermit-abi 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)" = "e2c55f143919fbc0bc77e427fe2d74cf23786d7c1875666f2fde3ac3c659bb67"
+"checksum hermit-abi 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)" = "1010591b26bbfe835e9faeabeb11866061cc7dcebffd56ad7d0942d0e61aefd8"
 "checksum hex 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)" = "805026a5d0141ffc30abb3be3173848ad46a1b1664fe632428479619a3644d77"
 "checksum http 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "b708cc7f06493459026f53b9a61a7a121a5d1ec6238dee58ea4941132b30156b"
 "checksum http-body 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)" = "13d5ff830006f7646652e057693569bfe0d51760c0085a071769d142a205111b"
@@ -790,9 +790,9 @@ dependencies = [
 "checksum kernel32-sys 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "7507624b29483431c0ba2d82aece8ca6cdba9382bff4ddd0f7490560c056098d"
 "checksum lazy_static 1.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 "checksum libc 0.2.67 (registry+https://github.com/rust-lang/crates.io-index)" = "eb147597cdf94ed43ab7a9038716637d2d1bf2bc571da995d0028dec06bd3018"
-"checksum lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663)" = "<none>"
+"checksum lightning 0.0.10 (git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42)" = "<none>"
 "checksum lightning-invoice 0.2.0 (git+https://github.com/rust-bitcoin/rust-lightning-invoice?rev=e738b463d041eb6236997c5f78fd1bc1c612af27)" = "<none>"
-"checksum lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=04ec736eec214e8e9cbb7760b8f45d0903493663)" = "<none>"
+"checksum lightning-net-tokio 0.0.3 (git+https://github.com/TheBlueMatt/rust-lightning?rev=6d408ef935b5e4111f5e4ee1309358da42501a42)" = "<none>"
 "checksum log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)" = "14b6052be84e6b71ab17edffc2eeabf5c2c3ae1fdb464aae35ac50c67a44e1f7"
 "checksum memchr 2.3.3 (registry+https://github.com/rust-lang/crates.io-index)" = "3728d817d99e5ac407411fa471ff9800a778d88a24685968b36824eaf4bee400"
 "checksum mio 0.6.21 (registry+https://github.com/rust-lang/crates.io-index)" = "302dec22bcf6bae6dfb69c647187f4b4d0fb6f535521f7bc022430ce8e12008f"
