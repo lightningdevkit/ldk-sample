@@ -9,8 +9,8 @@ edition = "2018"
 bitcoin = "0.21"
 bitcoin-bech32 = "0.7"
 bitcoin_hashes = "0.7"
-lightning = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "04ec736eec214e8e9cbb7760b8f45d0903493663" }
-lightning-net-tokio = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "04ec736eec214e8e9cbb7760b8f45d0903493663" }
+lightning = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "6d408ef935b5e4111f5e4ee1309358da42501a42" }
+lightning-net-tokio = { git = "https://github.com/TheBlueMatt/rust-lightning", rev = "6d408ef935b5e4111f5e4ee1309358da42501a42" }
 lightning-invoice = { git = "https://github.com/rust-bitcoin/rust-lightning-invoice", rev = "e738b463d041eb6236997c5f78fd1bc1c612af27" }
 secp256k1 = "0.15"
 hyper = "0.13"
