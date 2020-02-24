@@ -71,13 +71,14 @@ struct EventHandler {
 	peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>,
 	channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>,
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>,
+	router: Arc<router::Router>,
 	broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
-		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
+	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, router: Arc<router::Router>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
+		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, router, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (sender, mut receiver) = mpsc::channel(2);
 		let mut self_sender = sender.clone();
 		tokio::spawn(async move {
@@ -202,14 +203,23 @@ impl EventHandler {
 			}
 		}
 
-		let filename = format!("{}/manager_data", us.file_prefix);
-		let tmp_filename = filename.clone() + ".tmp";
+		let manager_filename = format!("{}/manager_data", us.file_prefix);
+		let manager_tmp_filename = manager_filename.clone() + ".tmp";
 
 		{
-			let mut f = fs::File::create(&tmp_filename).unwrap();
+			let mut f = fs::File::create(&manager_tmp_filename).unwrap();
 			us.channel_manager.write(&mut f).unwrap();
 		}
-		fs::rename(&tmp_filename, &filename).unwrap();
+		fs::rename(&manager_tmp_filename, &manager_filename).unwrap();
+
+		let router_filename = format!("{}/router_data", us.file_prefix);
+		let router_tmp_filename = router_filename.clone() + ".tmp";
+
+		{
+			let mut f = fs::File::create(&router_tmp_filename).unwrap();
+			us.router.write(&mut f).unwrap();
+		}
+		fs::rename(&router_tmp_filename, &router_filename).unwrap();
 	}
 }
 
@@ -471,7 +481,16 @@ async fn main() {
 		Arc::new(channelmanager::ChannelManager::new(network, fee_estimator.clone(), monitor.clone(), chain_monitor.clone(), logger.clone(), keys.clone(), config, starting_blockheight).unwrap())
 	};
 	block_notifier.register_listener(Arc::clone(&(channel_manager.clone() as Arc<dyn chaininterface::ChainListener>)));
-	let router = Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()));
+
+
+	let router = if let Ok(mut f) = fs::File::open(data_path.clone() + "/router_data") {
+		Arc::new(router::Router::read(&mut f, router::RouterReadArgs {
+			chain_monitor: chain_monitor.clone(),
+			logger: logger.clone()
+		}).expect("Failed to deserialize Router"))
+	} else {
+		Arc::new(router::Router::new(PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()), chain_monitor.clone(), logger.clone()))
+	};
 
 	let mut ephemeral_data = [0; 32];
 	rand::thread_rng().fill_bytes(&mut ephemeral_data);
@@ -481,7 +500,7 @@ async fn main() {
 	}, keys.get_node_secret(), &ephemeral_data, logger.clone()));
 
 	let payment_preimages = Arc::new(Mutex::new(HashMap::new()));
-	let mut event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), chain_monitor.clone(), payment_preimages.clone()).await;
+	let mut event_notify = EventHandler::setup(network, data_path, rpc_client.clone(), peer_manager.clone(), monitor.monitor.clone(), channel_manager.clone(), router.clone(), chain_monitor.clone(), payment_preimages.clone()).await;
 
 	println!("Initial setup complete, binding port and running!");
 
