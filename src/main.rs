@@ -48,7 +48,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 use std::time::{Duration, SystemTime};
-use std::io::{Cursor, Write};
+use std::io::{BufWriter, Cursor, Write};
 use std::fs;
 
 const FEE_PROPORTIONAL_MILLIONTHS: u32 = 10;
@@ -79,12 +79,34 @@ struct EventHandler {
 impl EventHandler {
 	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, router: Arc<router::Router>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
 		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, router, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
+		let (mut io_wake, mut io_receiver) = mpsc::channel(2);
 		let (sender, mut receiver) = mpsc::channel(2);
 		let mut self_sender = sender.clone();
+		let us_events = Arc::clone(&us);
 		tokio::spawn(async move {
 			loop {
 				receiver.recv().await.unwrap();
-				Self::check_handle_event(&us, &mut self_sender).await;
+				Self::check_handle_event(&us_events, &mut self_sender).await;
+				let _ = io_wake.try_send(());
+			}
+		});
+
+		// Router data has zero consistency requirements (it is all public anyway), so just write
+		// it in its own task that can run as slow as it wants.
+		tokio::spawn(async move {
+			loop {
+				io_receiver.recv().await.unwrap();
+
+				let router_filename = format!("{}/router_data", us.file_prefix);
+				let router_tmp_filename = router_filename.clone() + ".tmp";
+
+				{
+					let f = fs::File::create(&router_tmp_filename).unwrap();
+					let mut writer = BufWriter::new(f);
+					us.router.write(&mut writer).unwrap();
+					writer.flush().unwrap();
+				}
+				fs::rename(&router_tmp_filename, &router_filename).unwrap();
 			}
 		});
 		sender
@@ -205,21 +227,13 @@ impl EventHandler {
 
 		let manager_filename = format!("{}/manager_data", us.file_prefix);
 		let manager_tmp_filename = manager_filename.clone() + ".tmp";
-
 		{
-			let mut f = fs::File::create(&manager_tmp_filename).unwrap();
-			us.channel_manager.write(&mut f).unwrap();
+			let f = fs::File::create(&manager_tmp_filename).unwrap();
+			let mut writer = BufWriter::new(f);
+			us.channel_manager.write(&mut writer).unwrap();
+			writer.flush().unwrap();
 		}
 		fs::rename(&manager_tmp_filename, &manager_filename).unwrap();
-
-		let router_filename = format!("{}/router_data", us.file_prefix);
-		let router_tmp_filename = router_filename.clone() + ".tmp";
-
-		{
-			let mut f = fs::File::create(&router_tmp_filename).unwrap();
-			us.router.write(&mut f).unwrap();
-		}
-		fs::rename(&router_tmp_filename, &router_filename).unwrap();
 	}
 }
 
