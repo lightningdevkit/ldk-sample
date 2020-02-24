@@ -559,7 +559,7 @@ async fn main() {
 	println!("'l p' List the node_ids of all connected peers");
 	println!("'l c' List details about all channels");
 	println!("'s invoice [amt]' Send payment to an invoice, optionally with amount as whole msat if its not in the invoice");
-	println!("'p' Gets a new invoice for receiving funds");
+	println!("'p amt' Gets a new invoice for receiving funds for the given amt in msat");
 	print!("> "); std::io::stdout().flush().unwrap();
 	let mut lines = BufReader::new(tokio::io::stdin()).lines();
 	while let Ok(Some(line)) = lines.next_line().await {
@@ -757,27 +757,30 @@ async fn main() {
 					}
 				},
 				0x70 => { // 'p'
-					let mut payment_preimage = [0; 32];
-					thread_rng().fill_bytes(&mut payment_preimage);
-					let payment_hash = bitcoin_hashes::sha256::Hash::hash(&payment_preimage);
-					//TODO: Store this on disk somewhere!
-					payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.into_inner()), PaymentPreimage(payment_preimage));
-					println!("payment_hash: {}", hex_str(&payment_hash.into_inner()));
+					if let Ok(value) = line[2..].parse::<u64>() {
+						let mut payment_preimage = [0; 32];
+						thread_rng().fill_bytes(&mut payment_preimage);
+						let payment_hash = bitcoin_hashes::sha256::Hash::hash(&payment_preimage);
+						//TODO: Store this on disk somewhere!
+						payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.into_inner()), PaymentPreimage(payment_preimage));
+						println!("payment_hash: {}", hex_str(&payment_hash.into_inner()));
 
-					let invoice_res = lightning_invoice::InvoiceBuilder::new(match network {
-							constants::Network::Bitcoin => lightning_invoice::Currency::Bitcoin,
-							constants::Network::Testnet => lightning_invoice::Currency::BitcoinTestnet,
-							constants::Network::Regtest => lightning_invoice::Currency::BitcoinTestnet, //TODO
-						}).payment_hash(payment_hash).description("rust-lightning-bitcoinrpc invoice".to_string())
-						//.route(chans)
-						.current_timestamp()
-						.build_signed(|msg_hash| {
-							secp_ctx.sign_recoverable(msg_hash, &keys.get_node_secret())
-						});
-					match invoice_res {
-						Ok(invoice) => println!("Invoice: {}", invoice),
-						Err(e) => println!("Error creating invoice: {:?}", e),
-					}
+						let invoice_res = lightning_invoice::InvoiceBuilder::new(match network {
+								constants::Network::Bitcoin => lightning_invoice::Currency::Bitcoin,
+								constants::Network::Testnet => lightning_invoice::Currency::BitcoinTestnet,
+								constants::Network::Regtest => lightning_invoice::Currency::BitcoinTestnet, //TODO
+							}).payment_hash(payment_hash).description("rust-lightning-bitcoinrpc invoice".to_string())
+							//.route(chans)
+							.amount_pico_btc(value * 10)
+							.current_timestamp()
+							.build_signed(|msg_hash| {
+								secp_ctx.sign_recoverable(msg_hash, &keys.get_node_secret())
+							});
+						match invoice_res {
+							Ok(invoice) => println!("Invoice: {}", invoice),
+							Err(e) => println!("Error creating invoice: {:?}", e),
+						}
+					} else { println!("Invalid value"); }
 				},
 				_ => println!("Unknown command: {}", line.as_bytes()[0] as char),
 			}
