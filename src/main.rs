@@ -24,7 +24,7 @@ use rand::{thread_rng, Rng};
 use lightning::chain;
 use lightning::chain::chaininterface;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor, InMemoryChannelKeys};
-use lightning::ln::{peer_handler, router, channelmanager, channelmonitor};
+use lightning::ln::{peer_handler, router, channelmanager, channelmonitor, msgs};
 use lightning::ln::channelmonitor::ManyChannelMonitor;
 use lightning::ln::channelmanager::{PaymentHash, PaymentPreimage};
 use lightning::util::events::{Event, EventsProvider};
@@ -551,6 +551,7 @@ async fn main() {
 
 	println!("Bound on port {}! Our node_id: {}", port, hex_str(&PublicKey::from_secret_key(&secp_ctx, &keys.get_node_secret()).serialize()));
 	println!("Started interactive shell! Commands:");
+	println!("'a ip:port alias' Announce our node with the given ip:port as listening and the given alias");
 	println!("'c pubkey@host:port' Connect to given host+port, with given pubkey for auth");
 	println!("'n pubkey value push_value' Create a channel with the given connected node (by pubkey), value in satoshis, and push the given msat value");
 	println!("'k channel_id' Close a channel with the given id");
@@ -571,6 +572,26 @@ async fn main() {
 		}
 		if line.len() > 2 && line.as_bytes()[1] == ' ' as u8 {
 			match line.as_bytes()[0] {
+				0x61 => { // 'a'
+					let mut iter = line[2..].splitn(2, ' ');
+					if let Some(hostport) = iter.next() {
+						if let Some(alias) = iter.next() {
+							if let Ok(sockaddr) = hostport.parse::<std::net::SocketAddr>() {
+								let mut netaddrs = msgs::NetAddressSet::new();
+								match sockaddr.ip() {
+									std::net::IpAddr::V4(v4addr) => netaddrs.set_v4(v4addr.octets(), sockaddr.port()),
+									std::net::IpAddr::V6(v6addr) => netaddrs.set_v6(v6addr.octets(), sockaddr.port()),
+								}
+								if alias.len() <= 32 {
+									let mut aliasbytes = [0u8; 32];
+									aliasbytes[..alias.len()].copy_from_slice(alias.as_bytes());
+									channel_manager.broadcast_node_announcement([0, 0, 0], aliasbytes, netaddrs);
+									let _ = event_notify.try_send(());
+								} else { println!("alias must be no longer than 32 bytes"); }
+							} else { println!("Failed to map {} into a socket address", hostport); }
+						} else { println!("Invalid or no alias provided"); }
+					} else { println!("No host:port provided"); }
+				},
 				0x63 => { // 'c'
 					match hex_to_compressed_pubkey(line.split_at(2).1) {
 						Some(pk) => {
