@@ -67,13 +67,16 @@ impl RPCClient {
 				param_str += ",";
 			}
 		}
-		if let Ok(res) = self.client.request(request.body(hyper::Body::from("{\"method\":\"".to_string() + method + "\",\"params\":[" + &param_str + "],\"id\":" + &self.id.fetch_add(1, Ordering::AcqRel).to_string() + "}")).unwrap()).map_err(|_| {
+		let req = "{\"method\":\"".to_string() + method + "\",\"params\":[" + &param_str + "],\"id\":" + &self.id.fetch_add(1, Ordering::AcqRel).to_string() + "}";
+		if let Ok(res) = self.client.request(request.body(hyper::Body::from(req.clone())).unwrap()).map_err(|e| {
 			println!("Failed to connect to RPC server!");
+			eprintln!("RPC Gave {} in response to {}", e, req);
 			()
 		}).await {
 			if res.status() != hyper::StatusCode::OK {
 				if !may_fail {
 					println!("Failed to get RPC server response (probably bad auth)!");
+					eprintln!("RPC returned status {} in response to {}", res.status(), req);
 				}
 				Err(())
 			} else {
