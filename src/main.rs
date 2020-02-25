@@ -155,16 +155,12 @@ impl EventHandler {
 					println!("Broadcast funding tx {}!", tx.txid());
 				},
 				Event::PaymentReceived { payment_hash, payment_secret, amt } => {
-					println!("handling pr in 60 secs...");
-					let mut self_sender = self_sender.clone();
 					let images = us.payment_preimages.lock().unwrap();
 					if let Some(payment_preimage) = images.get(&payment_hash) {
-						if us.channel_manager.claim_funds(payment_preimage.clone(), &payment_secret, amt) { // Cheating by using amt here!
-							println!("Moneymoney! {} id {}", amt, hex_str(&payment_hash.0));
-						} else {
-							us.channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
-							println!("Received payment but we didn't know the preimage :(");
-						}
+						assert!(us.channel_manager.claim_funds(payment_preimage.clone(), &payment_secret, amt));
+					} else {
+						println!("Received payment but we didn't know the preimage :(");
+						us.channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
 					}
 					let _ = self_sender.try_send(());
 				},
