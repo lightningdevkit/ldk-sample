@@ -12,7 +12,7 @@ use lightning::chain::{chaininterface, keysinterface};
 use lightning::chain::chaininterface::{BlockNotifierArc, ChainError, ChainListener};
 use lightning::util::logger::Logger;
 use lightning::ln::channelmonitor::{ChannelMonitor, ManyChannelMonitor};
-use lightning::ln::channelmanager::ChannelManager;
+use lightning::ln::channelmanager::SimpleArcChannelManager;
 
 use bitcoin::blockdata::block::{Block, BlockHeader};
 use bitcoin::blockdata::transaction::Transaction;
@@ -221,7 +221,7 @@ impl AChainListener for &BlockNotifierArc {
 	}
 }
 
-impl<M> AChainListener for &Arc<ChannelManager<keysinterface::InMemoryChannelKeys, Arc<M>>>
+impl<M> AChainListener for &SimpleArcChannelManager<M, ChainInterface, FeeEstimator>
 		where M: ManyChannelMonitor<keysinterface::InMemoryChannelKeys> {
 	fn a_block_connected(&mut self, block: &Block, height: u32) {
 		let mut txn = Vec::with_capacity(block.txdata.len());
