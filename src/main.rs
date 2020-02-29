@@ -68,16 +68,22 @@ struct EventHandler {
 	network: constants::Network,
 	file_prefix: String,
 	rpc_client: Arc<RPCClient>,
-	peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>,
-	channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>,
-	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>,
+	peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor, ChainInterface, FeeEstimator>,
+	channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor, ChainInterface, FeeEstimator>,
+	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys, Arc<ChainInterface>, Arc<FeeEstimator>>>,
 	router: Arc<router::Router>,
 	broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>,
 	txn_to_broadcast: Mutex<HashMap<chain::transaction::OutPoint, blockdata::transaction::Transaction>>,
 	payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>,
 }
 impl EventHandler {
-	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>, peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>, channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor>, router: Arc<router::Router>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>, payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()> {
+	async fn setup(network: constants::Network, file_prefix: String, rpc_client: Arc<RPCClient>,
+		peer_manager: peer_handler::SimpleArcPeerManager<lightning_net_tokio::SocketDescriptor, ChannelMonitor, ChainInterface, FeeEstimator>,
+		monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys, Arc<ChainInterface>, Arc<FeeEstimator>>>,
+		channel_manager: channelmanager::SimpleArcChannelManager<ChannelMonitor, ChainInterface, FeeEstimator>,
+		router: Arc<router::Router>, broadcaster: Arc<dyn chain::chaininterface::BroadcasterInterface>,
+		payment_preimages: Arc<Mutex<HashMap<PaymentHash, PaymentPreimage>>>) -> mpsc::Sender<()>
+	{
 		let us = Arc::new(Self { secp_ctx: Secp256k1::new(), network, file_prefix, rpc_client, peer_manager, channel_manager, monitor, router, broadcaster, txn_to_broadcast: Mutex::new(HashMap::new()), payment_preimages });
 		let (mut io_wake, mut io_receiver) = mpsc::channel(2);
 		let (sender, mut receiver) = mpsc::channel(2);
@@ -234,7 +240,7 @@ impl EventHandler {
 }
 
 struct ChannelMonitor {
-	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys>>,
+	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<chain::transaction::OutPoint, InMemoryChannelKeys, Arc<ChainInterface>, Arc<FeeEstimator>>>,
 	file_prefix: String,
 }
 impl ChannelMonitor {
@@ -468,7 +474,7 @@ async fn main() {
 			for (outpoint, monitor) in monitors_loaded.iter_mut() {
 				monitors_refs.insert(*outpoint, monitor);
 			}
-			<(Sha256dHash, channelmanager::SimpleArcChannelManager<ChannelMonitor>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
+			<(Sha256dHash, channelmanager::SimpleArcChannelManager<ChannelMonitor, ChainInterface, FeeEstimator>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
 				keys_manager: keys.clone(),
 				fee_estimator: fee_estimator.clone(),
 				monitor: monitor.clone(),
@@ -624,7 +630,7 @@ async fn main() {
 									if let Some(push_str) = args.next() {
 										if let Ok(value) = value_str.parse() {
 											if let Ok(push) = push_str.parse() {
-												match channel_manager.create_channel(pk, value, push, 0) {
+												match channel_manager.create_channel(pk, value, push, 0, None) {
 													Ok(_) => println!("Channel created, sending open_channel!"),
 													Err(e) => println!("Failed to open channel: {:?}!", e),
 												}
