@@ -21,6 +21,7 @@ rand = "0.4"
 futures-util = "0.3"
 tokio = { version = "0.2", features = ["io-std", "io-util", "rt-threaded", "tcp", "time", "sync"] }
 base64 = "0.9"
+time = "0.2"
 
 [profile.release]
 panic = "abort"

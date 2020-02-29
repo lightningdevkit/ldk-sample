@@ -21,6 +21,8 @@ use secp256k1::Secp256k1;
 
 use rand::{thread_rng, Rng};
 
+use time::OffsetDateTime;
+
 use lightning::chain;
 use lightning::chain::chaininterface;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, SpendableOutputDescriptor, InMemoryChannelKeys};
@@ -359,8 +361,9 @@ impl channelmonitor::ManyChannelMonitor<InMemoryChannelKeys> for ChannelMonitor 
 struct LogPrinter {}
 impl Logger for LogPrinter {
 	fn log(&self, record: &Record) {
-		if !record.args.to_string().contains("Received message of type 258") && !record.args.to_string().contains("Received message of type 256") && !record.args.to_string().contains("Received message of type 257") {
-			eprintln!("{:<5} [{} : {}, {}] {}", record.level.to_string(), record.module_path, record.file, record.line, record.args);
+		let log = record.args.to_string();
+		if !log.contains("Received message of type 258") && !log.contains("Received message of type 256") && !log.contains("Received message of type 257") {
+			eprintln!("{} {:<5} [{}:{}] {}", OffsetDateTime::now().format("%F %T"), record.level.to_string(), record.module_path, record.line, log);
 		}
 	}
 }
