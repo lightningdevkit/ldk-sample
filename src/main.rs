@@ -382,7 +382,7 @@ async fn main() {
 		Arc::new(RPCClient::new(path_parts[0], path_parts[1]))
 	};
 
-	let mut network = constants::Network::Bitcoin;
+	let network;
 	let secp_ctx = Secp256k1::new();
 
 	let fee_estimator = Arc::new(FeeEstimator::new());
@@ -399,7 +399,7 @@ async fn main() {
 			"regtest" => network = constants::Network::Regtest,
 			_ => panic!("Unknown network type"),
 		}
-	}
+	} else { panic!("Failed to connect to RPC"); }
 	println!("Success! Starting up...");
 
 	if network == constants::Network::Bitcoin {
