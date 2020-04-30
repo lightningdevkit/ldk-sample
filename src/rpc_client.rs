@@ -2,8 +2,8 @@ use base64;
 use hyper;
 use serde_json;
 
-use bitcoin_hashes::sha256d::Hash as Sha256dHash;
-use bitcoin_hashes::hex::FromHex;
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 
 use bitcoin::blockdata::block::BlockHeader;
 
@@ -29,8 +29,8 @@ impl GetHeaderResponse {
 	pub fn to_block_header(&self) -> BlockHeader {
 		BlockHeader {
 			version: self.version,
-			prev_blockhash: Sha256dHash::from_hex(&self.previousblockhash).unwrap(),
-			merkle_root: Sha256dHash::from_hex(&self.merkleroot).unwrap(),
+			prev_blockhash: BlockHash::from_hex(&self.previousblockhash).unwrap(),
+			merkle_root: TxMerkleNode::from_hex(&self.merkleroot).unwrap(),
 			time: self.time,
 			bits: u32::from_str_radix(&self.bits, 16).unwrap(),
 			nonce: self.nonce,
