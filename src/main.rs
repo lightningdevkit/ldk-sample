@@ -16,8 +16,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use secp256k1::key::PublicKey;
-use secp256k1::Secp256k1;
+use bitcoin::secp256k1::key::PublicKey;
+use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1;
 
 use rand::{thread_rng, Rng};
 
@@ -39,9 +40,10 @@ use bitcoin::blockdata;
 use bitcoin::network::constants;
 use bitcoin::consensus::encode;
 
-use bitcoin_hashes::Hash;
-use bitcoin_hashes::sha256d::Hash as Sha256dHash;
-use bitcoin_hashes::hex::{ToHex, FromHex};
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256::Hash as Sha256Hash;
+use bitcoin::hashes::hex::{ToHex, FromHex};
+use bitcoin::hash_types::{BlockHash, Txid};
 
 use std::{env, mem};
 use std::collections::HashMap;
@@ -253,10 +255,10 @@ impl ChannelMonitor {
 			let file = file_option.unwrap();
 			if let Some(filename) = file.file_name().to_str() {
 				if filename.is_ascii() && filename.len() > 65 {
-					if let Ok(txid) = Sha256dHash::from_hex(filename.split_at(64).0) {
+					if let Ok(txid) = Txid::from_hex(filename.split_at(64).0) {
 						if let Ok(index) = filename.split_at(65).1.split('.').next().unwrap().parse() {
 							if let Ok(contents) = fs::read(&file.path()) {
-								if let Ok((last_block_hash, mut loaded_monitor)) = <(Sha256dHash, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)>::read(&mut Cursor::new(&contents), Arc::new(LogPrinter{})) {
+								if let Ok((last_block_hash, mut loaded_monitor)) = <(BlockHash, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)>::read(&mut Cursor::new(&contents), Arc::new(LogPrinter{})) {
 									let monitor_data = (&mut loaded_monitor, &*broadcaster, &*feeest);
 									sync_chain_monitor(cur_tip_hash.clone(), format!("{:x}", last_block_hash), &rpc_client, monitor_data).await;
 
@@ -298,7 +300,7 @@ impl ChannelMonitor {
 		// Note that this actually *isn't* enough (at least on Linux)! We need to fsync an fd with
 		// the containing dir, but Rust doesn't let us do that directly, sadly. TODO: Fix this with
 		// the libc crate!
-		let funding_txo = monitor.get_funding_txo().unwrap();
+		let funding_txo = monitor.get_funding_txo();
 		let filename = format!("{}/{}_{}", self.file_prefix, funding_txo.txid.to_hex(), funding_txo.index);
 		let tmp_filename = filename.clone() + ".tmp";
 
@@ -363,7 +365,7 @@ impl Logger for LogPrinter {
 	fn log(&self, record: &Record) {
 		let log = record.args.to_string();
 		if !log.contains("Received message of type 258") && !log.contains("Received message of type 256") && !log.contains("Received message of type 257") {
-			eprintln!("{} {:<5} [{}:{}] {}", OffsetDateTime::now().format("%F %T"), record.level.to_string(), record.module_path, record.line, log);
+			eprintln!("{} {:<5} [{}:{}] {}", OffsetDateTime::now_utc().format("%F %T"), record.level.to_string(), record.module_path, record.line, log);
 		}
 	}
 }
@@ -477,7 +479,7 @@ async fn main() {
 			for (outpoint, monitor) in monitors_loaded.iter_mut() {
 				monitors_refs.insert(*outpoint, monitor);
 			}
-			<(Sha256dHash, channelmanager::SimpleArcChannelManager<ChannelMonitor, ChainInterface, FeeEstimator>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
+			<(BlockHash, channelmanager::SimpleArcChannelManager<ChannelMonitor, ChainInterface, FeeEstimator>)>::read(&mut f, channelmanager::ChannelManagerReadArgs {
 				keys_manager: keys.clone(),
 				fee_estimator: fee_estimator.clone(),
 				monitor: monitor.clone(),
@@ -582,15 +584,20 @@ async fn main() {
 					if let Some(hostport) = iter.next() {
 						if let Some(alias) = iter.next() {
 							if let Ok(sockaddr) = hostport.parse::<std::net::SocketAddr>() {
-								let mut netaddrs = msgs::NetAddressSet::new();
-								match sockaddr.ip() {
-									std::net::IpAddr::V4(v4addr) => netaddrs.set_v4(v4addr.octets(), sockaddr.port()),
-									std::net::IpAddr::V6(v6addr) => netaddrs.set_v6(v6addr.octets(), sockaddr.port()),
-								}
 								if alias.len() <= 32 {
 									let mut aliasbytes = [0u8; 32];
 									aliasbytes[..alias.len()].copy_from_slice(alias.as_bytes());
-									channel_manager.broadcast_node_announcement([0, 0, 0], aliasbytes, netaddrs);
+									let addr = match sockaddr.ip() {
+										std::net::IpAddr::V4(v4addr) => msgs::NetAddress::IPv4 {
+											addr: v4addr.octets(),
+											port: sockaddr.port()
+										},
+										std::net::IpAddr::V6(v6addr) => msgs::NetAddress::IPv6 {
+											addr: v6addr.octets(),
+											port: sockaddr.port()
+										},
+									};
+									channel_manager.broadcast_node_announcement([0, 0, 0], aliasbytes, vec![addr]);
 									let _ = event_notify.try_send(());
 								} else { println!("alias must be no longer than 32 bytes"); }
 							} else { println!("Failed to map {} into a socket address", hostport); }
@@ -761,7 +768,7 @@ async fn main() {
 									Ok(route) => {
 										let mut payment_hash = PaymentHash([0; 32]);
 										payment_hash.0.copy_from_slice(&invoice.payment_hash()[..]);
-										match channel_manager.send_payment(route, payment_hash, None) {
+										match channel_manager.send_payment(&route, payment_hash, &None) {
 											Ok(()) => {
 												println!("Sending {} msat", amt);
 												let _ = event_notify.try_send(());
@@ -786,7 +793,7 @@ async fn main() {
 					if let Ok(value) = line[2..].parse::<u64>() {
 						let mut payment_preimage = [0; 32];
 						thread_rng().fill_bytes(&mut payment_preimage);
-						let payment_hash = bitcoin_hashes::sha256::Hash::hash(&payment_preimage);
+						let payment_hash = Sha256Hash::hash(&payment_preimage);
 						//TODO: Store this on disk somewhere!
 						payment_preimages.lock().unwrap().insert(PaymentHash(payment_hash.into_inner()), PaymentPreimage(payment_preimage));
 						println!("payment_hash: {}", hex_str(&payment_hash.into_inner()));

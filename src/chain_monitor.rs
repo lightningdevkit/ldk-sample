@@ -5,8 +5,7 @@ use bitcoin;
 use serde_json;
 use tokio;
 
-use bitcoin_hashes::sha256d::Hash as Sha256dHash;
-use bitcoin_hashes::hex::ToHex;
+use bitcoin::hashes::hex::ToHex;
 
 use lightning::chain::{chaininterface, keysinterface};
 use lightning::chain::chaininterface::{BlockNotifierArc, ChainError, ChainListener};
@@ -19,6 +18,7 @@ use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
 use bitcoin::util::hash::BitcoinHash;
+use bitcoin::hash_types::{BlockHash, Txid};
 
 use futures_util::future;
 use futures_util::future::FutureExt;
@@ -82,7 +82,7 @@ impl chaininterface::FeeEstimator for FeeEstimator {
 
 pub struct ChainInterface {
 	util: chaininterface::ChainWatchInterfaceUtil,
-	txn_to_broadcast: Mutex<HashMap<Sha256dHash, bitcoin::blockdata::transaction::Transaction>>,
+	txn_to_broadcast: Mutex<HashMap<Txid, bitcoin::blockdata::transaction::Transaction>>,
 	rpc_client: Arc<RPCClient>,
 }
 impl ChainInterface {
@@ -110,11 +110,11 @@ impl ChainInterface {
 	}
 }
 impl chaininterface::ChainWatchInterface for ChainInterface {
-	fn install_watch_tx(&self, txid: &bitcoin_hashes::sha256d::Hash, script: &bitcoin::blockdata::script::Script) {
+	fn install_watch_tx(&self, txid: &Txid, script: &bitcoin::blockdata::script::Script) {
 		self.util.install_watch_tx(txid, script);
 	}
 
-	fn install_watch_outpoint(&self, outpoint: (bitcoin_hashes::sha256d::Hash, u32), script_pubkey: &bitcoin::blockdata::script::Script) {
+	fn install_watch_outpoint(&self, outpoint: (Txid, u32), script_pubkey: &bitcoin::blockdata::script::Script) {
 		self.util.install_watch_outpoint(outpoint, script_pubkey);
 	}
 
@@ -122,7 +122,7 @@ impl chaininterface::ChainWatchInterface for ChainInterface {
 		self.util.watch_all_txn();
 	}
 
-	fn get_chain_utxo(&self, genesis_hash: bitcoin_hashes::sha256d::Hash, unspent_tx_output_identifier: u64) -> Result<(bitcoin::blockdata::script::Script, u64), ChainError> {
+	fn get_chain_utxo(&self, genesis_hash: BlockHash, unspent_tx_output_identifier: u64) -> Result<(bitcoin::blockdata::script::Script, u64), ChainError> {
 		self.util.get_chain_utxo(genesis_hash, unspent_tx_output_identifier)
 	}
 
