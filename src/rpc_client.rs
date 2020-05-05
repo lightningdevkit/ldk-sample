@@ -2,41 +2,10 @@ use base64;
 use hyper;
 use serde_json;
 
-use bitcoin::hashes::hex::FromHex;
-use bitcoin::hash_types::{BlockHash, TxMerkleNode};
-
-use bitcoin::blockdata::block::BlockHeader;
-
 use futures_util::future::TryFutureExt;
 use futures_util::stream::TryStreamExt;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-#[derive(Deserialize)]
-pub struct GetHeaderResponse {
-	pub hash: String,
-	pub confirmations: i64,
-	pub height: u32,
-	pub version: u32,
-	pub merkleroot: String,
-	pub time: u32,
-	pub nonce: u32,
-	pub bits: String,
-	pub previousblockhash: String,
-}
-
-impl GetHeaderResponse {
-	pub fn to_block_header(&self) -> BlockHeader {
-		BlockHeader {
-			version: self.version,
-			prev_blockhash: BlockHash::from_hex(&self.previousblockhash).unwrap(),
-			merkle_root: TxMerkleNode::from_hex(&self.merkleroot).unwrap(),
-			time: self.time,
-			bits: u32::from_str_radix(&self.bits, 16).unwrap(),
-			nonce: self.nonce,
-		}
-	}
-}
 
 pub struct RPCClient {
 	basic_auth: String,
@@ -107,27 +76,6 @@ impl RPCClient {
 					println!("Failed to load RPC server response!");
 					Err(())
 				}
-			}
-		} else { Err(()) }
-	}
-
-	pub async fn get_header(&self, header_hash: &str) -> Result<GetHeaderResponse, ()> {
-		let param = "\"".to_string() + header_hash + "\"";
-		let res = self.make_rpc_call("getblockheader", &[&param], false).await;
-		if let Ok(mut v) = res {
-			if v.is_object() {
-				if let None = v.get("previousblockhash") {
-					// Got a request for genesis block, add a dummy previousblockhash
-					v.as_object_mut().unwrap().insert("previousblockhash".to_string(), serde_json::Value::String("".to_string()));
-				}
-			}
-			let deser_res: Result<GetHeaderResponse, _> = serde_json::from_value(v);
-			match deser_res {
-				Ok(resp) => Ok(resp),
-				Err(e) => {
-					println!("Got invalid header message from RPC server for {}: {:?}!", header_hash, e);
-					Err(())
-				},
 			}
 		} else { Err(()) }
 	}

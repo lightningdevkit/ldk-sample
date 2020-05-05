@@ -1,27 +1,22 @@
 use crate::rpc_client::*;
-use crate::utils::hex_to_vec;
 
 use bitcoin;
 use serde_json;
 use tokio;
 
-use bitcoin::hashes::hex::ToHex;
-
-use lightning::chain::{chaininterface, keysinterface};
-use lightning::chain::chaininterface::{BlockNotifierArc, ChainError, ChainListener};
+use lightning::chain::chaininterface;
+use lightning::chain::chaininterface::{BlockNotifierArc, ChainError};
 use lightning::util::logger::Logger;
-use lightning::ln::channelmonitor::{ChannelMonitor, ManyChannelMonitor};
-use lightning::ln::channelmanager::SimpleArcChannelManager;
 
-use bitcoin::blockdata::block::{Block, BlockHeader};
+use lightning_block_sync::{AChainListener, BlockSource, dns_headers, http_clients, MicroSPVClient};
+
+use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
-use bitcoin::util::hash::BitcoinHash;
 use bitcoin::hash_types::{BlockHash, Txid};
 
 use futures_util::future;
-use futures_util::future::FutureExt;
 
 use tokio::sync::mpsc;
 
@@ -32,7 +27,6 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 use std::time::Duration;
-use std::pin::Pin;
 
 pub struct FeeEstimator {
 	background_est: AtomicUsize,
@@ -151,146 +145,57 @@ impl chaininterface::BroadcasterInterface for ChainInterface {
 	}
 }
 
-enum ForkStep {
-	DisconnectBlock((bitcoin::blockdata::block::BlockHeader, u32)),
-	ConnectBlock((String, u32)),
-}
-fn find_fork_step<'a>(steps_tx: &'a mut Vec<ForkStep>, current_header: GetHeaderResponse, target_header_opt: Option<(String, GetHeaderResponse)>, rpc_client: Arc<RPCClient>) -> Pin<Box<dyn Future<Output=()> + Send + 'a>> {
-	async move {
-		if target_header_opt.is_some() && target_header_opt.as_ref().unwrap().0 == current_header.previousblockhash {
-			// Target is the parent of current, we're done!
-		} else if current_header.height == 1 {
-		} else if target_header_opt.is_none() || target_header_opt.as_ref().unwrap().1.height < current_header.height {
-			steps_tx.push(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1)));
-			let new_cur_header = rpc_client.get_header(&current_header.previousblockhash).await.unwrap();
-			find_fork_step(steps_tx, new_cur_header, target_header_opt, rpc_client).await;
-		} else {
-			let target_header = target_header_opt.unwrap().1;
-			// Everything below needs to disconnect target, so go ahead and do that now
-			steps_tx.push(ForkStep::DisconnectBlock((target_header.to_block_header(), target_header.height)));
-			if target_header.previousblockhash == current_header.previousblockhash {
-				// Found the fork, also connect current and finish!
-				steps_tx.push(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1)));
-			} else if target_header.height > current_header.height {
-				// Target is higher, walk it back and recurse
-				let new_target_header = rpc_client.get_header(&target_header.previousblockhash).await.unwrap();
-				find_fork_step(steps_tx, current_header, Some((target_header.previousblockhash, new_target_header)), rpc_client).await;
-			} else {
-				// Target and current are at the same height, but we're not at fork yet, walk
-				// both back and recurse
-				steps_tx.push(ForkStep::ConnectBlock((current_header.previousblockhash.clone(), current_header.height - 1)));
-				let new_cur_header = rpc_client.get_header(&current_header.previousblockhash).await.unwrap();
-				let new_target_header = rpc_client.get_header(&target_header.previousblockhash).await.unwrap();
-				find_fork_step(steps_tx, new_cur_header, Some((target_header.previousblockhash, new_target_header)), rpc_client).await;
-			}
-		}
-	}.boxed()
-}
-/// Walks backwards from current_hash and target_hash finding the fork and sending ForkStep events
-/// into the steps_tx Sender. There is no ordering guarantee between different ForkStep types, but
-/// DisconnectBlock and ConnectBlock events are each in reverse, height-descending order.
-async fn find_fork(steps_tx: &mut Vec<ForkStep>, current_hash: String, target_hash: String, rpc_client: Arc<RPCClient>) {
-	if current_hash == target_hash { return; }
-
-	let current_header = rpc_client.get_header(&current_hash).await.unwrap();
-	steps_tx.push(ForkStep::ConnectBlock((current_hash, current_header.height)));
-
-	if current_header.previousblockhash == target_hash || current_header.height == 1 {
-		// Fastpath one-new-block-connected or reached block 1
-		return;
-	} else {
-		match rpc_client.get_header(&target_hash).await {
-			Ok(target_header) =>
-				find_fork_step(steps_tx, current_header, Some((target_hash, target_header)), rpc_client).await,
-			Err(_) => panic!(),
-		}
-	}
-}
-
-pub trait AChainListener {
-	fn a_block_connected(&mut self, block: &Block, height: u32);
-	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32);
-}
-
-impl AChainListener for &BlockNotifierArc {
-	fn a_block_connected(&mut self, block: &Block, height: u32) {
-		self.block_connected(block, height);
-	}
-	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32) {
-		self.block_disconnected(header, height);
-	}
-}
-
-impl<M> AChainListener for &SimpleArcChannelManager<M, ChainInterface, FeeEstimator>
-		where M: ManyChannelMonitor<keysinterface::InMemoryChannelKeys> {
-	fn a_block_connected(&mut self, block: &Block, height: u32) {
-		let mut txn = Vec::with_capacity(block.txdata.len());
-		let mut idxn = Vec::with_capacity(block.txdata.len());
-		for (i, tx) in block.txdata.iter().enumerate() {
-			txn.push(tx);
-			idxn.push(i as u32);
-		}
-		self.block_connected(&block.header, height, &txn, &idxn);
-	}
-	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32) {
-		self.block_disconnected(header, height);
-	}
-}
-
-impl<CS: keysinterface::ChannelKeys> AChainListener for (&mut ChannelMonitor<CS>, &ChainInterface, &FeeEstimator) {
-	fn a_block_connected(&mut self, block: &Block, height: u32) {
-		let mut txn = Vec::with_capacity(block.txdata.len());
-		for tx in block.txdata.iter() {
-			txn.push(tx);
-		}
-		self.0.block_connected(&txn, height, &block.bitcoin_hash(), self.1, self.2);
-	}
-	fn a_block_disconnected(&mut self, header: &BlockHeader, height: u32) {
-		self.0.block_disconnected(height, &header.bitcoin_hash(), self.1, self.2);
-	}
-}
-
-pub async fn sync_chain_monitor<CL : AChainListener + Sized>(new_block: String, old_block: String, rpc_client: &Arc<RPCClient>, mut chain_notifier: CL) {
-	if old_block == "0000000000000000000000000000000000000000000000000000000000000000" { return; }
-
-	let mut events = Vec::new();
-	find_fork(&mut events, new_block, old_block, rpc_client.clone()).await;
-	for event in events.iter().rev() {
-		if let &ForkStep::DisconnectBlock((ref header, ref height)) = &event {
-			println!("Disconnecting block {}", header.bitcoin_hash().to_hex());
-			chain_notifier.a_block_disconnected(header, *height);
-		}
-	}
-	for event in events.iter().rev() {
-		if let &ForkStep::ConnectBlock((ref hash, block_height)) = &event {
-			let blockhex = rpc_client.make_rpc_call("getblock", &[&("\"".to_string() + hash + "\""), "0"], false).await.unwrap();
-			let block: Block = encode::deserialize(&hex_to_vec(blockhex.as_str().unwrap()).unwrap()).unwrap();
-			println!("Connecting block {}", block.bitcoin_hash().to_hex());
-			chain_notifier.a_block_connected(&block, *block_height);
-		}
-	}
-}
-
-pub async fn spawn_chain_monitor(starting_blockhash: String, fee_estimator: Arc<FeeEstimator>, rpc_client: Arc<RPCClient>, chain_interface: Arc<ChainInterface>, chain_notifier: BlockNotifierArc, mut event_notify: mpsc::Sender<()>) {
+pub async fn rebroadcast_and_update_fees(fee_estimator: Arc<FeeEstimator>, chain_interface: Arc<ChainInterface>, rpc_client: Arc<RPCClient>) {
 	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(5));
+		interval.tick().await;
+		let mut cur_block = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await
+			.unwrap()["bestblockhash"].as_str().unwrap().to_string();
 		fee_estimator.update_values(&rpc_client).await;
-		let mut interval = tokio::time::interval(Duration::from_secs(1));
-		let mut cur_block = starting_blockhash;
 		loop {
 			interval.tick().await;
-			if let Ok(v) = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await {
-				let new_block = v["bestblockhash"].as_str().unwrap().to_string();
+			if let Ok(chaininfo) = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await {
+				let new_block = chaininfo["bestblockhash"].as_str().unwrap().to_string();
 				let old_block = cur_block.clone();
 
 				if new_block == old_block { continue; }
-				println!("NEW BEST BLOCK: {}!", new_block);
 				cur_block = new_block.clone();
 
-				sync_chain_monitor(new_block, old_block, &rpc_client, &chain_notifier).await;
 				fee_estimator.update_values(&rpc_client).await;
-				let _ = event_notify.try_send(());
 				chain_interface.rebroadcast_txn().await;
 			}
 		}
 	}).await.unwrap()
+}
+
+pub async fn init_sync_chain_monitor<CL : AChainListener + Sized>(new_block: BlockHash, old_block: BlockHash, block_source: (&str, &str), chain_notifier: CL) {
+	let mut rpc_client = lightning_block_sync::http_clients::RPCClient::new(block_source.0, "http://".to_string() + block_source.1 + "/").unwrap();
+	lightning_block_sync::init_sync_chain_monitor(new_block, old_block, &mut rpc_client, chain_notifier).await
+}
+
+pub fn spawn_chain_monitor(chain_tip_hash: BlockHash, block_source: (&str, &str), chain_notifier: BlockNotifierArc, mut event_notify: mpsc::Sender<()>, mainnet: bool) -> impl Future<Output = ()> {
+	let mut rpc_client = lightning_block_sync::http_clients::RPCClient::new(block_source.0, "http://".to_string() + block_source.1 + "/").unwrap();
+	async move {
+		tokio::spawn(async move {
+			let chain_tip = rpc_client.get_header(&chain_tip_hash, None).await.unwrap();
+			let mut block_sources = vec![&mut rpc_client as &mut dyn BlockSource];
+			let mut backup_sources = Vec::new();
+
+			let headers = dns_headers::DNSHeadersClient::new("bitcoinheaders.net".to_string());
+			let mut headers_source = dns_headers::CachingHeadersClient::new(headers, mainnet);
+			let mut backup_source = http_clients::RESTClient::new("http://cloudflare.deanonymizingseed.com/rest/".to_string()).unwrap();
+			if mainnet {
+				block_sources.push(&mut headers_source as &mut dyn BlockSource);
+				backup_sources.push(&mut backup_source as &mut dyn BlockSource);
+			}
+			let mut client = MicroSPVClient::init(chain_tip, block_sources, backup_sources, &chain_notifier, mainnet);
+			let mut interval = tokio::time::interval(Duration::from_secs(1));
+			loop {
+				interval.tick().await;
+				if client.poll_best_tip().await {
+					let _ = event_notify.try_send(());
+				}
+			}
+		}).await.unwrap()
+	}
 }

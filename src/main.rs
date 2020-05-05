@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate serde_derive;
-
 mod rpc_client;
 use rpc_client::*;
 
@@ -248,7 +245,7 @@ struct ChannelMonitor {
 	file_prefix: String,
 }
 impl ChannelMonitor {
-	async fn load_from_disk(file_prefix: &String, cur_tip_hash: String, rpc_client: Arc<RPCClient>, broadcaster: Arc<ChainInterface>, feeest: Arc<FeeEstimator>) -> Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)> {
+	async fn load_from_disk(file_prefix: &String, cur_tip_hash: BlockHash, rpc_client: (&str, &str), broadcaster: Arc<ChainInterface>, feeest: Arc<FeeEstimator>) -> Vec<(chain::transaction::OutPoint, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)> {
 		let mut res = Vec::new();
 		for file_option in fs::read_dir(file_prefix).unwrap() {
 			let mut loaded = false;
@@ -260,7 +257,7 @@ impl ChannelMonitor {
 							if let Ok(contents) = fs::read(&file.path()) {
 								if let Ok((last_block_hash, mut loaded_monitor)) = <(BlockHash, channelmonitor::ChannelMonitor<InMemoryChannelKeys>)>::read(&mut Cursor::new(&contents), Arc::new(LogPrinter{})) {
 									let monitor_data = (&mut loaded_monitor, &*broadcaster, &*feeest);
-									sync_chain_monitor(cur_tip_hash.clone(), format!("{:x}", last_block_hash), &rpc_client, monitor_data).await;
+									init_sync_chain_monitor(cur_tip_hash.clone(), last_block_hash, rpc_client, monitor_data).await;
 
 									res.push((chain::transaction::OutPoint { txid, index }, loaded_monitor));
 									loaded = true;
@@ -377,15 +374,13 @@ async fn main() {
 
 	lightning_invoice::check_platform();
 
-	let rpc_client = {
-		let path = env::args().skip(1).next().unwrap();
-		let path_parts: Vec<&str> = path.split('@').collect();
-		if path_parts.len() != 2 {
-			println!("Bad RPC URL provided");
-			return;
-		}
-		Arc::new(RPCClient::new(path_parts[0], path_parts[1]))
-	};
+	let rpc_path = env::args().skip(1).next().unwrap();
+	let rpc_path_parts: Vec<&str> = rpc_path.split('@').collect();
+	if rpc_path_parts.len() != 2 {
+		println!("Bad RPC URL provided");
+		return;
+	}
+	let rpc_client = Arc::new(RPCClient::new(rpc_path_parts[0], rpc_path_parts[1]));
 
 	let network;
 	let secp_ctx = Secp256k1::new();
@@ -458,10 +453,10 @@ async fn main() {
 	fee_estimator.update_values(&rpc_client).await;
 
 	let starting_chaininfo = rpc_client.make_rpc_call("getblockchaininfo", &[], false).await.unwrap();
-	let starting_blockhash = starting_chaininfo["bestblockhash"].as_str().unwrap().to_string();
+	let starting_blockhash = BlockHash::from_hex(starting_chaininfo["bestblockhash"].as_str().unwrap()).unwrap();
 	let starting_blockheight: usize = starting_chaininfo["blocks"].as_u64().unwrap().try_into().unwrap();
 
-	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"), starting_blockhash.clone(), rpc_client.clone(), chain_monitor.clone(), fee_estimator.clone()).await;
+	let mut monitors_loaded = ChannelMonitor::load_from_disk(&(data_path.clone() + "/monitors"), starting_blockhash.clone(), (rpc_path_parts[0], rpc_path_parts[1]), chain_monitor.clone(), fee_estimator.clone()).await;
 	let monitor = Arc::new(ChannelMonitor {
 		monitor: Arc::new(channelmonitor::SimpleManyChannelMonitor::new(chain_monitor.clone(), chain_monitor.clone(), logger.clone(), fee_estimator.clone())),
 		file_prefix: data_path.clone() + "/monitors",
@@ -491,8 +486,8 @@ async fn main() {
 			}).expect("Failed to deserialize channel manager")
 		};
 		monitor.load_from_vec(monitors_loaded);
-		if format!("{:x}", last_block_hash) != starting_blockhash {
-			sync_chain_monitor(starting_blockhash.clone(), format!("{:x}", last_block_hash), &rpc_client, &manager).await;
+		if last_block_hash != starting_blockhash {
+			init_sync_chain_monitor(starting_blockhash.clone(), last_block_hash, (rpc_path_parts[0], rpc_path_parts[1]), &manager).await;
 		}
 		manager
 	} else {
@@ -542,7 +537,11 @@ async fn main() {
 	}));
 
 	join_handles.push(tokio::spawn(
-		spawn_chain_monitor(starting_blockhash, fee_estimator, rpc_client, chain_monitor, block_notifier, event_notify.clone())
+		rebroadcast_and_update_fees(fee_estimator, chain_monitor, rpc_client.clone())
+	));
+	let starting_blockhash = BlockHash::from_hex(starting_chaininfo["bestblockhash"].as_str().unwrap()).unwrap();
+	join_handles.push(tokio::spawn(
+		spawn_chain_monitor(starting_blockhash, (rpc_path_parts[0], rpc_path_parts[1]), block_notifier, event_notify.clone(), network == constants::Network::Bitcoin)
 	));
 
 	let peer_manager_timer = peer_manager.clone();
