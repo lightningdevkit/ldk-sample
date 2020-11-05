@@ -1,11 +1,15 @@
-Simple Sample rust-lightning-based Lightning Node
+LDK-sample node, a friendly library demonstration.
 
-* Uses Bitcoin Core's RPC interface for non-channel funds management as well as consensus data.
-* Accepts commands on the command line to perform Lightning actions.
-* panic!()s if you try to use this on mainnet as most data is not persisted to disk and error handling is generally a crapshoot.
-* Assumes you have a local copy of rust-lightning and rust-lightning-invoice from the rust-bitcoin project in the same directory as this repo.
+DO NOT USE IT ON MAINET, IT'LL BURN KITTENS AND LOSE YOUR MONEY !!!
 
-* Can connect to nodes/accept incoming connections.
-* Can open outbound channels and receive inbound channels.
-* Can send payments over multiple hops using in-built router and BOLT11 parsing from rust-lightning-invoice (which is not yet complete, so you have to repeat the final node's node_id on the command line).
-* Can receive payments but cannot yet generate BOLT11 invoices.
+Basic documentation is coming soon, but those commands should be working
+
+```
+./ldk-cli connect 03f2f14bfa554d0205847fbdf46f1948cdd5fa7911c2be95e50a7263e3d126fa95 127.0.0.1 9735
+
+./ldk-cli open 03f2f14bfa554d0205847fbdf46f1948cdd5fa7911c2be95e50a7263e3d126fa95 12345 6789
+
+./ldk-cli send 03f2f14bfa554d0205847fbdf46f1948cdd5fa7911c2be95e50a7263e3d126fa95 157230162837504 10
+```
+
+
