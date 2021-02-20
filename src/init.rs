@@ -104,10 +104,13 @@ async fn main() {
 		if !(network == bitcoind_net) { exit_on!("Divergent network between LDK node and bitcoind"); }
 	} else { exit_on!("Failed to connect to bitcoind RPC server, check your `bitcoind_hostport`/`bitcoind_credentials` settings"); }
 
+	//TODO: connect to bitcoind
 	let fee_estimator = Arc::new(SampleFeeEstimator::new());
 
+	//TODO: connect to bitcoind
 	let tx_broadcaster = Arc::new(TxBroadcaster::new());
 
+	//TODO: replace by daemon dir
 	let data_path = String::from("/home/user/.ldk-node");
 	if !fs::metadata(&data_path).unwrap().is_dir() {
 		exit_on!("Need storage_directory_path to exist and be a directory (or symlink to one)");
