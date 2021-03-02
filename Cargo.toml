@@ -7,17 +7,24 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-background-processor = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d" }
+# background-processor = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d" }
+background-processor = { path = "../rust-lightning/background-processor" } 
 base64 = "0.13.0"
-bitcoin = "0.26"
+bitcoin = "0.24"
+bitcoin-bech32 = "0.7"
 hex = "0.3"
-lightning = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "c35002fa9c16042badfa5e7bf819df5f1d2ae60a" }
-# lightning-block-sync = { git = "https://github.com/valentinewallace/rust-lightning", rev = "21deebf64b4e6ba3f104dc6c68efa5d3abc4c0f7", features = ["tokio", "rpc-client"] }
-lightning-block-sync = { path = "../rust-lightning/lightning-block-sync", features = ["rpc-client", "expose-rpc" ] }
+# lightning = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "c35002fa9c16042badfa5e7bf819df5f1d2ae60a" }
+lightning = { path = "../rust-lightning/lightning" }
+lightning-block-sync = { path = "../rust-lightning/lightning-block-sync", features = ["rpc-client", "generic-rpc-client" ] }
 lightning-invoice = { git = "https://github.com/rust-bitcoin/rust-lightning-invoice", rev = "ea25dc7e46a6339493032c500db4fe3a8fdb1acd" }
-lightning-net-tokio = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "ff00f6f8861419b73269e6c51d75ac9de75f1d1f" }
-lightning-persister = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "aa127f55edc4439b03426644d178e402397329e8" }
+# lightning-net-tokio = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "ff00f6f8861419b73269e6c51d75ac9de75f1d1f" }
+lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
+# lightning-persister = { git = "https://github.com/rust-bitcoin/rust-lightning", rev = "aa127f55edc4439b03426644d178e402397329e8" }
+lightning-persister = { path = "../rust-lightning/lightning-persister" }
 time = "0.2"
 rand = "0.4"
 serde_json = { version = "1.0" }
-tokio = { version = "0.2", features = ["io-std", "io-util", "rt-threaded", "tcp", "time", "sync"] }
+# tokio = { version = "0.2", features = ["io-std", "io-util", "rt-threaded", "tcp", "time", "sync"] }
+# tokio = { version = "1.0", features = [ "full", "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
+# tokio = { version = "1.0", features = [ "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
+tokio = { version = "1.0", features = [ "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }

@@ -9,11 +9,10 @@ checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 [[package]]
 name = "background-processor"
 version = "0.1.0"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d#d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d"
 dependencies = [
- "bitcoin 0.24.0",
- "lightning 0.0.12 (git+https://github.com/rust-bitcoin/rust-lightning?rev=d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d)",
- "lightning-persister 0.0.1 (git+https://github.com/rust-bitcoin/rust-lightning?rev=d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d)",
+ "bitcoin",
+ "lightning",
+ "lightning-persister",
 ]
 
 [[package]]
@@ -30,6 +29,12 @@ checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 
 [[package]]
 name = "bech32"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4408a9bf5c378a42ca9039e4ef3e3d8df3443f76d2ebe249fd720a2c5e17d2da"
+
+[[package]]
+name = "bech32"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcf67bb7ba7797a081cd19009948ab533af7c355d5caf1d08c777582d351e9c"
@@ -40,20 +45,18 @@ version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6558aeb12c290cce541a222cba280387161f2bd180a7feb85f8f172cd8ba80e8"
 dependencies = [
- "bech32",
+ "bech32 0.7.2",
  "bitcoin_hashes 0.8.0",
  "secp256k1 0.18.0",
 ]
 
 [[package]]
-name = "bitcoin"
-version = "0.26.0"
+name = "bitcoin-bech32"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ec5f88a446d66e7474a3b8fa2e348320b574463fb78d799d90ba68f79f48e0e"
+checksum = "b5791779c83cf6bde070a92c22505f2faa06487fc8f372e4d485c41a71351105"
 dependencies = [
- "bech32",
- "bitcoin_hashes 0.9.4",
- "secp256k1 0.20.1",
+ "bech32 0.4.1",
 ]
 
 [[package]]
@@ -69,22 +72,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0aaf87b776808e26ae93289bc7d025092b6d909c193f0cdee0b3a86e7bd3c776"
 
 [[package]]
-name = "bitflags"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
-
-[[package]]
 name = "bumpalo"
 version = "3.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "099e596ef14349721d9016f6b80dd3419ea1bf289ab9b44df8e4dfd3a005d5d9"
-
-[[package]]
-name = "bytes"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e4cec68f03f32e44924783795810fa50a7035d8c8ebe78580ad7e6c703fba38"
 
 [[package]]
 name = "bytes"
@@ -97,12 +88,6 @@ name = "cc"
 version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c0496836a84f8d0495758516b8621a622beb77c0fed418570e50764093ced48"
-
-[[package]]
-name = "cfg-if"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4785bdd1c96b2a846b2bd7cc02e86b6b3dbf14e7e53446c4f54c92a361040822"
 
 [[package]]
 name = "cfg-if"
@@ -129,32 +114,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "212d0f5754cb6769937f4501cc0e67f4f4483c8d2c3e1e922ee9edbe4ab4c7c0"
 
 [[package]]
-name = "fnv"
-version = "1.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-
-[[package]]
 name = "fuchsia-cprng"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
-
-[[package]]
-name = "fuchsia-zircon"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e9763c69ebaae630ba35f74888db465e49e259ba1bc0eda7d06f4a067615d82"
-dependencies = [
- "bitflags",
- "fuchsia-zircon-sys",
-]
-
-[[package]]
-name = "fuchsia-zircon-sys"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 
 [[package]]
 name = "futures"
@@ -244,7 +207,7 @@ dependencies = [
  "futures-sink",
  "futures-task",
  "memchr",
- "pin-project-lite 0.2.4",
+ "pin-project-lite",
  "pin-utils",
  "proc-macro-hack",
  "proc-macro-nested",
@@ -267,29 +230,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "805026a5d0141ffc30abb3be3173848ad46a1b1664fe632428479619a3644d77"
 
 [[package]]
-name = "iovec"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2b3ea6ff95e175473f8ffe6a7eb7c00d054240321b84c57051175fe3c1e075e"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "itoa"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd25036021b0de88a0aff6b850051563c6516d0bf53f8638938edbb9de732736"
-
-[[package]]
-name = "kernel32-sys"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7507624b29483431c0ba2d82aece8ca6cdba9382bff4ddd0f7490560c056098d"
-dependencies = [
- "winapi 0.2.8",
- "winapi-build",
-]
 
 [[package]]
 name = "lazy_static"
@@ -303,17 +247,18 @@ version = "0.1.0"
 dependencies = [
  "background-processor",
  "base64",
- "bitcoin 0.26.0",
+ "bitcoin",
+ "bitcoin-bech32",
  "hex",
- "lightning 0.0.12 (git+https://github.com/rust-bitcoin/rust-lightning?rev=c35002fa9c16042badfa5e7bf819df5f1d2ae60a)",
+ "lightning",
  "lightning-block-sync",
  "lightning-invoice",
  "lightning-net-tokio",
- "lightning-persister 0.0.1 (git+https://github.com/rust-bitcoin/rust-lightning?rev=aa127f55edc4439b03426644d178e402397329e8)",
+ "lightning-persister",
  "rand",
  "serde_json",
  "time",
- "tokio 0.2.25",
+ "tokio",
 ]
 
 [[package]]
@@ -326,52 +271,20 @@ checksum = "b7282d924be3275cec7f6756ff4121987bc6481325397dde6ba3e7802b1a8b1c"
 name = "lightning"
 version = "0.0.12"
 dependencies = [
- "bitcoin 0.24.0",
-]
-
-[[package]]
-name = "lightning"
-version = "0.0.12"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=aa127f55edc4439b03426644d178e402397329e8#aa127f55edc4439b03426644d178e402397329e8"
-dependencies = [
- "bitcoin 0.24.0",
-]
-
-[[package]]
-name = "lightning"
-version = "0.0.12"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=c35002fa9c16042badfa5e7bf819df5f1d2ae60a#c35002fa9c16042badfa5e7bf819df5f1d2ae60a"
-dependencies = [
- "bitcoin 0.24.0",
-]
-
-[[package]]
-name = "lightning"
-version = "0.0.12"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d#d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d"
-dependencies = [
- "bitcoin 0.24.0",
-]
-
-[[package]]
-name = "lightning"
-version = "0.0.12"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=ff00f6f8861419b73269e6c51d75ac9de75f1d1f#ff00f6f8861419b73269e6c51d75ac9de75f1d1f"
-dependencies = [
- "bitcoin 0.24.0",
+ "bitcoin",
 ]
 
 [[package]]
 name = "lightning-block-sync"
 version = "0.0.1"
 dependencies = [
- "bitcoin 0.24.0",
+ "bitcoin",
  "chunked_transfer",
  "futures",
- "lightning 0.0.12",
+ "lightning",
  "serde",
  "serde_json",
- "tokio 1.2.0",
+ "tokio",
 ]
 
 [[package]]
@@ -379,7 +292,7 @@ name = "lightning-invoice"
 version = "0.4.0"
 source = "git+https://github.com/rust-bitcoin/rust-lightning-invoice?rev=ea25dc7e46a6339493032c500db4fe3a8fdb1acd#ea25dc7e46a6339493032c500db4fe3a8fdb1acd"
 dependencies = [
- "bech32",
+ "bech32 0.7.2",
  "bitcoin_hashes 0.9.4",
  "num-traits",
  "secp256k1 0.20.1",
@@ -388,33 +301,20 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.0.5"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=ff00f6f8861419b73269e6c51d75ac9de75f1d1f#ff00f6f8861419b73269e6c51d75ac9de75f1d1f"
 dependencies = [
- "bitcoin 0.24.0",
- "lightning 0.0.12 (git+https://github.com/rust-bitcoin/rust-lightning?rev=ff00f6f8861419b73269e6c51d75ac9de75f1d1f)",
- "tokio 1.2.0",
+ "bitcoin",
+ "lightning",
+ "tokio",
 ]
 
 [[package]]
 name = "lightning-persister"
 version = "0.0.1"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=aa127f55edc4439b03426644d178e402397329e8#aa127f55edc4439b03426644d178e402397329e8"
 dependencies = [
- "bitcoin 0.24.0",
+ "bitcoin",
  "libc",
- "lightning 0.0.12 (git+https://github.com/rust-bitcoin/rust-lightning?rev=aa127f55edc4439b03426644d178e402397329e8)",
- "winapi 0.3.9",
-]
-
-[[package]]
-name = "lightning-persister"
-version = "0.0.1"
-source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d#d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d"
-dependencies = [
- "bitcoin 0.24.0",
- "libc",
- "lightning 0.0.12 (git+https://github.com/rust-bitcoin/rust-lightning?rev=d6f41d3c0b38b9ec9e06a3acfdd9f4b1d007a27d)",
- "winapi 0.3.9",
+ "lightning",
+ "winapi",
 ]
 
 [[package]]
@@ -423,7 +323,7 @@ version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51b9bbe6c47d51fc3e1a9b945965946b4c44142ab8792c50835a980d362c2710"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if",
 ]
 
 [[package]]
@@ -434,46 +334,15 @@ checksum = "0ee1c47aaa256ecabcaea351eae4a9b01ef39ed810004e298d2511ed284b1525"
 
 [[package]]
 name = "mio"
-version = "0.6.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4afd66f5b91bf2a3bc13fad0e21caedac168ca4c707504e75585648ae80e4cc4"
-dependencies = [
- "cfg-if 0.1.10",
- "fuchsia-zircon",
- "fuchsia-zircon-sys",
- "iovec",
- "kernel32-sys",
- "libc",
- "log",
- "miow 0.2.2",
- "net2",
- "slab",
- "winapi 0.2.8",
-]
-
-[[package]]
-name = "mio"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e50ae3f04d169fcc9bde0b547d1c205219b7157e07ded9c5aff03e0637cb3ed7"
 dependencies = [
  "libc",
  "log",
- "miow 0.3.6",
+ "miow",
  "ntapi",
- "winapi 0.3.9",
-]
-
-[[package]]
-name = "miow"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebd808424166322d4a38da87083bfddd3ac4c131334ed55856112eb06d46944d"
-dependencies = [
- "kernel32-sys",
- "net2",
- "winapi 0.2.8",
- "ws2_32-sys",
+ "winapi",
 ]
 
 [[package]]
@@ -483,18 +352,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a33c1b55807fbed163481b5ba66db4b2fa6cde694a5027be10fb724206c5897"
 dependencies = [
  "socket2",
- "winapi 0.3.9",
-]
-
-[[package]]
-name = "net2"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "391630d12b68002ae1e25e8f974306474966550ad82dac6886fb8910c19568ae"
-dependencies = [
- "cfg-if 0.1.10",
- "libc",
- "winapi 0.3.9",
+ "winapi",
 ]
 
 [[package]]
@@ -503,7 +361,7 @@ version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f6bb902e437b6d86e03cce10a7e2af662292c5dfef23b65899ea3ac9354ad44"
 dependencies = [
- "winapi 0.3.9",
+ "winapi",
 ]
 
 [[package]]
@@ -530,12 +388,6 @@ name = "once_cell"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13bd41f508810a131401606d54ac32a467c97172d74ba7662562ebba5ad07fa0"
-
-[[package]]
-name = "pin-project-lite"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c917123afa01924fc84bb20c4c03f004d9c38e5127e3c039bbf7f4b9c76a2f6b"
 
 [[package]]
 name = "pin-project-lite"
@@ -589,7 +441,7 @@ dependencies = [
  "libc",
  "rand_core 0.3.1",
  "rdrand",
- "winapi 0.3.9",
+ "winapi",
 ]
 
 [[package]]
@@ -731,9 +583,9 @@ version = "0.3.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "122e570113d28d773067fab24266b66753f6ea915758651696b6e35e49f88d6e"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if",
  "libc",
- "winapi 0.3.9",
+ "winapi",
 ]
 
 [[package]]
@@ -817,7 +669,7 @@ dependencies = [
  "stdweb",
  "time-macros",
  "version_check",
- "winapi 0.3.9",
+ "winapi",
 ]
 
 [[package]]
@@ -845,34 +697,17 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "0.2.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6703a273949a90131b290be1fe7b039d0fc884aa1935860dfcbe056f28cd8092"
-dependencies = [
- "bytes 0.5.6",
- "fnv",
- "iovec",
- "lazy_static",
- "memchr",
- "mio 0.6.23",
- "num_cpus",
- "pin-project-lite 0.1.11",
- "slab",
-]
-
-[[package]]
-name = "tokio"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8190d04c665ea9e6b6a0dc45523ade572c088d2e6566244c1122671dbf4ae3a"
 dependencies = [
  "autocfg",
- "bytes 1.0.1",
+ "bytes",
  "libc",
  "memchr",
- "mio 0.7.7",
+ "mio",
  "num_cpus",
- "pin-project-lite 0.2.4",
+ "pin-project-lite",
  "tokio-macros",
 ]
 
@@ -905,7 +740,7 @@ version = "0.2.70"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55c0f7123de74f0dab9b7d00fd614e7b19349cd1e2f5252bbe9b1754b59433be"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if",
  "wasm-bindgen-macro",
 ]
 
@@ -955,12 +790,6 @@ checksum = "dd4945e4943ae02d15c13962b38a5b1e81eadd4b71214eee75af64a4d6a4fd64"
 
 [[package]]
 name = "winapi"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "167dc9d6949a9b857f3451275e911c3f44255842c1f7a76f33c55103a909087a"
-
-[[package]]
-name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
@@ -968,12 +797,6 @@ dependencies = [
  "winapi-i686-pc-windows-gnu",
  "winapi-x86_64-pc-windows-gnu",
 ]
-
-[[package]]
-name = "winapi-build"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d315eee3b34aca4797b2da6b13ed88266e6d612562a0c46390af8299fc699bc"
 
 [[package]]
 name = "winapi-i686-pc-windows-gnu"
@@ -986,13 +809,3 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
-
-[[package]]
-name = "ws2_32-sys"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d59cefebd0c892fa2dd6de581e937301d8552cb44489cdff035c6187cb63fa5e"
-dependencies = [
- "winapi 0.2.8",
- "winapi-build",
-]
