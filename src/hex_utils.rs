@@ -1,6 +1,6 @@
 use bitcoin::secp256k1::key::PublicKey;
 
-pub fn hex_to_vec(hex: &str) -> Option<Vec<u8>> {
+pub fn to_vec(hex: &str) -> Option<Vec<u8>> {
 	  let mut out = Vec::with_capacity(hex.len() / 2);
 
 	  let mut b = 0;
@@ -30,8 +30,8 @@ pub fn hex_str(value: &[u8]) -> String {
 	  res
 }
 
-pub fn hex_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
-	  let data = match hex_to_vec(&hex[0..33*2]) {
+pub fn to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
+	  let data = match to_vec(&hex[0..33*2]) {
 		    Some(bytes) => bytes,
 		    None => return None
 	  };

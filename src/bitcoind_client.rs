@@ -1,76 +1,148 @@
 use base64;
-use serde_json;
-
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
+use bitcoin::util::address::Address;
+use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
-
+use serde_json;
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Mutex;
+use tokio::runtime::{Handle, Runtime};
 
 pub struct BitcoindClient {
-    pub bitcoind_rpc_client: Mutex<RpcClient>,
+    bitcoind_rpc_client: Mutex<RpcClient>,
+    host: String,
+    port: u16,
+    rpc_user: String,
+    rpc_password: String,
+    runtime: Mutex<Runtime>,
 }
 
 impl BitcoindClient {
-    pub fn new(host: String, port: u16, path: Option<String>, rpc_user: String, rpc_password: String) ->
+    pub fn new(host: String, port: u16, rpc_user: String, rpc_password: String) ->
         std::io::Result<Self>
     {
-        let mut http_endpoint = HttpEndpoint::for_host(host).with_port(port);
-        if let Some(p) = path {
-            http_endpoint = http_endpoint.with_path(p);
-        }
-        let rpc_credentials = base64::encode(format!("{}:{}", rpc_user, rpc_password));
+        let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
+        let rpc_credentials = base64::encode(format!("{}:{}", rpc_user.clone(),
+                                                     rpc_password.clone()));
         let bitcoind_rpc_client = RpcClient::new(&rpc_credentials, http_endpoint)?;
-        Ok(Self {
-            bitcoind_rpc_client: Mutex::new(bitcoind_rpc_client)
-        })
+        let client = Self {
+            bitcoind_rpc_client: Mutex::new(bitcoind_rpc_client),
+            host,
+            port,
+            rpc_user,
+            rpc_password,
+            runtime: Mutex::new(Runtime::new().unwrap()),
+            // runtime: Mutex::new(runtime),
+        };
+        Ok(client)
+    }
+
+    pub fn get_new_rpc_client(&self) -> std::io::Result<RpcClient> {
+        let http_endpoint = HttpEndpoint::for_host(self.host.clone()).with_port(self.port);
+        let rpc_credentials = base64::encode(format!("{}:{}",
+                                                     self.rpc_user.clone(),
+                                                     self.rpc_password.clone()));
+        RpcClient::new(&rpc_credentials, http_endpoint)
+    }
+
+    pub fn create_raw_transaction(&self, outputs: Vec<HashMap<String, f64>>) -> RawTx {
+        let runtime = self.runtime.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+
+        let outputs_json = serde_json::json!(outputs);
+        runtime.block_on(rpc.call_method::<RawTx>("createrawtransaction", &vec![serde_json::json!([]), outputs_json])).unwrap()
+    }
+
+    pub fn fund_raw_transaction(&self, raw_tx: RawTx) -> FundedTx {
+        let runtime = self.runtime.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+
+        let raw_tx_json = serde_json::json!(raw_tx.0);
+        runtime.block_on(rpc.call_method("fundrawtransaction", &[raw_tx_json])).unwrap()
+    }
+
+    pub fn sign_raw_transaction_with_wallet(&self, tx_hex: String) -> SignedTx {
+        let runtime = self.runtime.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+
+        let tx_hex_json = serde_json::json!(tx_hex);
+        runtime.block_on(rpc.call_method("signrawtransactionwithwallet",
+                                         &vec![tx_hex_json])).unwrap()
+    }
+
+    pub fn get_new_address(&self) -> Address {
+        let runtime = self.runtime.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+
+        let addr_args = vec![serde_json::json!("LDK output address")];
+        let addr = runtime.block_on(rpc.call_method::<NewAddress>("getnewaddress", &addr_args)).unwrap();
+        Address::from_str(addr.0.as_str()).unwrap()
+    }
+
+    pub fn get_blockchain_info(&self) -> BlockchainInfo {
+        let runtime = self.runtime.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+
+        runtime.block_on(rpc.call_method::<BlockchainInfo>("getblockchaininfo",
+                                                                           &vec![])).unwrap()
     }
 }
 
 impl FeeEstimator for BitcoindClient {
     fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
-        let mut rpc_client_guard = self.bitcoind_rpc_client.lock().unwrap();
-        match confirmation_target {
-            ConfirmationTarget::Background => {
-                let conf_target = serde_json::json!(144);
-                let estimate_mode = serde_json::json!("ECONOMICAL");
-                let resp = rpc_client_guard.call_method("estimatesmartfee",
-                                                        &vec![conf_target, estimate_mode]).unwrap();
-                if !resp["errors"].is_null() && resp["errors"].as_array().unwrap().len() > 0 {
-                    return 253
-                }
-                resp["feerate"].as_u64().unwrap() as u32
+        let runtime = self.runtime.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+
+        let (conf_target, estimate_mode, default) = match confirmation_target {
+            ConfirmationTarget::Background => (144, "ECONOMICAL", 253),
+            ConfirmationTarget::Normal => (18, "ECONOMICAL", 20000),
+            ConfirmationTarget::HighPriority => (6, "ECONOMICAL", 50000),
+        };
+
+        // If we're already in a tokio runtime, then we need to get out of it before we can broadcast.
+        let conf_target_json = serde_json::json!(conf_target);
+        let estimate_mode_json = serde_json::json!(estimate_mode);
+        let resp = match Handle::try_current() {
+            Ok(_) => {
+                tokio::task::block_in_place(|| {
+                    runtime.block_on(rpc.call_method::<FeeResponse>("estimatesmartfee",
+                                                                    &vec![conf_target_json,
+                                                                          estimate_mode_json])).unwrap()
+                })
             },
-            ConfirmationTarget::Normal => {
-                let conf_target = serde_json::json!(18);
-                let estimate_mode = serde_json::json!("ECONOMICAL");
-                let resp = rpc_client_guard.call_method("estimatesmartfee",
-                                                        &vec![conf_target, estimate_mode]).unwrap();
-                if !resp["errors"].is_null() && resp["errors"].as_array().unwrap().len() > 0 {
-                    return 253
-                }
-                resp["feerate"].as_u64().unwrap() as u32
-            },
-            ConfirmationTarget::HighPriority => {
-                let conf_target = serde_json::json!(6);
-                let estimate_mode = serde_json::json!("CONSERVATIVE");
-                let resp = rpc_client_guard.call_method("estimatesmartfee",
-                                                        &vec![conf_target, estimate_mode]).unwrap();
-                if !resp["errors"].is_null() && resp["errors"].as_array().unwrap().len() > 0 {
-                    return 253
-                }
-                resp["feerate"].as_u64().unwrap() as u32
-            },
+            _ => runtime.block_on(rpc.call_method::<FeeResponse>("estimatesmartfee",
+                                                                 &vec![conf_target_json,
+                                                                       estimate_mode_json])).unwrap()
+        };
+        if resp.errored {
+            return default
         }
+        resp.feerate.unwrap()
     }
 }
 
 impl BroadcasterInterface for BitcoindClient {
 	  fn broadcast_transaction(&self, tx: &Transaction) {
-        let mut rpc_client_guard = self.bitcoind_rpc_client.lock().unwrap();
+        let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
+        let runtime = self.runtime.lock().unwrap();
+
         let tx_serialized = serde_json::json!(encode::serialize_hex(tx));
-        rpc_client_guard.call_method("sendrawtransaction", &vec![tx_serialized]).unwrap();
+        // If we're already in a tokio runtime, then we need to get out of it before we can broadcast.
+        match Handle::try_current() {
+            Ok(_) => {
+                tokio::task::block_in_place(|| {
+                    runtime.block_on(rpc.call_method::<RawTx>("sendrawtransaction",
+                                                                          &vec![tx_serialized])).unwrap();
+                });
+            },
+            _ => {
+                runtime.block_on(rpc.call_method::<RawTx>("sendrawtransaction",
+                                                                      &vec![tx_serialized])).unwrap();
+            }
+        }
     }
 }
