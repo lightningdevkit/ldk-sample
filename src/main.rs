@@ -130,6 +130,7 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
                         txid: final_tx.txid(),
                         index: if change_output_position == 0 { 1 } else { 0 }
                     };
+                    // Give the funding transaction back to LDK for opening the channel.
                     loop_channel_manager.funding_transaction_generated(&temporary_channel_id,
                                                                        outpoint);
                     pending_txs.insert(outpoint, final_tx);
@@ -173,7 +174,7 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
                         }
                     }
 				        },
-				        Event::PaymentFailed { payment_hash, rejected_by_dest, .. } => {
+				        Event::PaymentFailed { payment_hash, rejected_by_dest } => {
                     print!("\nNEW EVENT: Failed to send payment to payment hash {:?}: ",
                            hex_utils::hex_str(&payment_hash.0));
                     if rejected_by_dest {
@@ -189,8 +190,14 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
                         *status = HTLCStatus::Failed;
                     }
 				        },
-				        Event::PendingHTLCsForwardable { .. } => {
-                    loop_channel_manager.process_pending_htlc_forwards();
+				        Event::PendingHTLCsForwardable { time_forwardable } => {
+                    let forwarding_channel_manager = loop_channel_manager.clone();
+                    thread::spawn(move || {
+                        let min = time_forwardable.as_secs();
+                        let seconds_to_sleep = thread_rng().gen_range(min, min * 5);
+                        thread::sleep(Duration::new(seconds_to_sleep, 0));
+                        forwarding_channel_manager.process_pending_htlc_forwards();
+                    });
 				        },
                 Event::SpendableOutputs { outputs } => {
                     let destination_address = bitcoind_client.get_new_address();

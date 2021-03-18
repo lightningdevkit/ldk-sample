@@ -3,7 +3,7 @@ Sample node implementation using LDK.
 
 ## Installation
 ```
-git clone git@github.com:valentinewallace/ldk-sample.git
+git clone git@github.com:lightningdevkit/ldk-sample.git
 ```
 
 ## Usage
