@@ -3,8 +3,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::key::{PublicKey, SecretKey};
-use crate::{ChannelManager, FilesystemLogger, HTLCDirection, HTLCStatus, NETWORK,
-            PaymentInfoStorage, PeerManager};
+use crate::{ChannelManager, FilesystemLogger, HTLCDirection, HTLCStatus,
+            PaymentInfoStorage, PeerManager, SatoshiAmount};
 use crate::disk;
 use crate::hex_utils;
 use lightning::chain;
@@ -34,11 +34,12 @@ pub(crate) struct LdkUserInfo {
     pub(crate) bitcoind_rpc_host: String,
     pub(crate) ldk_storage_dir_path: String,
     pub(crate) ldk_peer_listening_port: u16,
+    pub(crate) network: Network,
 }
 
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
     if env::args().len() < 4 {
-        println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [optional: <ldk-incoming-peer-listening-port>]`");
+        println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network]`");
         return Err(())
     }
     let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
@@ -64,10 +65,25 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 
     let ldk_storage_dir_path = env::args().skip(2).next().unwrap();
 
+    let mut ldk_peer_port_set = true;
     let ldk_peer_listening_port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
         Some(Ok(p)) => p,
         Some(Err(e)) => panic!(e),
-        None => 9735,
+        None => {
+            ldk_peer_port_set = false;
+            9735
+        },
+    };
+
+    let arg_idx = match ldk_peer_port_set {
+        true => 4,
+        false => 3,
+    };
+    let network: Network = match env::args().skip(arg_idx).next().as_ref().map(String::as_str) {
+        Some("testnet") => Network::Testnet,
+        Some("regtest") => Network::Regtest,
+        Some(_) => panic!("Unsupported network provided. Options are: `regtest`, `testnet`"),
+        None => Network::Testnet
     };
     Ok(LdkUserInfo {
         bitcoind_rpc_username,
@@ -76,6 +92,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
         bitcoind_rpc_port,
         ldk_storage_dir_path,
         ldk_peer_listening_port,
+        network,
     })
 }
 
@@ -84,8 +101,8 @@ pub(crate) fn poll_for_user_input(peer_manager: Arc<PeerManager>, channel_manage
                                   chain::Access>, Arc<FilesystemLogger>>>, payment_storage:
                                   PaymentInfoStorage, node_privkey: SecretKey, event_notifier:
                                   mpsc::Sender<()>, ldk_data_dir: String, logger: Arc<FilesystemLogger>,
-                                  runtime_handle: Handle) {
-    println!("LDK startup successful. To view available commands: \"help\".\nLDK logs are available in the `logs` folder of <your-supplied-ldk-data-dir-path>/.ldk/logs");
+                                  runtime_handle: Handle, network: Network) {
+    println!("LDK startup successful. To view available commands: \"help\".\nLDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
     let stdin = io::stdin();
     print!("> "); io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
     for line in stdin.lock().lines() {
@@ -165,28 +182,30 @@ pub(crate) fn poll_for_user_input(peer_manager: Arc<PeerManager>, channel_manage
                         None => None
                     };
 
+                    // rust-lightning-invoice doesn't currently support features, so we parse features
+                    // manually from the invoice.
                     let mut invoice_features = InvoiceFeatures::empty();
                     for field in &invoice.into_signed_raw().raw_invoice().data.tagged_fields {
                         match field {
                             lightning_invoice::RawTaggedField::UnknownSemantics(vec) => {
                                 if vec[0] == bech32::u5::try_from_u8(5).unwrap() {
                                     if vec.len() >= 6 && vec[5].to_u8() & 0b10000 != 0 {
-                                        invoice_features.set_supports_var_onion_optin();
+                                        invoice_features = invoice_features.set_variable_length_onion_optional();
                                     }
                                     if vec.len() >= 6 && vec[5].to_u8() & 0b01000 != 0 {
-                                        invoice_features.set_requires_var_onion_optin();
+                                        invoice_features = invoice_features.set_variable_length_onion_required();
                                     }
                                     if vec.len() >= 4 && vec[3].to_u8() & 0b00001 != 0 {
-                                        invoice_features.set_supports_payment_secret();
+                                        invoice_features = invoice_features.set_payment_secret_optional();
                                     }
                                     if vec.len() >= 5 && vec[4].to_u8() & 0b10000 != 0 {
-                                        invoice_features.set_requires_payment_secret();
+                                        invoice_features = invoice_features.set_payment_secret_required();
                                     }
                                     if vec.len() >= 4 && vec[3].to_u8() & 0b00100 != 0 {
-                                        invoice_features.set_supports_basic_mpp();
+                                        invoice_features = invoice_features.set_basic_mpp_optional();
                                     }
                                     if vec.len() >= 4 && vec[3].to_u8() & 0b00010 != 0 {
-                                        invoice_features.set_requires_basic_mpp();
+                                        invoice_features = invoice_features.set_basic_mpp_required();
                                     }
                                 }
                             },
@@ -215,7 +234,7 @@ pub(crate) fn poll_for_user_input(peer_manager: Arc<PeerManager>, channel_manage
                         print!("> "); io::stdout().flush().unwrap(); continue;
                     }
                     get_invoice(amt_sat.unwrap(), payment_storage.clone(), node_privkey.clone(),
-                                       channel_manager.clone(), router.clone());
+                                channel_manager.clone(), network);
                 },
                 "connectpeer" => {
                     let peer_pubkey_and_ip_addr = words.next();
@@ -277,7 +296,7 @@ pub(crate) fn poll_for_user_input(peer_manager: Arc<PeerManager>, channel_manage
 }
 
 fn help() {
-    println!("openchannel pubkey@host:port channel_amt_satoshis");
+    println!("openchannel pubkey@host:port <channel_amt_satoshis>");
     println!("sendpayment <invoice>");
     println!("getinvoice <amt_in_satoshis>");
     println!("connectpeer pubkey@host:port");
@@ -313,10 +332,15 @@ fn list_payments(payment_storage: PaymentInfoStorage) {
     let payments = payment_storage.lock().unwrap();
     print!("[");
     for (payment_hash, payment_info) in payments.deref() {
+        let direction_str = match payment_info.1 {
+            HTLCDirection::Inbound => "inbound",
+            HTLCDirection::Outbound => "outbound",
+        };
         println!("");
         println!("\t{{");
+        println!("\t\tamount_satoshis: {},", payment_info.3);
         println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
-        println!("\t\thtlc_direction: {},", if payment_info.1 == HTLCDirection::Inbound { "inbound" } else { "outbound" });
+        println!("\t\thtlc_direction: {},", direction_str);
         println!("\t\thtlc_status: {},", match payment_info.2 {
             HTLCStatus::Pending => "pending",
             HTLCStatus::Succeeded => "succeeded",
@@ -376,11 +400,10 @@ fn open_channel(peer_pubkey: PublicKey, channel_amt_sat: u64, channel_manager: A
 }
 
 fn send_payment(payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
-                       payment_secret: Option<PaymentSecret>, payee_features:
-                       Option<InvoiceFeatures>, router: Arc<NetGraphMsgHandler<Arc<dyn
-                       chain::Access>, Arc<FilesystemLogger>>>, channel_manager:
-                       Arc<ChannelManager>, payment_storage: PaymentInfoStorage, logger:
-                       Arc<FilesystemLogger>) {
+                payment_secret: Option<PaymentSecret>, payee_features: Option<InvoiceFeatures>,
+                router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
+                channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage, logger:
+                Arc<FilesystemLogger>) {
     let network_graph = router.network_graph.read().unwrap();
     let first_hops = channel_manager.list_usable_channels();
     let payer_pubkey = channel_manager.get_our_node_id();
@@ -403,12 +426,12 @@ fn send_payment(payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: 
         }
     };
     let mut payments = payment_storage.lock().unwrap();
-    payments.insert(payment_hash, (None, HTLCDirection::Outbound, status));
+    payments.insert(payment_hash, (None, HTLCDirection::Outbound, status,
+                                   SatoshiAmount(Some(amt_msat * 1000))));
 }
 
 fn get_invoice(amt_sat: u64, payment_storage: PaymentInfoStorage, our_node_privkey: SecretKey,
-                      channel_manager: Arc<ChannelManager>, router: Arc<NetGraphMsgHandler<Arc<dyn
-                      chain::Access>, Arc<FilesystemLogger>>>) {
+               channel_manager: Arc<ChannelManager>, network: Network) {
     let mut payments = payment_storage.lock().unwrap();
     let secp_ctx = Secp256k1::new();
 
@@ -418,54 +441,39 @@ fn get_invoice(amt_sat: u64, payment_storage: PaymentInfoStorage, our_node_privk
 
 
     let our_node_pubkey = channel_manager.get_our_node_id();
-		let invoice = lightning_invoice::InvoiceBuilder::new(match NETWORK {
+		let mut invoice = lightning_invoice::InvoiceBuilder::new(match network {
 				Network::Bitcoin => lightning_invoice::Currency::Bitcoin,
 				Network::Testnet => lightning_invoice::Currency::BitcoinTestnet,
 				Network::Regtest => lightning_invoice::Currency::Regtest,
         Network::Signet => panic!("Signet invoices not supported")
-		}).payment_hash(payment_hash).description("rust-lightning-bitcoinrpc invoice".to_string())
-				.amount_pico_btc(amt_sat * 10)
+		})
+        .payment_hash(payment_hash).description("rust-lightning-bitcoinrpc invoice".to_string())
+				.amount_pico_btc(amt_sat * 10_000)
 				.current_timestamp()
         .payee_pub_key(our_node_pubkey);
 
     // Add route hints to the invoice.
-    // let our_channels = channel_manager.list_usable_channels();
-    // let network_graph = router.network_graph.read().unwrap();
-    // let network_channels = network_graph.get_channels();
-    // for channel in our_channels {
-    //     let short_channel_id_opt = channel.short_channel_id;
-    //     if short_channel_id_opt.is_none() {
-    //         continue
-    //     }
-
-    //     let short_channel_id = short_channel_id_opt.unwrap();
-    //     let channel_routing_info_opt = network_channels.get(&short_channel_id);
-    //     if channel_routing_info_opt.is_none() {
-    //         continue
-    //     }
-
-    //     let channel_routing_info = channel_routing_info_opt.unwrap();
-    //     let mut counterparty = channel_routing_info.node_two;
-    //     let mut counterparty_chan_fees_opt = channel_routing_info.one_to_two.as_ref();
-    //     if channel_routing_info.node_two != our_node_pubkey { // e.g. if our counterparty is node_one
-    //         counterparty = channel_routing_info.node_one;
-    //         counterparty_chan_fees_opt = channel_routing_info.two_to_one.as_ref();
-    //     }
-    //     if counterparty_chan_fees_opt.is_none() {
-    //         continue
-    //     }
-
-    //     let counterparty_chan_fees = counterparty_chan_fees_opt.unwrap();
-    //     invoice = invoice.route(vec![
-    //         lightning_invoice::RouteHop {
-    //             short_channel_id: short_channel_id.to_be_bytes(),
-    //             cltv_expiry_delta: counterparty_chan_fees.cltv_expiry_delta,
-    //             fee_base_msat: counterparty_chan_fees.fees.base_msat,
-    //             fee_proportional_millionths: counterparty_chan_fees.fees.proportional_millionths,
-    //             pubkey: counterparty,
-    //         }
-    //     ]);
-    // }
+    let our_channels = channel_manager.list_usable_channels();
+    for channel in our_channels {
+        let short_channel_id = match channel.short_channel_id {
+            Some(id) => id.to_be_bytes(),
+            None => continue
+        };
+        let forwarding_info = match channel.counterparty_forwarding_info {
+            Some(info) => info,
+            None => continue,
+        };
+        println!("VMW: adding routehop, info.fee base: {}", forwarding_info.fee_base_msat);
+        invoice = invoice.route(vec![
+            lightning_invoice::RouteHop {
+                pubkey: channel.remote_network_id,
+                short_channel_id,
+                fee_base_msat: forwarding_info.fee_base_msat,
+                fee_proportional_millionths: forwarding_info.fee_proportional_millionths,
+                cltv_expiry_delta: forwarding_info.cltv_expiry_delta,
+            }
+        ]);
+    }
 
     // Sign the invoice.
     let invoice = invoice.build_signed(|msg_hash| {
@@ -479,7 +487,8 @@ fn get_invoice(amt_sat: u64, payment_storage: PaymentInfoStorage, our_node_privk
 
     payments.insert(PaymentHash(payment_hash.into_inner()), (Some(PaymentPreimage(preimage)),
                                                              HTLCDirection::Inbound,
-                                                             HTLCStatus::Pending));
+                                                             HTLCStatus::Pending,
+                                                             SatoshiAmount(Some(amt_sat))));
 }
 
 fn close_channel(channel_id: [u8; 32], channel_manager: Arc<ChannelManager>) {

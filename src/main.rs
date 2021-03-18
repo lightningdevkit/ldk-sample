@@ -4,7 +4,7 @@ mod convert;
 mod disk;
 mod hex_utils;
 
-use background_processor::BackgroundProcessor;
+use lightning_background_processor::BackgroundProcessor;
 use bitcoin::BlockHash;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::blockdata::transaction::Transaction;
@@ -39,6 +39,7 @@ use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -49,8 +50,6 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-
-pub(crate) const NETWORK: Network = Network::Regtest;
 
 #[derive(PartialEq)]
 pub(crate) enum HTLCDirection {
@@ -64,8 +63,21 @@ pub(crate) enum HTLCStatus {
     Failed,
 }
 
+pub(crate) struct SatoshiAmount(Option<u64>);
+
+impl fmt::Display for SatoshiAmount {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.0 {
+            Some(amt) => write!(f, "{}", amt),
+            None => write!(f, "unknown")
+
+        }
+    }
+}
+
 pub(crate) type PaymentInfoStorage = Arc<Mutex<HashMap<PaymentHash, (Option<PaymentPreimage>,
-                                                                     HTLCDirection, HTLCStatus)>>>;
+                                                                     HTLCDirection, HTLCStatus,
+                                                                     SatoshiAmount)>>>;
 
 type ArcChainMonitor = ChainMonitor<InMemorySigner, Arc<dyn Filter>, Arc<BitcoindClient>,
 Arc<BitcoindClient>, Arc<FilesystemLogger>, Arc<FilesystemPersister>>;
@@ -78,7 +90,8 @@ FilesystemLogger>;
 
 fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
                      chain_monitor: Arc<ArcChainMonitor>, bitcoind_client: Arc<BitcoindClient>,
-                     keys_manager: Arc<KeysManager>, payment_storage: PaymentInfoStorage)
+                     keys_manager: Arc<KeysManager>, payment_storage: PaymentInfoStorage,
+                     network: Network)
 {
     let mut pending_txs: HashMap<OutPoint, Transaction> = HashMap::new();
     loop {
@@ -92,7 +105,7 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
                                                 output_script, .. } => {
                     // Construct the raw transaction with one output, that is paid the amount of the
                     // channel.
-					          let addr = WitnessProgram::from_scriptpubkey(&output_script[..], match NETWORK {
+					          let addr = WitnessProgram::from_scriptpubkey(&output_script[..], match network {
 							          Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
 							          Network::Testnet => bitcoin_bech32::constants::Network::Testnet,
 							          Network::Regtest => bitcoin_bech32::constants::Network::Regtest,
@@ -129,31 +142,33 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
 				        },
 				        Event::PaymentReceived { payment_hash, payment_secret, amt: amt_msat } => {
                     let mut payments = payment_storage.lock().unwrap();
-                    if let Some((Some(preimage), _, _)) = payments.get(&payment_hash) {
+                    if let Some((Some(preimage), _, _, _)) = payments.get(&payment_hash) {
 						            assert!(loop_channel_manager.claim_funds(preimage.clone(), &payment_secret,
                                                                  amt_msat));
                         println!("\nEVENT: received payment from payment_hash {} of {} satoshis",
                                  hex_utils::hex_str(&payment_hash.0), amt_msat / 1000);
                         print!("> "); io::stdout().flush().unwrap();
-                        let (_, _, ref mut status) = payments.get_mut(&payment_hash).unwrap();
+                        let (_, _, ref mut status, _) = payments.get_mut(&payment_hash).unwrap();
                         *status = HTLCStatus::Succeeded;
                     } else {
                         println!("\nERROR: we received a payment but didn't know the preimage");
                         print!("> "); io::stdout().flush().unwrap();
                         loop_channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
-                        payments.insert(payment_hash, (None, HTLCDirection::Inbound, HTLCStatus::Failed));
+                        payments.insert(payment_hash, (None, HTLCDirection::Inbound,
+                                                       HTLCStatus::Failed, SatoshiAmount(None)));
                     }
 				        },
 				        Event::PaymentSent { payment_preimage } => {
                     let hashed = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
                     let mut payments = payment_storage.lock().unwrap();
-                    for (payment_hash, (preimage_option, _, status)) in payments.iter_mut() {
+                    for (payment_hash, (preimage_option, _, status, amt_sat)) in payments.iter_mut() {
                         if *payment_hash == hashed {
                             *preimage_option = Some(payment_preimage);
                             *status = HTLCStatus::Succeeded;
-                            println!("\nNEW EVENT: successfully sent payment from payment hash \
-                                         {:?} with preimage {:?}", hex_utils::hex_str(&payment_hash.0),
-                                     hex_utils::hex_str(&payment_preimage.0));
+                            println!("\nNEW EVENT: successfully sent payment of {} satoshis from \
+                                         payment hash {:?} with preimage {:?}", amt_sat,
+                                         hex_utils::hex_str(&payment_hash.0),
+                                         hex_utils::hex_str(&payment_preimage.0));
                             print!("> "); io::stdout().flush().unwrap();
                         }
                     }
@@ -170,7 +185,7 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
 
                     let mut payments = payment_storage.lock().unwrap();
                     if payments.contains_key(&payment_hash) {
-                        let (_, _, ref mut status) = payments.get_mut(&payment_hash).unwrap();
+                        let (_, _, ref mut status, _) = payments.get_mut(&payment_hash).unwrap();
                         *status = HTLCStatus::Failed;
                     }
 				        },
@@ -186,8 +201,7 @@ fn handle_ldk_events(peer_manager: Arc<PeerManager>, channel_manager: Arc<Channe
                                                                            destination_address.script_pubkey(),
                                                                            tx_feerate, &Secp256k1::new()).unwrap();
                     bitcoind_client.broadcast_transaction(&spending_tx);
-                    // XXX maybe need to rescan and blah? but contrary to what matt's saying, it
-                    // looks like spend_spendable's got us covered
+                    // XXX maybe need to rescan and blah?
                 }
             }
         }
@@ -206,10 +220,15 @@ fn main() {
     fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
     // Initialize our bitcoind client.
-    let bitcoind_client = Arc::new(BitcoindClient::new(args.bitcoind_rpc_host.clone(),
-                                                       args.bitcoind_rpc_port,
-                                                       args.bitcoind_rpc_username.clone(),
-                                                       args.bitcoind_rpc_password.clone()).unwrap());
+    let bitcoind_client = match BitcoindClient::new(args.bitcoind_rpc_host.clone(),
+                                         args.bitcoind_rpc_port, args.bitcoind_rpc_username.clone(),
+                                         args.bitcoind_rpc_password.clone()) {
+        Ok(client) => Arc::new(client),
+        Err(e) => {
+            println!("Failed to connect to bitcoind client: {}", e);
+            return
+        }
+    };
     let mut bitcoind_rpc_client = bitcoind_client.get_new_rpc_client().unwrap();
 
     // ## Setup
@@ -258,8 +277,8 @@ fn main() {
 
     // Step 7: Read ChannelMonitor state from disk
     let monitors_path = format!("{}/monitors", ldk_data_dir.clone());
-    let mut outpoint_to_channelmonitor = disk::read_channelmonitors_from_disk(monitors_path.to_string(),
-                                                                        keys_manager.clone()).unwrap();
+    let mut outpoint_to_channelmonitor = disk::read_channelmonitors(monitors_path.to_string(),
+                                                                    keys_manager.clone()).unwrap();
 
     // Step 9: Initialize the ChannelManager
     let user_config = UserConfig::default();
@@ -280,7 +299,7 @@ fn main() {
             restarting_node = false;
             let getinfo_resp = bitcoind_client.get_blockchain_info();
             let chain_params = ChainParameters {
-                network: NETWORK,
+                network: args.network,
                 latest_hash: getinfo_resp.latest_blockhash,
                 latest_height: getinfo_resp.latest_height,
             };
@@ -314,7 +333,7 @@ fn main() {
             chain_listeners.push((monitor_listener_info.0,
                                   &mut monitor_listener_info.1 as &mut dyn chain::Listen));
         }
-        chain_tip = Some(runtime.block_on(init::synchronize_listeners(&mut bitcoind_rpc_client, NETWORK,
+        chain_tip = Some(runtime.block_on(init::synchronize_listeners(&mut bitcoind_rpc_client, args.network,
                                                                       &mut cache, chain_listeners)).unwrap());
     }
 
@@ -327,7 +346,7 @@ fn main() {
 
     // Step 13: Optional: Initialize the NetGraphMsgHandler
     // XXX persist routing data
-    let genesis = genesis_block(NETWORK).header.block_hash();
+    let genesis = genesis_block(args.network).header.block_hash();
     let router = Arc::new(NetGraphMsgHandler::new(genesis, None::<Arc<dyn chain::Access>>, logger.clone()));
 
     // Step 14: Initialize the PeerManager
@@ -364,8 +383,9 @@ fn main() {
     }
     let channel_manager_listener = channel_manager.clone();
     let chain_monitor_listener = chain_monitor.clone();
+    let network = args.network;
     runtime.spawn(async move {
-        let chain_poller = poll::ChainPoller::new(&mut bitcoind_rpc_client, NETWORK);
+        let chain_poller = poll::ChainPoller::new(&mut bitcoind_rpc_client, network);
         let chain_listener = (chain_monitor_listener, channel_manager_listener);
         let mut spv_client = SpvClient::new(chain_tip.unwrap(), chain_poller, &mut cache,
                                             &chain_listener);
@@ -401,10 +421,11 @@ fn main() {
     let payment_info: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
     let payment_info_for_events = payment_info.clone();
     let handle = runtime_handle.clone();
+    let network = args.network;
     thread::spawn(move || {
         handle_ldk_events(peer_manager_event_listener, channel_manager_event_listener,
                           chain_monitor_event_listener, bitcoind_client.clone(),
-                          keys_manager_listener, payment_info_for_events);
+                          keys_manager_listener, payment_info_for_events, network);
     });
 
     // Reconnect to channel peers if possible.
@@ -422,5 +443,5 @@ fn main() {
     // Start the CLI.
     cli::poll_for_user_input(peer_manager.clone(), channel_manager.clone(), router.clone(),
                              payment_info, keys_manager.get_node_secret(), event_ntfn_sender,
-                             ldk_data_dir.clone(), logger.clone(), handle);
+                             ldk_data_dir.clone(), logger.clone(), handle, args.network);
 }

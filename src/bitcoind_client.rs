@@ -36,7 +36,6 @@ impl BitcoindClient {
             rpc_user,
             rpc_password,
             runtime: Mutex::new(Runtime::new().unwrap()),
-            // runtime: Mutex::new(runtime),
         };
         Ok(client)
     }
@@ -103,7 +102,8 @@ impl FeeEstimator for BitcoindClient {
             ConfirmationTarget::HighPriority => (6, "ECONOMICAL", 50000),
         };
 
-        // If we're already in a tokio runtime, then we need to get out of it before we can broadcast.
+        // This function may be called from a tokio runtime, or not. So we need to check before
+        // making the call to avoid the error "cannot run a tokio runtime from within a tokio runtime".
         let conf_target_json = serde_json::json!(conf_target);
         let estimate_mode_json = serde_json::json!(estimate_mode);
         let resp = match Handle::try_current() {
@@ -131,7 +131,8 @@ impl BroadcasterInterface for BitcoindClient {
         let runtime = self.runtime.lock().unwrap();
 
         let tx_serialized = serde_json::json!(encode::serialize_hex(tx));
-        // If we're already in a tokio runtime, then we need to get out of it before we can broadcast.
+        // This function may be called from a tokio runtime, or not. So we need to check before
+        // making the call to avoid the error "cannot run a tokio runtime from within a tokio runtime".
         match Handle::try_current() {
             Ok(_) => {
                 tokio::task::block_in_place(|| {

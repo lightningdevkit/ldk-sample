@@ -63,7 +63,7 @@ pub(crate) fn read_channel_peer_data(path: &Path) -> Result<HashMap<PublicKey, S
 }
 
 
-pub(crate) fn read_channelmonitors_from_disk(path: String, keys_manager: Arc<KeysManager>) ->
+pub(crate) fn read_channelmonitors(path: String, keys_manager: Arc<KeysManager>) ->
     Result<HashMap<OutPoint, (BlockHash, ChannelMonitor<InMemorySigner>)>, std::io::Error>
 {
     if !Path::new(&path).exists() {

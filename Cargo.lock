@@ -7,15 +7,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 
 [[package]]
-name = "background-processor"
-version = "0.1.0"
-dependencies = [
- "bitcoin",
- "lightning",
- "lightning-persister",
-]
-
-[[package]]
 name = "base-x"
 version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -239,13 +230,13 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 name = "ldk-tutorial-node"
 version = "0.1.0"
 dependencies = [
- "background-processor",
  "base64",
  "bech32 0.7.2",
  "bitcoin",
  "bitcoin-bech32",
  "hex",
  "lightning",
+ "lightning-background-processor",
  "lightning-block-sync",
  "lightning-invoice",
  "lightning-net-tokio",
@@ -264,14 +255,26 @@ checksum = "b7282d924be3275cec7f6756ff4121987bc6481325397dde6ba3e7802b1a8b1c"
 
 [[package]]
 name = "lightning"
-version = "0.0.12"
+version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=32f6205848806a3b2876a2ae36b1db7d5fa22f7d#32f6205848806a3b2876a2ae36b1db7d5fa22f7d"
 dependencies = [
  "bitcoin",
 ]
 
 [[package]]
+name = "lightning-background-processor"
+version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=32f6205848806a3b2876a2ae36b1db7d5fa22f7d#32f6205848806a3b2876a2ae36b1db7d5fa22f7d"
+dependencies = [
+ "bitcoin",
+ "lightning",
+ "lightning-persister",
+]
+
+[[package]]
 name = "lightning-block-sync"
-version = "0.0.1"
+version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=32f6205848806a3b2876a2ae36b1db7d5fa22f7d#32f6205848806a3b2876a2ae36b1db7d5fa22f7d"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
@@ -284,6 +287,7 @@ dependencies = [
 [[package]]
 name = "lightning-invoice"
 version = "0.4.0"
+source = "git+https://github.com/rust-bitcoin/rust-lightning-invoice?rev=aa3a57b9dca5205fa25fa333a2db165d7e77b3b0#aa3a57b9dca5205fa25fa333a2db165d7e77b3b0"
 dependencies = [
  "bech32 0.7.2",
  "bitcoin_hashes",
@@ -293,7 +297,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-net-tokio"
-version = "0.0.5"
+version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=32f6205848806a3b2876a2ae36b1db7d5fa22f7d#32f6205848806a3b2876a2ae36b1db7d5fa22f7d"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -302,7 +307,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-persister"
-version = "0.0.1"
+version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=32f6205848806a3b2876a2ae36b1db7d5fa22f7d#32f6205848806a3b2876a2ae36b1db7d5fa22f7d"
 dependencies = [
  "bitcoin",
  "libc",
