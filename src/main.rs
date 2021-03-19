@@ -484,7 +484,7 @@ fn main() {
 			SpvClient::new(chain_tip.unwrap(), chain_poller, &mut cache, &chain_listener);
 		loop {
 			spv_client.poll_best_tip().await.unwrap();
-			thread::sleep(Duration::new(1, 0));
+			tokio::time::sleep(Duration::from_secs(1)).await;
 		}
 	});
 
@@ -501,11 +501,9 @@ fn main() {
 	);
 
 	let peer_manager_processor = peer_manager.clone();
-	runtime_handle.spawn(async move {
-		loop {
-			peer_manager_processor.timer_tick_occurred();
-			thread::sleep(Duration::new(60, 0));
-		}
+	thread::spawn(move || loop {
+		peer_manager_processor.timer_tick_occurred();
+		thread::sleep(Duration::new(60, 0));
 	});
 
 	// Step 15: Initialize LDK Event Handling
@@ -515,7 +513,6 @@ fn main() {
 	let keys_manager_listener = keys_manager.clone();
 	let payment_info: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
 	let payment_info_for_events = payment_info.clone();
-	let handle = runtime_handle.clone();
 	let network = args.network;
 	thread::spawn(move || {
 		handle_ldk_events(
@@ -530,17 +527,22 @@ fn main() {
 	});
 
 	// Reconnect to channel peers if possible.
+	let handle = runtime_handle.clone();
 	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
 	match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
 		Ok(mut info) => {
 			for (pubkey, peer_addr) in info.drain() {
-				let _ = cli::connect_peer_if_necessary(
-					pubkey,
-					peer_addr,
-					peer_manager.clone(),
-					event_ntfn_sender.clone(),
-					handle.clone(),
-				);
+				for chan_info in channel_manager.list_channels() {
+					if pubkey == chan_info.remote_network_id {
+						let _ = cli::connect_peer_if_necessary(
+							pubkey,
+							peer_addr,
+							peer_manager.clone(),
+							event_ntfn_sender.clone(),
+							handle.clone(),
+						);
+					}
+				}
 			}
 		}
 		Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),

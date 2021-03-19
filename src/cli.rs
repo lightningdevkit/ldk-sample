@@ -160,10 +160,10 @@ pub(crate) fn poll_for_user_input(
 
 					// let private_channel = match words.next().as_ref().map(String::as_str) {
 					let announce_channel = match words.next() {
-						Some("--public") | Some("--public=true") | Some("--public true") => true,
-						Some("--public=false") | Some("--public false") => false,
+						Some("--public") | Some("--public=true") => true,
+						Some("--public=false") => false,
 						Some(_) => {
-							println!("ERROR: invalid `--public` command format");
+							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
 							print!("> ");
 							io::stdout().flush().unwrap();
 							continue;
