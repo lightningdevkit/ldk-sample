@@ -26,7 +26,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 pub(crate) struct LdkUserInfo {
@@ -98,11 +97,11 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	})
 }
 
-pub(crate) fn poll_for_user_input(
+pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
 	payment_storage: PaymentInfoStorage, node_privkey: SecretKey, event_notifier: mpsc::Sender<()>,
-	ldk_data_dir: String, logger: Arc<FilesystemLogger>, runtime_handle: Handle, network: Network,
+	ldk_data_dir: String, logger: Arc<FilesystemLogger>, network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".\nLDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	let stdin = io::stdin();
@@ -149,7 +148,6 @@ pub(crate) fn poll_for_user_input(
 						peer_addr,
 						peer_manager.clone(),
 						event_notifier.clone(),
-						runtime_handle.clone(),
 					)
 					.is_err()
 					{
@@ -328,7 +326,6 @@ pub(crate) fn poll_for_user_input(
 						peer_addr,
 						peer_manager.clone(),
 						event_notifier.clone(),
-						runtime_handle.clone(),
 					)
 					.is_ok()
 					{
@@ -448,7 +445,7 @@ fn list_payments(payment_storage: PaymentInfoStorage) {
 
 pub(crate) fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
-	event_notifier: mpsc::Sender<()>, runtime: Handle,
+	event_notifier: mpsc::Sender<()>,
 ) -> Result<(), ()> {
 	for node_pubkey in peer_manager.get_peer_node_ids() {
 		if node_pubkey == pubkey {
@@ -459,7 +456,7 @@ pub(crate) fn connect_peer_if_necessary(
 		Ok(stream) => {
 			let peer_mgr = peer_manager.clone();
 			let event_ntfns = event_notifier.clone();
-			runtime.spawn(async move {
+			tokio::spawn(async move {
 				lightning_net_tokio::setup_outbound(peer_mgr, event_ntfns, pubkey, stream).await;
 			});
 			let mut peer_connected = false;

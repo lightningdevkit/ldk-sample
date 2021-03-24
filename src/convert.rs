@@ -52,6 +52,7 @@ impl TryInto<NewAddress> for JsonResponse {
 
 pub struct FeeResponse {
 	pub feerate: Option<u32>,
+	// pub errors: Array<String>,
 	pub errored: bool,
 }
 
@@ -61,11 +62,13 @@ impl TryInto<FeeResponse> for JsonResponse {
 		let errored = !self.0["errors"].is_null();
 		Ok(FeeResponse {
 			errored,
-			feerate: match errored {
-				true => None,
-				// The feerate from bitcoind is in BTC/kb, and we want satoshis/kb.
-				false => Some((self.0["feerate"].as_f64().unwrap() * 100_000_000.0).round() as u32),
-			},
+			  feerate: match self.0["feerate"].as_f64() {
+            Some(fee) => Some((fee * 100_000_000.0).round() as u32),
+            None => None
+        }
+				// true => None,
+				// // The feerate from bitcoind is in BTC/kb, and we want satoshis/kb.
+				// false => Some((self.0["feerate"].as_f64().unwrap() * 100_000_000.0).round() as u32),
 		})
 	}
 }
