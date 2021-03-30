@@ -153,19 +153,6 @@ impl BitcoindClient {
 				fees.get(&Target::HighPriority)
 					.unwrap()
 					.store(high_prio_estimate, Ordering::Release);
-				// match fees.get(Target::Background) {
-				//     Some(fee) => fee.store(background_estimate, Ordering::Release),
-				//     None =>
-				// }
-				// if let Some(fee) = background_estimate.feerate {
-				//     fees.get("background").unwrap().store(fee, Ordering::Release);
-				// }
-				// if let Some(fee) = normal_estimate.feerate {
-				//     fees.get("normal").unwrap().store(fee, Ordering::Release);
-				// }
-				// if let Some(fee) = high_prio_estimate.feerate {
-				//     fees.get("high_prio").unwrap().store(fee, Ordering::Release);
-				// }
 				tokio::time::sleep(Duration::from_secs(60)).await;
 			}
 		});
@@ -235,43 +222,6 @@ impl FeeEstimator for BitcoindClient {
 				self.fees.get(&Target::HighPriority).unwrap().load(Ordering::Acquire)
 			}
 		}
-		// self.fees.g
-		// 253
-		// match confirmation_target {
-		//     ConfirmationTarget::Background =>
-		// }
-		// let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
-
-		// let (conf_target, estimate_mode, default) = match confirmation_target {
-		// 	ConfirmationTarget::Background => (144, "ECONOMICAL", 253),
-		// 	ConfirmationTarget::Normal => (18, "ECONOMICAL", 20000),
-		// 	ConfirmationTarget::HighPriority => (6, "CONSERVATIVE", 50000),
-		// };
-
-		// // This function may be called from a tokio runtime, or not. So we need to check before
-		// // making the call to avoid the error "cannot run a tokio runtime from within a tokio runtime".
-		// let conf_target_json = serde_json::json!(conf_target);
-		// let estimate_mode_json = serde_json::json!(estimate_mode);
-		// let resp = match Handle::try_current() {
-		// 	Ok(_) => tokio::task::block_in_place(|| {
-		// 		runtime
-		// 			.block_on(rpc.call_method::<FeeResponse>(
-		// 				"estimatesmartfee",
-		// 				&vec![conf_target_json, estimate_mode_json],
-		// 			))
-		// 			.unwrap()
-		// 	}),
-		// 	_ => runtime
-		// 		.block_on(rpc.call_method::<FeeResponse>(
-		// 			"estimatesmartfee",
-		// 			&vec![conf_target_json, estimate_mode_json],
-		// 		))
-		// 		.unwrap(),
-		// };
-		// if resp.errored {
-		// 	return default;
-		// }
-		// resp.feerate.unwrap()
 	}
 }
 
@@ -283,32 +233,5 @@ impl BroadcasterInterface for BitcoindClient {
 			let mut rpc = bitcoind_rpc_client.lock().await;
 			rpc.call_method::<RawTx>("sendrawtransaction", &vec![tx_serialized]).await.unwrap();
 		});
-		// let bitcoind_rpc_client = self.bitcoind_rpc_client.clone();
-		// tokio::spawn(async move {
-		//     let rpc = bitcoind_rpc_client.lock().await;
-		//     rpc.call_method::<R>
-		// });
-		// let mut rpc = self.bitcoind_rpc_client.lock().unwrap();
-		// let runtime = self.runtime.lock().unwrap();
-
-		// let tx_serialized = serde_json::json!(encode::serialize_hex(tx));
-		// // This function may be called from a tokio runtime, or not. So we need to check before
-		// // making the call to avoid the error "cannot run a tokio runtime from within a tokio runtime".
-		// match Handle::try_current() {
-		// 	Ok(_) => {
-		// 		tokio::task::block_in_place(|| {
-		// 			runtime
-		// 				.block_on(
-		// 					rpc.call_method::<RawTx>("sendrawtransaction", &vec![tx_serialized]),
-		// 				)
-		// 				.unwrap();
-		// 		});
-		// 	}
-		// 	_ => {
-		// 		runtime
-		// 			.block_on(rpc.call_method::<RawTx>("sendrawtransaction", &vec![tx_serialized]))
-		// 			.unwrap();
-		// 	}
-		// }
 	}
 }

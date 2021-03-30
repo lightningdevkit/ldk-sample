@@ -237,7 +237,6 @@ async fn handle_ldk_events(
 					tokio::spawn(async move {
 						let min = time_forwardable.as_secs();
 						let seconds_to_sleep = thread_rng().gen_range(min, min * 5);
-						// thread::sleep(Duration::new(seconds_to_sleep, 0));
 						tokio::time::sleep(Duration::from_secs(seconds_to_sleep)).await;
 						forwarding_channel_manager.process_pending_htlc_forwards();
 					});
@@ -277,7 +276,7 @@ pub async fn main() {
 	fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
 	// Initialize our bitcoind client.
-	let mut bitcoind_client = match BitcoindClient::new(
+	let bitcoind_client = match BitcoindClient::new(
 		args.bitcoind_rpc_host.clone(),
 		args.bitcoind_rpc_port,
 		args.bitcoind_rpc_username.clone(),
@@ -291,7 +290,6 @@ pub async fn main() {
 			return;
 		}
 	};
-	// let mut bitcoind_rpc_client = bitcoind_client.get_new_rpc_client().unwrap();
 
 	// ## Setup
 	// Step 1: Initialize the FeeEstimator
@@ -421,7 +419,6 @@ pub async fn main() {
 		}
 		chain_tip = Some(
 			init::synchronize_listeners(
-				// &mut bitcoind_rpc_client,
 				&mut bitcoind_client.deref(),
 				args.network,
 				&mut cache,
@@ -482,21 +479,16 @@ pub async fn main() {
 
 	// Step 17: Connect and Disconnect Blocks
 	if chain_tip.is_none() {
-		// chain_tip = Some(init::validate_best_block_header(&mut bitcoind_client).await.unwrap());
 		chain_tip =
 			Some(init::validate_best_block_header(&mut bitcoind_client.deref()).await.unwrap());
-		// chain_tip = Some(init::validate_best_block_header(&mut bitcoind_rpc_client).await.unwrap());
 	}
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
 	let network = args.network;
 	tokio::spawn(async move {
-		// let chain_poller = poll::ChainPoller::new(&mut bitcoind_client, network);
 		let mut derefed = bitcoind_block_source.deref();
-		// let chain_poller = poll::ChainPoller::new(&mut bitcoind_block_source.deref(), network);
 		let chain_poller = poll::ChainPoller::new(&mut derefed, network);
-		// let chain_poller = poll::ChainPoller::new(&mut bitcoind_rpc_client, network);
 		let chain_listener = (chain_monitor_listener, channel_manager_listener);
 		let mut spv_client =
 			SpvClient::new(chain_tip.unwrap(), chain_poller, &mut cache, &chain_listener);
@@ -533,21 +525,13 @@ pub async fn main() {
 	let payment_info: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
 	let payment_info_for_events = payment_info.clone();
 	let network = args.network;
-	// let bitcoind = BitcoindClient::new(
-	//     args.bitcoind_rpc_host.clone(),
-	//     args.bitcoind_rpc_port,
-	//     args.bitcoind_rpc_username.clone(),
-	//     args.bitcoind_rpc_password.clone(),
-	// ).await.unwrap();
 	let bitcoind_rpc = bitcoind_client.clone();
 	tokio::spawn(async move {
 		handle_ldk_events(
 			peer_manager_event_listener,
 			channel_manager_event_listener,
 			chain_monitor_event_listener,
-			// bitcoind_client.clone(),
 			bitcoind_rpc,
-			// bitcoind,
 			keys_manager_listener,
 			payment_info_for_events,
 			network,

@@ -156,7 +156,6 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					};
 
-					// let private_channel = match words.next().as_ref().map(String::as_str) {
 					let announce_channel = match words.next() {
 						Some("--public") | Some("--public=true") => true,
 						Some("--public=false") => false,
@@ -577,7 +576,6 @@ fn get_invoice(
 			Some(info) => info,
 			None => continue,
 		};
-		println!("VMW: adding routehop, info.fee base: {}", forwarding_info.fee_base_msat);
 		invoice = invoice.route(vec![lightning_invoice::RouteHop {
 			pubkey: channel.remote_network_id,
 			short_channel_id,
