@@ -235,9 +235,9 @@ async fn handle_ldk_events(
 				Event::PendingHTLCsForwardable { time_forwardable } => {
 					let forwarding_channel_manager = loop_channel_manager.clone();
 					tokio::spawn(async move {
-						let min = time_forwardable.as_secs();
-						let seconds_to_sleep = thread_rng().gen_range(min, min * 5);
-						tokio::time::sleep(Duration::from_secs(seconds_to_sleep)).await;
+						let min = time_forwardable.as_millis() as u64;
+						let millis_to_sleep = thread_rng().gen_range(min, min * 5) as u64;
+						tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
 						forwarding_channel_manager.process_pending_htlc_forwards();
 					});
 				}

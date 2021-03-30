@@ -256,6 +256,7 @@ checksum = "b7282d924be3275cec7f6756ff4121987bc6481325397dde6ba3e7802b1a8b1c"
 [[package]]
 name = "lightning"
 version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=6fcac8bc65ed6d372e0b8c367e9934c754f99ff3#6fcac8bc65ed6d372e0b8c367e9934c754f99ff3"
 dependencies = [
  "bitcoin",
 ]
@@ -263,6 +264,7 @@ dependencies = [
 [[package]]
 name = "lightning-background-processor"
 version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=6fcac8bc65ed6d372e0b8c367e9934c754f99ff3#6fcac8bc65ed6d372e0b8c367e9934c754f99ff3"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -272,6 +274,7 @@ dependencies = [
 [[package]]
 name = "lightning-block-sync"
 version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=6fcac8bc65ed6d372e0b8c367e9934c754f99ff3#6fcac8bc65ed6d372e0b8c367e9934c754f99ff3"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
@@ -295,6 +298,7 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=6fcac8bc65ed6d372e0b8c367e9934c754f99ff3#6fcac8bc65ed6d372e0b8c367e9934c754f99ff3"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -304,6 +308,7 @@ dependencies = [
 [[package]]
 name = "lightning-persister"
 version = "0.0.13"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?rev=6fcac8bc65ed6d372e0b8c367e9934c754f99ff3#6fcac8bc65ed6d372e0b8c367e9934c754f99ff3"
 dependencies = [
  "bitcoin",
  "libc",
