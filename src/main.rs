@@ -256,7 +256,6 @@ async fn handle_ldk_events(
 						)
 						.unwrap();
 					bitcoind_client.broadcast_transaction(&spending_tx);
-					// XXX maybe need to rescan and blah?
 				}
 			}
 		}
