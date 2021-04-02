@@ -12,8 +12,9 @@ use bitcoin::secp256k1::Secp256k1;
 use lightning::chain;
 use lightning::ln::channelmanager::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::ln::features::InvoiceFeatures;
-use lightning::routing::network_graph::NetGraphMsgHandler;
+use lightning::routing::network_graph::{NetGraphMsgHandler, RoutingFees};
 use lightning::routing::router;
+use lightning::routing::router::RouteHint;
 use lightning::util::config::UserConfig;
 use rand;
 use rand::Rng;
@@ -200,6 +201,8 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 					let invoice = invoice_res.unwrap();
+					let route_hints: Vec<lightning_invoice::Route> =
+						invoice.routes().iter().map(|&route| route.clone()).collect();
 
 					let amt_pico_btc = invoice.amount_pico_btc();
 					if amt_pico_btc.is_none() {
@@ -272,6 +275,7 @@ pub(crate) async fn poll_for_user_input(
 						payment_hash,
 						payment_secret,
 						invoice_features_opt,
+						route_hints,
 						router.clone(),
 						channel_manager.clone(),
 						payment_storage.clone(),
@@ -500,6 +504,7 @@ fn open_channel(
 fn send_payment(
 	payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
 	payment_secret: Option<PaymentSecret>, payee_features: Option<InvoiceFeatures>,
+	mut route_hints: Vec<lightning_invoice::Route>,
 	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
@@ -508,13 +513,29 @@ fn send_payment(
 	let first_hops = channel_manager.list_usable_channels();
 	let payer_pubkey = channel_manager.get_our_node_id();
 
+	let mut hints: Vec<RouteHint> = Vec::new();
+	for route in route_hints.drain(..) {
+		let route_hops = route.into_inner();
+		let last_hop = &route_hops[route_hops.len() - 1];
+		hints.push(RouteHint {
+			src_node_id: last_hop.pubkey,
+			short_channel_id: u64::from_be_bytes(last_hop.short_channel_id),
+			fees: RoutingFees {
+				base_msat: last_hop.fee_base_msat,
+				proportional_millionths: last_hop.fee_proportional_millionths,
+			},
+			cltv_expiry_delta: last_hop.cltv_expiry_delta,
+			htlc_minimum_msat: None,
+			htlc_maximum_msat: None,
+		})
+	}
 	let route = router::get_route(
 		&payer_pubkey,
 		&network_graph,
 		&payee,
 		payee_features,
 		Some(&first_hops.iter().collect::<Vec<_>>()),
-		&vec![],
+		&hints.iter().collect::<Vec<_>>(),
 		amt_msat,
 		final_cltv,
 		logger,
