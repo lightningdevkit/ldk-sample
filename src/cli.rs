@@ -588,6 +588,7 @@ fn get_invoice(
 
 	// Add route hints to the invoice.
 	let our_channels = channel_manager.list_usable_channels();
+	let mut min_final_cltv_expiry = 9;
 	for channel in our_channels {
 		let short_channel_id = match channel.short_channel_id {
 			Some(id) => id.to_be_bytes(),
@@ -597,6 +598,9 @@ fn get_invoice(
 			Some(info) => info,
 			None => continue,
 		};
+		if forwarding_info.cltv_expiry_delta > min_final_cltv_expiry {
+			min_final_cltv_expiry = forwarding_info.cltv_expiry_delta;
+		}
 		invoice = invoice.route(vec![lightning_invoice::RouteHop {
 			pubkey: channel.remote_network_id,
 			short_channel_id,
@@ -605,6 +609,7 @@ fn get_invoice(
 			cltv_expiry_delta: forwarding_info.cltv_expiry_delta,
 		}]);
 	}
+	invoice = invoice.min_final_cltv_expiry(min_final_cltv_expiry.into());
 
 	// Sign the invoice.
 	let invoice =
