@@ -16,6 +16,7 @@ use lightning::routing::network_graph::{NetGraphMsgHandler, RoutingFees};
 use lightning::routing::router;
 use lightning::routing::router::RouteHint;
 use lightning::util::config::UserConfig;
+use lightning_invoice::{Currency, Invoice, InvoiceBuilder, Route, RouteHop};
 use rand;
 use rand::Rng;
 use std::env;
@@ -194,7 +195,7 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					let invoice_res = lightning_invoice::Invoice::from_str(invoice_str.unwrap());
+					let invoice_res = Invoice::from_str(invoice_str.unwrap());
 					if invoice_res.is_err() {
 						println!("ERROR: invalid invoice: {:?}", invoice_res.unwrap_err());
 						print!("> ");
@@ -202,7 +203,7 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 					let invoice = invoice_res.unwrap();
-					let route_hints: Vec<lightning_invoice::Route> =
+					let route_hints: Vec<Route> =
 						invoice.routes().iter().map(|&route| route.clone()).collect();
 
 					let amt_pico_btc = invoice.amount_pico_btc();
@@ -522,7 +523,7 @@ fn open_channel(
 fn send_payment(
 	payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
 	payment_secret: Option<PaymentSecret>, payee_features: Option<InvoiceFeatures>,
-	mut route_hints: Vec<lightning_invoice::Route>,
+	mut route_hints: Vec<Route>,
 	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
@@ -597,10 +598,10 @@ fn get_invoice(
 	let payment_hash = Sha256Hash::hash(&preimage);
 
 	let our_node_pubkey = channel_manager.get_our_node_id();
-	let mut invoice = lightning_invoice::InvoiceBuilder::new(match network {
-		Network::Bitcoin => lightning_invoice::Currency::Bitcoin,
-		Network::Testnet => lightning_invoice::Currency::BitcoinTestnet,
-		Network::Regtest => lightning_invoice::Currency::Regtest,
+	let mut invoice = InvoiceBuilder::new(match network {
+		Network::Bitcoin => Currency::Bitcoin,
+		Network::Testnet => Currency::BitcoinTestnet,
+		Network::Regtest => Currency::Regtest,
 		Network::Signet => panic!("Signet invoices not supported"),
 	})
 	.payment_hash(payment_hash)
@@ -624,7 +625,7 @@ fn get_invoice(
 		if forwarding_info.cltv_expiry_delta > min_final_cltv_expiry {
 			min_final_cltv_expiry = forwarding_info.cltv_expiry_delta;
 		}
-		invoice = invoice.route(vec![lightning_invoice::RouteHop {
+		invoice = invoice.route(vec![RouteHop {
 			pubkey: channel.remote_network_id,
 			short_channel_id,
 			fee_base_msat: forwarding_info.fee_base_msat,
