@@ -1,8 +1,8 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, FilesystemLogger, HTLCDirection, HTLCStatus, PaymentInfoStorage, PeerManager,
-	SatoshiAmount,
+	ChannelManager, FilesystemLogger, HTLCDirection, HTLCStatus, MillisatAmount, PaymentInfo,
+	PaymentInfoStorage, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
@@ -285,21 +285,21 @@ pub(crate) async fn poll_for_user_input(
 				"getinvoice" => {
 					let amt_str = words.next();
 					if amt_str.is_none() {
-						println!("ERROR: getinvoice requires an amount in satoshis");
+						println!("ERROR: getinvoice requires an amount in millisatoshis");
 						print!("> ");
 						io::stdout().flush().unwrap();
 						continue;
 					}
 
-					let amt_sat: Result<u64, _> = amt_str.unwrap().parse();
-					if amt_sat.is_err() {
+					let amt_msat: Result<u64, _> = amt_str.unwrap().parse();
+					if amt_msat.is_err() {
 						println!("ERROR: getinvoice provided payment amount was not a number");
 						print!("> ");
 						io::stdout().flush().unwrap();
 						continue;
 					}
 					get_invoice(
-						amt_sat.unwrap(),
+						amt_msat.unwrap(),
 						payment_storage.clone(),
 						node_privkey.clone(),
 						channel_manager.clone(),
@@ -386,7 +386,7 @@ pub(crate) async fn poll_for_user_input(
 fn help() {
 	println!("openchannel pubkey@host:port <channel_amt_satoshis>");
 	println!("sendpayment <invoice>");
-	println!("getinvoice <amt_in_satoshis>");
+	println!("getinvoice <amt_in_millisatoshis>");
 	println!("connectpeer pubkey@host:port");
 	println!("listchannels");
 	println!("listpayments");
@@ -423,18 +423,18 @@ fn list_payments(payment_storage: PaymentInfoStorage) {
 	let payments = payment_storage.lock().unwrap();
 	print!("[");
 	for (payment_hash, payment_info) in payments.deref() {
-		let direction_str = match payment_info.1 {
+		let direction_str = match payment_info.direction {
 			HTLCDirection::Inbound => "inbound",
 			HTLCDirection::Outbound => "outbound",
 		};
 		println!("");
 		println!("\t{{");
-		println!("\t\tamount_satoshis: {},", payment_info.3);
+		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
 		println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
 		println!("\t\thtlc_direction: {},", direction_str);
 		println!(
 			"\t\thtlc_status: {},",
-			match payment_info.2 {
+			match payment_info.status {
 				HTLCStatus::Pending => "pending",
 				HTLCStatus::Succeeded => "succeeded",
 				HTLCStatus::Failed => "failed",
@@ -558,12 +558,18 @@ fn send_payment(
 	let mut payments = payment_storage.lock().unwrap();
 	payments.insert(
 		payment_hash,
-		(None, HTLCDirection::Outbound, status, SatoshiAmount(Some(amt_msat / 1000))),
+		PaymentInfo {
+			preimage: None,
+			secret: payment_secret,
+			direction: HTLCDirection::Outbound,
+			status,
+			amt_msat: MillisatAmount(Some(amt_msat)),
+		},
 	);
 }
 
 fn get_invoice(
-	amt_sat: u64, payment_storage: PaymentInfoStorage, our_node_privkey: SecretKey,
+	amt_msat: u64, payment_storage: PaymentInfoStorage, our_node_privkey: SecretKey,
 	channel_manager: Arc<ChannelManager>, network: Network,
 ) {
 	let mut payments = payment_storage.lock().unwrap();
@@ -582,7 +588,7 @@ fn get_invoice(
 	})
 	.payment_hash(payment_hash)
 	.description("rust-lightning-bitcoinrpc invoice".to_string())
-	.amount_pico_btc(amt_sat * 10_000)
+	.amount_pico_btc(amt_msat * 10)
 	.current_timestamp()
 	.payee_pub_key(our_node_pubkey);
 
@@ -622,12 +628,16 @@ fn get_invoice(
 
 	payments.insert(
 		PaymentHash(payment_hash.into_inner()),
-		(
-			Some(PaymentPreimage(preimage)),
-			HTLCDirection::Inbound,
-			HTLCStatus::Pending,
-			SatoshiAmount(Some(amt_sat)),
-		),
+		PaymentInfo {
+			preimage: Some(PaymentPreimage(preimage)),
+			// We can't add payment secrets to invoices until we support features in invoices.
+			// Otherwise lnd errors with "destination hop doesn't understand payment addresses"
+			// (for context, lnd calls payment secrets "payment addresses").
+			secret: None,
+			direction: HTLCDirection::Inbound,
+			status: HTLCStatus::Pending,
+			amt_msat: MillisatAmount(Some(amt_msat)),
+		},
 	);
 }
 

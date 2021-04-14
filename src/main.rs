@@ -23,7 +23,8 @@ use lightning::chain::Filter;
 use lightning::chain::Watch;
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, PaymentHash, PaymentPreimage, SimpleArcChannelManager,
+	ChainParameters, ChannelManagerReadArgs, PaymentHash, PaymentPreimage, PaymentSecret,
+	SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{MessageHandler, SimpleArcPeerManager};
 use lightning::routing::network_graph::NetGraphMsgHandler;
@@ -62,9 +63,9 @@ pub(crate) enum HTLCStatus {
 	Failed,
 }
 
-pub(crate) struct SatoshiAmount(Option<u64>);
+pub(crate) struct MillisatAmount(Option<u64>);
 
-impl fmt::Display for SatoshiAmount {
+impl fmt::Display for MillisatAmount {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self.0 {
 			Some(amt) => write!(f, "{}", amt),
@@ -73,11 +74,15 @@ impl fmt::Display for SatoshiAmount {
 	}
 }
 
-pub(crate) type PaymentInfoStorage = Arc<
-	Mutex<
-		HashMap<PaymentHash, (Option<PaymentPreimage>, HTLCDirection, HTLCStatus, SatoshiAmount)>,
-	>,
->;
+pub(crate) struct PaymentInfo {
+	preimage: Option<PaymentPreimage>,
+	secret: Option<PaymentSecret>,
+	direction: HTLCDirection,
+	status: HTLCStatus,
+	amt_msat: MillisatAmount,
+}
+
+pub(crate) type PaymentInfoStorage = Arc<Mutex<HashMap<PaymentHash, PaymentInfo>>>;
 
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -151,47 +156,50 @@ async fn handle_ldk_events(
 						.funding_transaction_generated(&temporary_channel_id, final_tx)
 						.unwrap();
 				}
-				Event::FundingBroadcastSafe { funding_txo, .. } => {
-				Event::PaymentReceived { payment_hash, payment_secret, amt: amt_msat } => {
+				Event::PaymentReceived { payment_hash, .. } => {
 					let mut payments = payment_storage.lock().unwrap();
-					if let Some((Some(preimage), _, _, _)) = payments.get(&payment_hash) {
+					if let Some(payment) = payments.get_mut(&payment_hash) {
 						assert!(loop_channel_manager.claim_funds(
-							preimage.clone(),
-							&payment_secret,
-							amt_msat
+							payment.preimage.unwrap().clone(),
+							&payment.secret,
+							payment.amt_msat.0.unwrap(),
 						));
 						println!(
-							"\nEVENT: received payment from payment_hash {} of {} satoshis",
+							"\nEVENT: received payment from payment_hash {} of {} millisatoshis",
 							hex_utils::hex_str(&payment_hash.0),
-							amt_msat / 1000
+							payment.amt_msat
 						);
 						print!("> ");
 						io::stdout().flush().unwrap();
-						let (_, _, ref mut status, _) = payments.get_mut(&payment_hash).unwrap();
-						*status = HTLCStatus::Succeeded;
+						payment.status = HTLCStatus::Succeeded;
 					} else {
 						println!("\nERROR: we received a payment but didn't know the preimage");
 						print!("> ");
 						io::stdout().flush().unwrap();
-						loop_channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
+						loop_channel_manager.fail_htlc_backwards(&payment_hash, &None);
 						payments.insert(
 							payment_hash,
-							(None, HTLCDirection::Inbound, HTLCStatus::Failed, SatoshiAmount(None)),
+							PaymentInfo {
+								preimage: None,
+								secret: None,
+								direction: HTLCDirection::Inbound,
+								status: HTLCStatus::Failed,
+								amt_msat: MillisatAmount(None),
+							},
 						);
 					}
 				}
 				Event::PaymentSent { payment_preimage } => {
 					let hashed = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
 					let mut payments = payment_storage.lock().unwrap();
-					for (payment_hash, (preimage_option, _, status, amt_sat)) in payments.iter_mut()
-					{
+					for (payment_hash, payment) in payments.iter_mut() {
 						if *payment_hash == hashed {
-							*preimage_option = Some(payment_preimage);
-							*status = HTLCStatus::Succeeded;
+							payment.preimage = Some(payment_preimage);
+							payment.status = HTLCStatus::Succeeded;
 							println!(
-								"\nEVENT: successfully sent payment of {} satoshis from \
+								"\nEVENT: successfully sent payment of {} millisatoshis from \
                                          payment hash {:?} with preimage {:?}",
-								amt_sat,
+								payment.amt_msat,
 								hex_utils::hex_str(&payment_hash.0),
 								hex_utils::hex_str(&payment_preimage.0)
 							);
@@ -215,8 +223,8 @@ async fn handle_ldk_events(
 
 					let mut payments = payment_storage.lock().unwrap();
 					if payments.contains_key(&payment_hash) {
-						let (_, _, ref mut status, _) = payments.get_mut(&payment_hash).unwrap();
-						*status = HTLCStatus::Failed;
+						let payment = payments.get_mut(&payment_hash).unwrap();
+						payment.status = HTLCStatus::Failed;
 					}
 				}
 				Event::PendingHTLCsForwardable { time_forwardable } => {
@@ -492,18 +500,11 @@ async fn start_ldk() {
 		logger.clone(),
 	);
 
-	let peer_manager_processor = peer_manager.clone();
-	tokio::spawn(async move {
-		loop {
-			peer_manager_processor.timer_tick_occurred();
-			tokio::time::sleep(Duration::from_secs(60)).await;
-		}
-	});
-
 	// Step 15: Initialize LDK Event Handling
 	let channel_manager_event_listener = channel_manager.clone();
 	let chain_monitor_event_listener = chain_monitor.clone();
 	let keys_manager_listener = keys_manager.clone();
+	// TODO: persist payment info to disk
 	let payment_info: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
 	let payment_info_for_events = payment_info.clone();
 	let network = args.network;
