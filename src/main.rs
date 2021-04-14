@@ -19,7 +19,6 @@ use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager};
-use lightning::chain::transaction::OutPoint;
 use lightning::chain::Filter;
 use lightning::chain::Watch;
 use lightning::ln::channelmanager;
@@ -102,13 +101,11 @@ pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 
 async fn handle_ldk_events(
-	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
-	chain_monitor: Arc<ChainMonitor>, bitcoind_client: Arc<BitcoindClient>,
-	keys_manager: Arc<KeysManager>, payment_storage: PaymentInfoStorage, network: Network,
+	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+	bitcoind_client: Arc<BitcoindClient>, keys_manager: Arc<KeysManager>,
+	payment_storage: PaymentInfoStorage, network: Network,
 ) {
-	let mut pending_txs: HashMap<OutPoint, Transaction> = HashMap::new();
 	loop {
-		peer_manager.process_events();
 		let loop_channel_manager = channel_manager.clone();
 		let mut events = channel_manager.get_and_clear_pending_events();
 		events.append(&mut chain_monitor.get_and_clear_pending_events());
@@ -149,22 +146,12 @@ async fn handle_ldk_events(
 					assert_eq!(signed_tx.complete, true);
 					let final_tx: Transaction =
 						encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
-					let outpoint = OutPoint {
-						txid: final_tx.txid(),
-						index: if change_output_position == 0 { 1 } else { 0 },
-					};
 					// Give the funding transaction back to LDK for opening the channel.
 					loop_channel_manager
-						.funding_transaction_generated(&temporary_channel_id, outpoint);
-					pending_txs.insert(outpoint, final_tx);
+						.funding_transaction_generated(&temporary_channel_id, final_tx)
+						.unwrap();
 				}
 				Event::FundingBroadcastSafe { funding_txo, .. } => {
-					let funding_tx = pending_txs.remove(&funding_txo).unwrap();
-					bitcoind_client.broadcast_transaction(&funding_tx);
-					println!("\nEVENT: broadcasted funding transaction");
-					print!("> ");
-					io::stdout().flush().unwrap();
-				}
 				Event::PaymentReceived { payment_hash, payment_secret, amt: amt_msat } => {
 					let mut payments = payment_storage.lock().unwrap();
 					if let Some((Some(preimage), _, _, _)) = payments.get(&payment_hash) {
@@ -345,9 +332,7 @@ async fn start_ldk() {
 	let keys_manager = Arc::new(KeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
 
 	// Step 7: Read ChannelMonitor state from disk
-	let monitors_path = format!("{}/monitors", ldk_data_dir.clone());
-	let mut outpoint_to_channelmonitor =
-		disk::read_channelmonitors(monitors_path.to_string(), keys_manager.clone()).unwrap();
+	let mut channelmonitors = persister.read_channelmonitors(keys_manager.clone()).unwrap();
 
 	// Step 9: Initialize the ChannelManager
 	let user_config = UserConfig::default();
@@ -355,8 +340,8 @@ async fn start_ldk() {
 	let (channel_manager_blockhash, mut channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
 			let mut channel_monitor_mut_references = Vec::new();
-			for (_, channel_monitor) in outpoint_to_channelmonitor.iter_mut() {
-				channel_monitor_mut_references.push(&mut channel_monitor.1);
+			for (_, channel_monitor) in channelmonitors.iter_mut() {
+				channel_monitor_mut_references.push(channel_monitor);
 			}
 			let read_args = ChannelManagerReadArgs::new(
 				keys_manager.clone(),
@@ -399,9 +384,8 @@ async fn start_ldk() {
 		let mut chain_listeners =
 			vec![(channel_manager_blockhash, &mut channel_manager as &mut dyn chain::Listen)];
 
-		for (outpoint, blockhash_and_monitor) in outpoint_to_channelmonitor.drain() {
-			let blockhash = blockhash_and_monitor.0;
-			let channel_monitor = blockhash_and_monitor.1;
+		for (blockhash, channel_monitor) in channelmonitors.drain(..) {
+			let outpoint = channel_monitor.get_funding_txo().0;
 			chain_listener_channel_monitors.push((
 				blockhash,
 				(channel_monitor, broadcaster.clone(), fee_estimator.clone(), logger.clone()),
@@ -504,6 +488,7 @@ async fn start_ldk() {
 	BackgroundProcessor::start(
 		persist_channel_manager_callback,
 		channel_manager.clone(),
+		peer_manager.clone(),
 		logger.clone(),
 	);
 
@@ -516,7 +501,6 @@ async fn start_ldk() {
 	});
 
 	// Step 15: Initialize LDK Event Handling
-	let peer_manager_event_listener = peer_manager.clone();
 	let channel_manager_event_listener = channel_manager.clone();
 	let chain_monitor_event_listener = chain_monitor.clone();
 	let keys_manager_listener = keys_manager.clone();
@@ -526,7 +510,6 @@ async fn start_ldk() {
 	let bitcoind_rpc = bitcoind_client.clone();
 	tokio::spawn(async move {
 		handle_ldk_events(
-			peer_manager_event_listener,
 			channel_manager_event_listener,
 			chain_monitor_event_listener,
 			bitcoind_rpc,
