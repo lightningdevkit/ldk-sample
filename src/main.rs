@@ -263,8 +263,7 @@ async fn handle_ldk_events(
 	}
 }
 
-#[tokio::main]
-pub async fn main() {
+async fn start_ldk() {
 	let args = match cli::parse_startup_args() {
 		Ok(user_args) => user_args,
 		Err(()) => return,
@@ -571,4 +570,9 @@ pub async fn main() {
 		args.network,
 	)
 	.await;
+}
+
+#[tokio::main]
+pub async fn main() {
+	start_ldk().await;
 }
