@@ -149,34 +149,43 @@ async fn handle_ldk_events(
 						.funding_transaction_generated(&temporary_channel_id, final_tx)
 						.unwrap();
 				}
-				Event::PaymentReceived { payment_hash, .. } => {
+				Event::PaymentReceived { payment_hash, payment_secret, amt } => {
 					let mut payments = inbound_payments.lock().unwrap();
 					if let Some(payment) = payments.get_mut(&payment_hash) {
-						assert!(loop_channel_manager.claim_funds(
-							payment.preimage.unwrap().clone(),
-							&payment.secret,
-							payment.amt_msat.0.unwrap(),
-						));
-						println!(
-							"\nEVENT: received payment from payment_hash {} of {} millisatoshis",
-							hex_utils::hex_str(&payment_hash.0),
-							payment.amt_msat
-						);
-						print!("> ");
-						io::stdout().flush().unwrap();
-						payment.status = HTLCStatus::Succeeded;
+						if payment.secret == payment_secret {
+							assert!(loop_channel_manager.claim_funds(
+								payment.preimage.unwrap().clone(),
+								&payment.secret,
+								payment.amt_msat.0.unwrap(),
+							));
+							println!(
+							        "\nEVENT: received payment from payment hash {} of {} millisatoshis",
+							        hex_utils::hex_str(&payment_hash.0),
+							        payment.amt_msat
+						      );
+							print!("> ");
+							io::stdout().flush().unwrap();
+							payment.status = HTLCStatus::Succeeded;
+						} else {
+							loop_channel_manager
+								.fail_htlc_backwards(&payment_hash, &payment.secret);
+							println!("\nERROR: we received a payment from payment hash {} but the payment secret didn't match", hex_utils::hex_str(&payment_hash.0));
+							print!("> ");
+							io::stdout().flush().unwrap();
+							payment.status = HTLCStatus::Failed;
+						}
 					} else {
-						println!("\nERROR: we received a payment but didn't know the preimage");
+						loop_channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
+						println!("\nERROR: we received a payment for payment hash {} but didn't know the preimage", hex_utils::hex_str(&payment_hash.0));
 						print!("> ");
 						io::stdout().flush().unwrap();
-						loop_channel_manager.fail_htlc_backwards(&payment_hash, &None);
 						payments.insert(
 							payment_hash,
 							PaymentInfo {
 								preimage: None,
-								secret: None,
+								secret: payment_secret,
 								status: HTLCStatus::Failed,
-								amt_msat: MillisatAmount(None),
+								amt_msat: MillisatAmount(Some(amt)),
 							},
 						);
 					}
