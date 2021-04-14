@@ -51,12 +51,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 
-#[derive(PartialEq)]
-pub(crate) enum HTLCDirection {
-	Inbound,
-	Outbound,
-}
-
 pub(crate) enum HTLCStatus {
 	Pending,
 	Succeeded,
@@ -77,7 +71,6 @@ impl fmt::Display for MillisatAmount {
 pub(crate) struct PaymentInfo {
 	preimage: Option<PaymentPreimage>,
 	secret: Option<PaymentSecret>,
-	direction: HTLCDirection,
 	status: HTLCStatus,
 	amt_msat: MillisatAmount,
 }
@@ -182,7 +175,6 @@ async fn handle_ldk_events(
 							PaymentInfo {
 								preimage: None,
 								secret: None,
-								direction: HTLCDirection::Inbound,
 								status: HTLCStatus::Failed,
 								amt_msat: MillisatAmount(None),
 							},

@@ -1,7 +1,7 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, FilesystemLogger, HTLCDirection, HTLCStatus, MillisatAmount, PaymentInfo,
+	ChannelManager, FilesystemLogger, HTLCStatus, MillisatAmount, PaymentInfo,
 	PaymentInfoStorage, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
@@ -423,15 +423,11 @@ fn list_payments(payment_storage: PaymentInfoStorage) {
 	let payments = payment_storage.lock().unwrap();
 	print!("[");
 	for (payment_hash, payment_info) in payments.deref() {
-		let direction_str = match payment_info.direction {
-			HTLCDirection::Inbound => "inbound",
-			HTLCDirection::Outbound => "outbound",
-		};
 		println!("");
 		println!("\t{{");
 		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
 		println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
-		println!("\t\thtlc_direction: {},", direction_str);
+		// println!("\t\thtlc_direction: {},", direction_str);
 		println!(
 			"\t\thtlc_status: {},",
 			match payment_info.status {
@@ -561,7 +557,6 @@ fn send_payment(
 		PaymentInfo {
 			preimage: None,
 			secret: payment_secret,
-			direction: HTLCDirection::Outbound,
 			status,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
@@ -634,7 +629,6 @@ fn get_invoice(
 			// Otherwise lnd errors with "destination hop doesn't understand payment addresses"
 			// (for context, lnd calls payment secrets "payment addresses").
 			secret: None,
-			direction: HTLCDirection::Inbound,
 			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
