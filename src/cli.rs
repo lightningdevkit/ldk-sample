@@ -1,8 +1,8 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, FilesystemLogger, HTLCStatus, MillisatAmount, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	ChannelManager, FilesystemLogger, HTLCStatus, MillisatAmount, PaymentInfo, PaymentInfoStorage,
+	PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
@@ -101,8 +101,9 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
-	payment_storage: PaymentInfoStorage, node_privkey: SecretKey, event_notifier: mpsc::Sender<()>,
-	ldk_data_dir: String, logger: Arc<FilesystemLogger>, network: Network,
+	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
+	node_privkey: SecretKey, event_notifier: mpsc::Sender<()>, ldk_data_dir: String,
+	logger: Arc<FilesystemLogger>, network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".\nLDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	let stdin = io::stdin();
@@ -278,7 +279,7 @@ pub(crate) async fn poll_for_user_input(
 						route_hints,
 						router.clone(),
 						channel_manager.clone(),
-						payment_storage.clone(),
+						outbound_payments.clone(),
 						logger.clone(),
 					);
 				}
@@ -300,7 +301,7 @@ pub(crate) async fn poll_for_user_input(
 					}
 					get_invoice(
 						amt_msat.unwrap(),
-						payment_storage.clone(),
+						inbound_payments.clone(),
 						node_privkey.clone(),
 						channel_manager.clone(),
 						network,
@@ -336,7 +337,9 @@ pub(crate) async fn poll_for_user_input(
 					}
 				}
 				"listchannels" => list_channels(channel_manager.clone()),
-				"listpayments" => list_payments(payment_storage.clone()),
+				"listpayments" => {
+					list_payments(inbound_payments.clone(), outbound_payments.clone())
+				}
 				"closechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
@@ -419,15 +422,34 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 	println!("]");
 }
 
-fn list_payments(payment_storage: PaymentInfoStorage) {
-	let payments = payment_storage.lock().unwrap();
+fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage) {
+	let inbound = inbound_payments.lock().unwrap();
+	let outbound = outbound_payments.lock().unwrap();
 	print!("[");
-	for (payment_hash, payment_info) in payments.deref() {
+	for (payment_hash, payment_info) in inbound.deref() {
 		println!("");
 		println!("\t{{");
 		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
 		println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
-		// println!("\t\thtlc_direction: {},", direction_str);
+		println!("\t\thtlc_direction: inbound,");
+		println!(
+			"\t\thtlc_status: {},",
+			match payment_info.status {
+				HTLCStatus::Pending => "pending",
+				HTLCStatus::Succeeded => "succeeded",
+				HTLCStatus::Failed => "failed",
+			}
+		);
+
+		println!("\t}},");
+	}
+
+	for (payment_hash, payment_info) in outbound.deref() {
+		println!("");
+		println!("\t{{");
+		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
+		println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
+		println!("\t\thtlc_direction: outbound,");
 		println!(
 			"\t\thtlc_status: {},",
 			match payment_info.status {

@@ -101,7 +101,7 @@ pub(crate) type ChannelManager =
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 	bitcoind_client: Arc<BitcoindClient>, keys_manager: Arc<KeysManager>,
-	payment_storage: PaymentInfoStorage, network: Network,
+	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage, network: Network,
 ) {
 	loop {
 		let loop_channel_manager = channel_manager.clone();
@@ -150,7 +150,7 @@ async fn handle_ldk_events(
 						.unwrap();
 				}
 				Event::PaymentReceived { payment_hash, .. } => {
-					let mut payments = payment_storage.lock().unwrap();
+					let mut payments = inbound_payments.lock().unwrap();
 					if let Some(payment) = payments.get_mut(&payment_hash) {
 						assert!(loop_channel_manager.claim_funds(
 							payment.preimage.unwrap().clone(),
@@ -183,7 +183,7 @@ async fn handle_ldk_events(
 				}
 				Event::PaymentSent { payment_preimage } => {
 					let hashed = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
-					let mut payments = payment_storage.lock().unwrap();
+					let mut payments = outbound_payments.lock().unwrap();
 					for (payment_hash, payment) in payments.iter_mut() {
 						if *payment_hash == hashed {
 							payment.preimage = Some(payment_preimage);
@@ -213,7 +213,7 @@ async fn handle_ldk_events(
 					print!("> ");
 					io::stdout().flush().unwrap();
 
-					let mut payments = payment_storage.lock().unwrap();
+					let mut payments = outbound_payments.lock().unwrap();
 					if payments.contains_key(&payment_hash) {
 						let payment = payments.get_mut(&payment_hash).unwrap();
 						payment.status = HTLCStatus::Failed;
@@ -497,8 +497,10 @@ async fn start_ldk() {
 	let chain_monitor_event_listener = chain_monitor.clone();
 	let keys_manager_listener = keys_manager.clone();
 	// TODO: persist payment info to disk
-	let payment_info: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
-	let payment_info_for_events = payment_info.clone();
+	let inbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
+	let outbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
+	let inbound_pmts_for_events = inbound_payments.clone();
+	let outbound_pmts_for_events = outbound_payments.clone();
 	let network = args.network;
 	let bitcoind_rpc = bitcoind_client.clone();
 	tokio::spawn(async move {
@@ -507,7 +509,8 @@ async fn start_ldk() {
 			chain_monitor_event_listener,
 			bitcoind_rpc,
 			keys_manager_listener,
-			payment_info_for_events,
+			inbound_pmts_for_events,
+			outbound_pmts_for_events,
 			network,
 		)
 		.await;
@@ -538,7 +541,8 @@ async fn start_ldk() {
 		peer_manager.clone(),
 		channel_manager.clone(),
 		router.clone(),
-		payment_info,
+		inbound_payments,
+		outbound_payments,
 		keys_manager.get_node_secret(),
 		event_ntfn_sender,
 		ldk_data_dir.clone(),
