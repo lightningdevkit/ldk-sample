@@ -23,10 +23,10 @@ use lightning::chain::Filter;
 use lightning::chain::Watch;
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, PaymentHash, PaymentPreimage, PaymentSecret,
-	SimpleArcChannelManager,
+	BestBlock, ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{MessageHandler, SimpleArcPeerManager};
+use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, EventsProvider};
@@ -39,6 +39,7 @@ use lightning_block_sync::UnboundedCache;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -50,6 +51,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 
 pub(crate) enum HTLCStatus {
 	Pending,
@@ -79,7 +81,7 @@ pub(crate) type PaymentInfoStorage = Arc<Mutex<HashMap<PaymentHash, PaymentInfo>
 
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
-	Arc<dyn Filter>,
+	Arc<dyn Filter + Send + Sync>,
 	Arc<BitcoindClient>,
 	Arc<BitcoindClient>,
 	Arc<FilesystemLogger>,
@@ -91,7 +93,7 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	ChainMonitor,
 	BitcoindClient,
 	BitcoindClient,
-	dyn chain::Access,
+	dyn chain::Access + Send + Sync,
 	FilesystemLogger,
 >;
 
@@ -102,8 +104,14 @@ async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 	bitcoind_client: Arc<BitcoindClient>, keys_manager: Arc<KeysManager>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage, network: Network,
+	mut event_receiver: Receiver<()>,
 ) {
 	loop {
+		let received = event_receiver.recv();
+		if received.await.is_none() {
+			println!("LDK Event channel closed!");
+			return;
+		}
 		let loop_channel_manager = channel_manager.clone();
 		let mut events = channel_manager.get_and_clear_pending_events();
 		events.append(&mut chain_monitor.get_and_clear_pending_events());
@@ -149,45 +157,42 @@ async fn handle_ldk_events(
 						.funding_transaction_generated(&temporary_channel_id, final_tx)
 						.unwrap();
 				}
-				Event::PaymentReceived { payment_hash, payment_secret, amt } => {
+				Event::PaymentReceived {
+					payment_hash,
+					payment_preimage,
+					payment_secret,
+					amt,
+					..
+				} => {
 					let mut payments = inbound_payments.lock().unwrap();
-					if let Some(payment) = payments.get_mut(&payment_hash) {
-						if payment.secret == payment_secret {
-							assert!(loop_channel_manager.claim_funds(
-								payment.preimage.unwrap().clone(),
-								&payment.secret,
-								payment.amt_msat.0.unwrap(),
-							));
+					let status = match loop_channel_manager.claim_funds(payment_preimage.unwrap()) {
+						true => {
 							println!(
-							        "\nEVENT: received payment from payment hash {} of {} millisatoshis",
-							        hex_utils::hex_str(&payment_hash.0),
-							        payment.amt_msat
-						      );
+					          		    "\nEVENT: received payment from payment hash {} of {} millisatoshis",
+					          		    hex_utils::hex_str(&payment_hash.0),
+					          		    amt
+					              );
 							print!("> ");
 							io::stdout().flush().unwrap();
-							payment.status = HTLCStatus::Succeeded;
-						} else {
-							loop_channel_manager
-								.fail_htlc_backwards(&payment_hash, &payment.secret);
-							println!("\nERROR: we received a payment from payment hash {} but the payment secret didn't match", hex_utils::hex_str(&payment_hash.0));
-							print!("> ");
-							io::stdout().flush().unwrap();
-							payment.status = HTLCStatus::Failed;
+							HTLCStatus::Succeeded
 						}
-					} else {
-						loop_channel_manager.fail_htlc_backwards(&payment_hash, &payment_secret);
-						println!("\nERROR: we received a payment for payment hash {} but didn't know the preimage", hex_utils::hex_str(&payment_hash.0));
-						print!("> ");
-						io::stdout().flush().unwrap();
-						payments.insert(
-							payment_hash,
-							PaymentInfo {
-								preimage: None,
-								secret: payment_secret,
-								status: HTLCStatus::Failed,
+						_ => HTLCStatus::Failed,
+					};
+					match payments.entry(payment_hash) {
+						Entry::Occupied(mut e) => {
+							let payment = e.get_mut();
+							payment.status = status;
+							payment.preimage = Some(payment_preimage.unwrap());
+							payment.secret = Some(payment_secret);
+						}
+						Entry::Vacant(e) => {
+							e.insert(PaymentInfo {
+								preimage: Some(payment_preimage.unwrap()),
+								secret: Some(payment_secret),
+								status,
 								amt_msat: MillisatAmount(Some(amt)),
-							},
-						);
+							});
+						}
 					}
 				}
 				Event::PaymentSent { payment_preimage } => {
@@ -343,7 +348,7 @@ async fn start_ldk() {
 	// Step 7: Read ChannelMonitor state from disk
 	let mut channelmonitors = persister.read_channelmonitors(keys_manager.clone()).unwrap();
 
-	// Step 9: Initialize the ChannelManager
+	// Step 8: Initialize the ChannelManager
 	let user_config = UserConfig::default();
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, mut channel_manager) = {
@@ -369,8 +374,10 @@ async fn start_ldk() {
 
 			let chain_params = ChainParameters {
 				network: args.network,
-				latest_hash: getinfo_resp.latest_blockhash,
-				latest_height: getinfo_resp.latest_height,
+				best_block: BestBlock::new(
+					getinfo_resp.latest_blockhash,
+					getinfo_resp.latest_height as u32,
+				),
 			};
 			let fresh_channel_manager = channelmanager::ChannelManager::new(
 				fee_estimator.clone(),
@@ -385,7 +392,7 @@ async fn start_ldk() {
 		}
 	};
 
-	// Step 10: Sync ChannelMonitors and ChannelManager to chain tip
+	// Step 9: Sync ChannelMonitors and ChannelManager to chain tip
 	let mut chain_listener_channel_monitors = Vec::new();
 	let mut cache = UnboundedCache::new();
 	let mut chain_tip: Option<poll::ValidatedBlockHeader> = None;
@@ -420,20 +427,23 @@ async fn start_ldk() {
 		);
 	}
 
-	// Step 11: Give ChannelMonitors to ChainMonitor
+	// Step 10: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
 		let funding_outpoint = item.2;
 		chain_monitor.watch_channel(funding_outpoint, channel_monitor).unwrap();
 	}
 
-	// Step 13: Optional: Initialize the NetGraphMsgHandler
+	// Step 11: Optional: Initialize the NetGraphMsgHandler
 	// XXX persist routing data
 	let genesis = genesis_block(args.network).header.block_hash();
-	let router =
-		Arc::new(NetGraphMsgHandler::new(genesis, None::<Arc<dyn chain::Access>>, logger.clone()));
+	let router = Arc::new(NetGraphMsgHandler::new(
+		genesis,
+		None::<Arc<dyn chain::Access + Send + Sync>>,
+		logger.clone(),
+	));
 
-	// Step 14: Initialize the PeerManager
+	// Step 12: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 	let mut ephemeral_bytes = [0; 32];
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
@@ -447,28 +457,28 @@ async fn start_ldk() {
 	));
 
 	// ## Running LDK
-	// Step 16: Initialize Peer Connection Handling
+	// Step 13: Initialize networking
 
 	// We poll for events in handle_ldk_events(..) rather than waiting for them over the
 	// mpsc::channel, so we can leave the event receiver as unused.
-	let (event_ntfn_sender, _event_ntfn_receiver) = mpsc::channel(2);
+	let (event_ntfn_sender, event_ntfn_receiver) = mpsc::channel(2);
 	let peer_manager_connection_handler = peer_manager.clone();
 	let event_notifier = event_ntfn_sender.clone();
 	let listening_port = args.ldk_peer_listening_port;
 	tokio::spawn(async move {
 		let listener = std::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port)).unwrap();
 		loop {
+			let peer_mgr = peer_manager_connection_handler.clone();
+			let notifier = event_notifier.clone();
 			let tcp_stream = listener.accept().unwrap().0;
-			lightning_net_tokio::setup_inbound(
-				peer_manager_connection_handler.clone(),
-				event_notifier.clone(),
-				tcp_stream,
-			)
-			.await;
+			tokio::spawn(async move {
+				lightning_net_tokio::setup_inbound(peer_mgr.clone(), notifier.clone(), tcp_stream)
+					.await;
+			});
 		}
 	});
 
-	// Step 17: Connect and Disconnect Blocks
+	// Step 14: Connect and Disconnect Blocks
 	if chain_tip.is_none() {
 		chain_tip =
 			Some(init::validate_best_block_header(&mut bitcoind_client.deref()).await.unwrap());
@@ -488,18 +498,6 @@ async fn start_ldk() {
 			tokio::time::sleep(Duration::from_secs(1)).await;
 		}
 	});
-
-	// Step 17 & 18: Initialize ChannelManager persistence & Once Per Minute: ChannelManager's
-	// timer_chan_freshness_every_min() and PeerManager's timer_tick_occurred
-	let data_dir = ldk_data_dir.clone();
-	let persist_channel_manager_callback =
-		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
-	BackgroundProcessor::start(
-		persist_channel_manager_callback,
-		channel_manager.clone(),
-		peer_manager.clone(),
-		logger.clone(),
-	);
 
 	// Step 15: Initialize LDK Event Handling
 	let channel_manager_event_listener = channel_manager.clone();
@@ -521,9 +519,21 @@ async fn start_ldk() {
 			inbound_pmts_for_events,
 			outbound_pmts_for_events,
 			network,
+			event_ntfn_receiver,
 		)
 		.await;
 	});
+
+	// Step 16 & 17: Persist ChannelManager & Background Processing
+	let data_dir = ldk_data_dir.clone();
+	let persist_channel_manager_callback =
+		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
+	BackgroundProcessor::start(
+		persist_channel_manager_callback,
+		channel_manager.clone(),
+		peer_manager.clone(),
+		logger.clone(),
+	);
 
 	// Reconnect to channel peers if possible.
 	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
@@ -549,10 +559,10 @@ async fn start_ldk() {
 	cli::poll_for_user_input(
 		peer_manager.clone(),
 		channel_manager.clone(),
+		keys_manager.clone(),
 		router.clone(),
 		inbound_payments,
 		outbound_payments,
-		keys_manager.get_node_secret(),
 		event_ntfn_sender,
 		ldk_data_dir.clone(),
 		logger.clone(),

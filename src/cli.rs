@@ -4,21 +4,17 @@ use crate::{
 	ChannelManager, FilesystemLogger, HTLCStatus, MillisatAmount, PaymentInfo, PaymentInfoStorage,
 	PeerManager,
 };
-use bitcoin::hashes::sha256::Hash as Sha256Hash;
-use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
-use bitcoin::secp256k1::key::{PublicKey, SecretKey};
-use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain;
-use lightning::ln::channelmanager::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::chain::keysinterface::KeysManager;
 use lightning::ln::features::InvoiceFeatures;
-use lightning::routing::network_graph::{NetGraphMsgHandler, RoutingFees};
+use lightning::ln::{PaymentHash, PaymentSecret};
+use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
-use lightning::routing::router::RouteHint;
+use lightning::routing::router::RouteHintHop;
 use lightning::util::config::UserConfig;
-use lightning_invoice::{Currency, Invoice, InvoiceBuilder, Route, RouteHop};
-use rand;
-use rand::Rng;
+use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
 use std::io::{BufRead, Write};
@@ -41,7 +37,7 @@ pub(crate) struct LdkUserInfo {
 }
 
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
-	if env::args().len() < 4 {
+	if env::args().len() < 3 {
 		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network]`");
 		return Err(());
 	}
@@ -71,7 +67,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	let mut ldk_peer_port_set = true;
 	let ldk_peer_listening_port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
 		Some(Ok(p)) => p,
-		Some(Err(e)) => panic!(e),
+		Some(Err(e)) => panic!("{}", e),
 		None => {
 			ldk_peer_port_set = false;
 			9735
@@ -101,10 +97,11 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 
 pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
-	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
+	keys_manager: Arc<KeysManager>,
+	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	node_privkey: SecretKey, event_notifier: mpsc::Sender<()>, ldk_data_dir: String,
-	logger: Arc<FilesystemLogger>, network: Network,
+	event_notifier: mpsc::Sender<()>, ldk_data_dir: String, logger: Arc<FilesystemLogger>,
+	network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".\nLDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	let stdin = io::stdin();
@@ -195,16 +192,20 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					let invoice_res = Invoice::from_str(invoice_str.unwrap());
-					if invoice_res.is_err() {
-						println!("ERROR: invalid invoice: {:?}", invoice_res.unwrap_err());
-						print!("> ");
-						io::stdout().flush().unwrap();
-						continue;
+					let invoice = match Invoice::from_str(invoice_str.unwrap()) {
+						Ok(inv) => inv,
+						Err(e) => {
+							println!("ERROR: invalid invoice: {:?}", e);
+							print!("> ");
+							io::stdout().flush().unwrap();
+							continue;
+						}
+					};
+					let mut route_hints = invoice.routes().clone();
+					let mut last_hops = Vec::new();
+					for hint in route_hints.drain(..) {
+						last_hops.push(hint[hint.len() - 1].clone());
 					}
-					let invoice = invoice_res.unwrap();
-					let route_hints: Vec<Route> =
-						invoice.routes().iter().map(|&route| route.clone()).collect();
 
 					let amt_pico_btc = invoice.amount_pico_btc();
 					if amt_pico_btc.is_none() {
@@ -216,7 +217,7 @@ pub(crate) async fn poll_for_user_input(
 					let amt_msat = amt_pico_btc.unwrap() / 10;
 
 					let payee_pubkey = invoice.recover_payee_pub_key();
-					let final_cltv = *invoice.min_final_cltv_expiry().unwrap_or(&9) as u32;
+					let final_cltv = invoice.min_final_cltv_expiry() as u32;
 
 					let mut payment_hash = PaymentHash([0; 32]);
 					payment_hash.0.copy_from_slice(&invoice.payment_hash().as_ref()[0..32]);
@@ -230,54 +231,19 @@ pub(crate) async fn poll_for_user_input(
 						None => None,
 					};
 
-					// rust-lightning-invoice doesn't currently support features, so we parse features
-					// manually from the invoice.
-					let mut invoice_features = InvoiceFeatures::empty();
-					for field in &invoice.into_signed_raw().raw_invoice().data.tagged_fields {
-						match field {
-							lightning_invoice::RawTaggedField::UnknownSemantics(vec) => {
-								if vec[0] == bech32::u5::try_from_u8(5).unwrap() {
-									if vec.len() >= 6 && vec[5].to_u8() & 0b10000 != 0 {
-										invoice_features =
-											invoice_features.set_variable_length_onion_optional();
-									}
-									if vec.len() >= 6 && vec[5].to_u8() & 0b01000 != 0 {
-										invoice_features =
-											invoice_features.set_variable_length_onion_required();
-									}
-									if vec.len() >= 4 && vec[3].to_u8() & 0b00001 != 0 {
-										invoice_features =
-											invoice_features.set_payment_secret_optional();
-									}
-									if vec.len() >= 5 && vec[4].to_u8() & 0b10000 != 0 {
-										invoice_features =
-											invoice_features.set_payment_secret_required();
-									}
-									if vec.len() >= 4 && vec[3].to_u8() & 0b00100 != 0 {
-										invoice_features =
-											invoice_features.set_basic_mpp_optional();
-									}
-									if vec.len() >= 4 && vec[3].to_u8() & 0b00010 != 0 {
-										invoice_features =
-											invoice_features.set_basic_mpp_required();
-									}
-								}
-							}
-							_ => {}
-						}
-					}
-					let invoice_features_opt = match invoice_features == InvoiceFeatures::empty() {
-						true => None,
-						false => Some(invoice_features),
+					let invoice_features = match invoice.features() {
+						Some(feat) => Some(feat.clone()),
+						None => None,
 					};
+
 					send_payment(
 						payee_pubkey,
 						amt_msat,
 						final_cltv,
 						payment_hash,
 						payment_secret,
-						invoice_features_opt,
-						route_hints,
+						invoice_features,
+						last_hops,
 						router.clone(),
 						channel_manager.clone(),
 						outbound_payments.clone(),
@@ -303,8 +269,8 @@ pub(crate) async fn poll_for_user_input(
 					get_invoice(
 						amt_msat.unwrap(),
 						inbound_payments.clone(),
-						node_privkey.clone(),
 						channel_manager.clone(),
+						keys_manager.clone(),
 						network,
 					);
 				}
@@ -379,6 +345,8 @@ pub(crate) async fn poll_for_user_input(
 					channel_id.copy_from_slice(&channel_id_vec.unwrap());
 					force_close_channel(channel_id, channel_manager.clone());
 				}
+				"nodeinfo" => node_info(channel_manager.clone(), peer_manager.clone()),
+				"listpeers" => list_peers(peer_manager.clone()),
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
 		}
@@ -396,6 +364,23 @@ fn help() {
 	println!("listpayments");
 	println!("closechannel <channel_id>");
 	println!("forceclosechannel <channel_id>");
+}
+
+fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
+	println!("\t{{");
+	println!("\t\t node_pubkey: {}", channel_manager.get_our_node_id());
+	println!("\t\t num_channels: {}", channel_manager.list_channels().len());
+	println!("\t\t num_usable_channels: {}", channel_manager.list_usable_channels().len());
+	println!("\t\t num_peers: {}", peer_manager.get_peer_node_ids().len());
+	println!("\t}},");
+}
+
+fn list_peers(peer_manager: Arc<PeerManager>) {
+	println!("\t{{");
+	for pubkey in peer_manager.get_peer_node_ids() {
+		println!("\t\t pubkey: {}", pubkey);
+	}
+	println!("\t}},");
 }
 
 fn list_channels(channel_manager: Arc<ChannelManager>) {
@@ -523,8 +508,8 @@ fn open_channel(
 fn send_payment(
 	payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
 	payment_secret: Option<PaymentSecret>, payee_features: Option<InvoiceFeatures>,
-	mut route_hints: Vec<Route>,
-	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access>, Arc<FilesystemLogger>>>,
+	route_hints: Vec<RouteHintHop>,
+	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
 ) {
@@ -532,29 +517,13 @@ fn send_payment(
 	let first_hops = channel_manager.list_usable_channels();
 	let payer_pubkey = channel_manager.get_our_node_id();
 
-	let mut hints: Vec<RouteHint> = Vec::new();
-	for route in route_hints.drain(..) {
-		let route_hops = route.into_inner();
-		let last_hop = &route_hops[route_hops.len() - 1];
-		hints.push(RouteHint {
-			src_node_id: last_hop.pubkey,
-			short_channel_id: u64::from_be_bytes(last_hop.short_channel_id),
-			fees: RoutingFees {
-				base_msat: last_hop.fee_base_msat,
-				proportional_millionths: last_hop.fee_proportional_millionths,
-			},
-			cltv_expiry_delta: last_hop.cltv_expiry_delta,
-			htlc_minimum_msat: None,
-			htlc_maximum_msat: None,
-		})
-	}
 	let route = router::get_route(
 		&payer_pubkey,
 		&network_graph,
 		&payee,
 		payee_features,
 		Some(&first_hops.iter().collect::<Vec<_>>()),
-		&hints.iter().collect::<Vec<_>>(),
+		&route_hints.iter().collect::<Vec<_>>(),
 		amt_msat,
 		final_cltv,
 		logger,
@@ -587,71 +556,43 @@ fn send_payment(
 }
 
 fn get_invoice(
-	amt_msat: u64, payment_storage: PaymentInfoStorage, our_node_privkey: SecretKey,
-	channel_manager: Arc<ChannelManager>, network: Network,
+	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: Arc<ChannelManager>,
+	keys_manager: Arc<KeysManager>, network: Network,
 ) {
 	let mut payments = payment_storage.lock().unwrap();
-	let secp_ctx = Secp256k1::new();
-
-	let mut preimage = [0; 32];
-	rand::thread_rng().fill_bytes(&mut preimage);
-	let payment_hash = Sha256Hash::hash(&preimage);
-
-	let our_node_pubkey = channel_manager.get_our_node_id();
-	let mut invoice = InvoiceBuilder::new(match network {
+	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,
 		Network::Testnet => Currency::BitcoinTestnet,
 		Network::Regtest => Currency::Regtest,
-		Network::Signet => panic!("Signet invoices not supported"),
-	})
-	.payment_hash(payment_hash)
-	.description("rust-lightning-bitcoinrpc invoice".to_string())
-	.amount_pico_btc(amt_msat * 10)
-	.current_timestamp()
-	.payee_pub_key(our_node_pubkey);
-
-	// Add route hints to the invoice.
-	let our_channels = channel_manager.list_usable_channels();
-	let mut min_final_cltv_expiry = 9;
-	for channel in our_channels {
-		let short_channel_id = match channel.short_channel_id {
-			Some(id) => id.to_be_bytes(),
-			None => continue,
-		};
-		let forwarding_info = match channel.counterparty_forwarding_info {
-			Some(info) => info,
-			None => continue,
-		};
-		if forwarding_info.cltv_expiry_delta > min_final_cltv_expiry {
-			min_final_cltv_expiry = forwarding_info.cltv_expiry_delta;
+		Network::Signet => panic!("Signet unsupported"),
+	};
+	let invoice = match utils::create_invoice_from_channelmanager(
+		&channel_manager,
+		keys_manager,
+		currency,
+		Some(amt_msat),
+		"ldk-tutorial-node".to_string(),
+	) {
+		Ok(inv) => {
+			println!("SUCCESS: generated invoice: {}", inv);
+			inv
 		}
-		invoice = invoice.route(vec![RouteHop {
-			pubkey: channel.remote_network_id,
-			short_channel_id,
-			fee_base_msat: forwarding_info.fee_base_msat,
-			fee_proportional_millionths: forwarding_info.fee_proportional_millionths,
-			cltv_expiry_delta: forwarding_info.cltv_expiry_delta,
-		}]);
-	}
-	invoice = invoice.min_final_cltv_expiry(min_final_cltv_expiry.into());
+		Err(e) => {
+			println!("ERROR: failed to create invoice: {:?}", e);
+			return;
+		}
+	};
 
-	// Sign the invoice.
-	let invoice =
-		invoice.build_signed(|msg_hash| secp_ctx.sign_recoverable(msg_hash, &our_node_privkey));
-
-	match invoice {
-		Ok(invoice) => println!("SUCCESS: generated invoice: {}", invoice),
-		Err(e) => println!("ERROR: failed to create invoice: {:?}", e),
-	}
-
+	let mut payment_hash = PaymentHash([0; 32]);
+	payment_hash.0.copy_from_slice(&invoice.payment_hash().as_ref()[0..32]);
 	payments.insert(
-		PaymentHash(payment_hash.into_inner()),
+		payment_hash,
 		PaymentInfo {
-			preimage: Some(PaymentPreimage(preimage)),
+			preimage: None,
 			// We can't add payment secrets to invoices until we support features in invoices.
 			// Otherwise lnd errors with "destination hop doesn't understand payment addresses"
 			// (for context, lnd calls payment secrets "payment addresses").
-			secret: None,
+			secret: Some(invoice.payment_secret().unwrap().clone()),
 			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
