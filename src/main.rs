@@ -168,10 +168,10 @@ async fn handle_ldk_events(
 					let status = match loop_channel_manager.claim_funds(payment_preimage.unwrap()) {
 						true => {
 							println!(
-					          		    "\nEVENT: received payment from payment hash {} of {} millisatoshis",
-					          		    hex_utils::hex_str(&payment_hash.0),
-					          		    amt
-					              );
+								"\nEVENT: received payment from payment hash {} of {} millisatoshis",
+								hex_utils::hex_str(&payment_hash.0),
+								amt
+							);
 							print!("> ");
 							io::stdout().flush().unwrap();
 							HTLCStatus::Succeeded
