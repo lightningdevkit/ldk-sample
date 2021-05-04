@@ -67,7 +67,10 @@ impl BitcoindClient {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
 		let rpc_credentials =
 			base64::encode(format!("{}:{}", rpc_user.clone(), rpc_password.clone()));
-		let bitcoind_rpc_client = RpcClient::new(&rpc_credentials, http_endpoint)?;
+		let mut bitcoind_rpc_client = RpcClient::new(&rpc_credentials, http_endpoint)?;
+		let _dummy = bitcoind_rpc_client.call_method::<BlockchainInfo>("getblockchaininfo", &vec![]).await
+			.map_err(|_| std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+				"Failed to make initial call to bitcoind - please check your RPC user/password and access settings"))?;
 		let mut fees: HashMap<Target, AtomicU32> = HashMap::new();
 		fees.insert(Target::Background, AtomicU32::new(253));
 		fees.insert(Target::Normal, AtomicU32::new(2000));
