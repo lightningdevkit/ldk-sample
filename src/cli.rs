@@ -18,7 +18,7 @@ use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
 use std::io::{BufRead, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
@@ -639,12 +639,12 @@ pub(crate) fn parse_peer_info(
 		return Err(std::io::Error::new(
 			std::io::ErrorKind::Other,
 			"ERROR: incorrectly formatted peer
-        info. Should be formatted as: `pubkey@host:port`",
+		info. Should be formatted as: `pubkey@host:port`",
 		));
 	}
 
-	let peer_addr: Result<SocketAddr, _> = peer_addr_str.unwrap().parse();
-	if peer_addr.is_err() {
+	let peer_addr = peer_addr_str.unwrap().to_socket_addrs().map(|mut r| r.next());
+	if peer_addr.is_err() || peer_addr.as_ref().unwrap().is_none() {
 		return Err(std::io::Error::new(
 			std::io::ErrorKind::Other,
 			"ERROR: couldn't parse pubkey@host:port into a socket address",
@@ -659,5 +659,5 @@ pub(crate) fn parse_peer_info(
 		));
 	}
 
-	Ok((pubkey.unwrap(), peer_addr.unwrap()))
+	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
 }
