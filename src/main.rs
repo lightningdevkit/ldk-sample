@@ -482,8 +482,9 @@ async fn start_ldk() {
 	let event_notifier = event_ntfn_sender.clone();
 	let listening_port = args.ldk_peer_listening_port;
 	tokio::spawn(async move {
-		let listener =
-			tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port)).await.unwrap();
+		let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port))
+			.await
+			.expect("Failed to bind to listen port - is something else already listening on it?");
 		loop {
 			let peer_mgr = peer_manager_connection_handler.clone();
 			let notifier = event_notifier.clone();
