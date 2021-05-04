@@ -463,7 +463,14 @@ pub(crate) async fn connect_peer_if_necessary(
 			return Ok(());
 		}
 	}
-	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), event_notifier, pubkey, peer_addr).await {
+	match lightning_net_tokio::connect_outbound(
+		Arc::clone(&peer_manager),
+		event_notifier,
+		pubkey,
+		peer_addr,
+	)
+	.await
+	{
 		Some(conn_closed_fut) => {
 			let mut closed_fut_box = Box::pin(conn_closed_fut);
 			let mut peer_connected = false;
@@ -472,7 +479,7 @@ pub(crate) async fn connect_peer_if_necessary(
 					std::task::Poll::Ready(_) => {
 						println!("ERROR: Peer disconnected before we finished the handshake");
 						return Err(());
-					},
+					}
 					std::task::Poll::Pending => {}
 				}
 				for node_pubkey in peer_manager.get_peer_node_ids() {
