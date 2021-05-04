@@ -482,14 +482,20 @@ async fn start_ldk() {
 	let event_notifier = event_ntfn_sender.clone();
 	let listening_port = args.ldk_peer_listening_port;
 	tokio::spawn(async move {
-		let listener = std::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port)).unwrap();
+		let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port))
+			.await
+			.expect("Failed to bind to listen port - is something else already listening on it?");
 		loop {
 			let peer_mgr = peer_manager_connection_handler.clone();
 			let notifier = event_notifier.clone();
-			let tcp_stream = listener.accept().unwrap().0;
+			let tcp_stream = listener.accept().await.unwrap().0;
 			tokio::spawn(async move {
-				lightning_net_tokio::setup_inbound(peer_mgr.clone(), notifier.clone(), tcp_stream)
-					.await;
+				lightning_net_tokio::setup_inbound(
+					peer_mgr.clone(),
+					notifier.clone(),
+					tcp_stream.into_std().unwrap(),
+				)
+				.await;
 			});
 		}
 	});

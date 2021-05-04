@@ -234,6 +234,7 @@ dependencies = [
  "bech32 0.7.2",
  "bitcoin",
  "bitcoin-bech32",
+ "futures",
  "hex",
  "lightning",
  "lightning-background-processor",
