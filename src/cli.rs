@@ -103,7 +103,9 @@ pub(crate) async fn poll_for_user_input(
 	event_notifier: mpsc::Sender<()>, ldk_data_dir: String, logger: Arc<FilesystemLogger>,
 	network: Network,
 ) {
-	println!("LDK startup successful. To view available commands: \"help\".\nLDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
+	println!("LDK startup successful. To view available commands: \"help\".");
+	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
+	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
 	let stdin = io::stdin();
 	print!("> ");
 	io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
