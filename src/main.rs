@@ -292,13 +292,17 @@ async fn start_ldk() {
 
 	// Check that the bitcoind we've connected to is running the network we expect
 	let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
-	if bitcoind_chain != match args.network {
-		bitcoin::Network::Bitcoin => "main",
-		bitcoin::Network::Testnet => "test",
-		bitcoin::Network::Regtest => "regtest",
-		bitcoin::Network::Signet => "signet",
-	} {
-		println!("Chain argument ({}) didn't match bitcoind chain ({})", args.network, bitcoind_chain);
+	if bitcoind_chain
+		!= match args.network {
+			bitcoin::Network::Bitcoin => "main",
+			bitcoin::Network::Testnet => "test",
+			bitcoin::Network::Regtest => "regtest",
+			bitcoin::Network::Signet => "signet",
+		} {
+		println!(
+			"Chain argument ({}) didn't match bitcoind chain ({})",
+			args.network, bitcoind_chain
+		);
 		return;
 	}
 
