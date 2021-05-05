@@ -569,7 +569,8 @@ async fn start_ldk() {
 							peer_addr,
 							peer_manager.clone(),
 							event_ntfn_sender.clone(),
-						);
+						)
+						.await;
 					}
 				}
 			}
