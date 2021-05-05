@@ -9,6 +9,7 @@ use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain;
 use lightning::chain::keysinterface::KeysManager;
 use lightning::ln::features::InvoiceFeatures;
+use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
@@ -18,7 +19,7 @@ use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
 use std::io::{BufRead, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
@@ -33,12 +34,14 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_host: String,
 	pub(crate) ldk_storage_dir_path: String,
 	pub(crate) ldk_peer_listening_port: u16,
+	pub(crate) ldk_announced_listen_addr: Option<NetAddress>,
+	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
 }
 
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	if env::args().len() < 3 {
-		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network]`");
+		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-listen-addr announced-node-name]`");
 		return Err(());
 	}
 	let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
@@ -84,6 +87,32 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		Some(_) => panic!("Unsupported network provided. Options are: `regtest`, `testnet`"),
 		None => Network::Testnet,
 	};
+
+	let ldk_announced_listen_addr = match env::args().skip(arg_idx + 1).next().as_ref() {
+		Some(s) => match IpAddr::from_str(s) {
+			Ok(IpAddr::V4(a)) => {
+				Some(NetAddress::IPv4 { addr: a.octets(), port: ldk_peer_listening_port })
+			}
+			Ok(IpAddr::V6(a)) => {
+				Some(NetAddress::IPv6 { addr: a.octets(), port: ldk_peer_listening_port })
+			}
+			Err(_) => panic!("Failed to parse announced-listen-addr into an IP address"),
+		},
+		None => None,
+	};
+
+	let ldk_announced_node_name = match env::args().skip(arg_idx + 2).next().as_ref() {
+		Some(s) => {
+			if s.len() > 32 {
+				panic!("Node Alias can not be longer than 32 bytes");
+			}
+			let mut bytes = [0; 32];
+			bytes[..s.len()].copy_from_slice(s.as_bytes());
+			bytes
+		}
+		None => [0; 32],
+	};
+
 	Ok(LdkUserInfo {
 		bitcoind_rpc_username,
 		bitcoind_rpc_password,
@@ -91,6 +120,8 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		bitcoind_rpc_port,
 		ldk_storage_dir_path,
 		ldk_peer_listening_port,
+		ldk_announced_listen_addr,
+		ldk_announced_node_name,
 		network,
 	})
 }
