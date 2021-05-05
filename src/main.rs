@@ -220,9 +220,9 @@ async fn handle_ldk_events(
 						hex_utils::hex_str(&payment_hash.0)
 					);
 					if rejected_by_dest {
-						println!("rejected by destination node");
+						println!("re-attempting the payment will not succeed");
 					} else {
-						println!("route failed");
+						println!("payment may be retried");
 					}
 					print!("> ");
 					io::stdout().flush().unwrap();
