@@ -424,19 +424,22 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 		println!("");
 		println!("\t{{");
 		println!("\t\tchannel_id: {},", hex_utils::hex_str(&chan_info.channel_id[..]));
+		if let Some(funding_txo) = chan_info.funding_txo {
+			println!("\t\tfunding_txid: {},", funding_txo.txid);
+		}
 		println!(
 			"\t\tpeer_pubkey: {},",
 			hex_utils::hex_str(&chan_info.remote_network_id.serialize())
 		);
-		let mut pending_channel = false;
-		match chan_info.short_channel_id {
-			Some(id) => println!("\t\tshort_channel_id: {},", id),
-			None => {
-				pending_channel = true;
-			}
+		if let Some(id) = chan_info.short_channel_id {
+			println!("\t\tshort_channel_id: {},", id);
 		}
-		println!("\t\tpending_open: {},", pending_channel);
+		println!("\t\tis_confirmed_onchain: {},", chan_info.is_funding_locked);
 		println!("\t\tchannel_value_satoshis: {},", chan_info.channel_value_satoshis);
+		if chan_info.is_usable {
+			println!("\t\tavailable_balance_for_send_msat: {},", chan_info.outbound_capacity_msat);
+			println!("\t\tavailable_balance_for_recv_msat: {},", chan_info.inbound_capacity_msat);
+		}
 		println!("\t\tchannel_can_send_payments: {},", chan_info.is_usable);
 		println!("\t}},");
 	}
