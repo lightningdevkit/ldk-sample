@@ -406,7 +406,7 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 		}
 		println!("\t\tpending_open: {},", pending_channel);
 		println!("\t\tchannel_value_satoshis: {},", chan_info.channel_value_satoshis);
-		println!("\t\tchannel_can_send_payments: {},", chan_info.is_live);
+		println!("\t\tchannel_can_send_payments: {},", chan_info.is_usable);
 		println!("\t}},");
 	}
 	println!("]");
