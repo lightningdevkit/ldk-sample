@@ -391,14 +391,16 @@ pub(crate) async fn poll_for_user_input(
 }
 
 fn help() {
-	println!("openchannel pubkey@host:port <channel_amt_satoshis>");
+	println!("openchannel pubkey@host:port <amt_satoshis>");
 	println!("sendpayment <invoice>");
-	println!("getinvoice <amt_in_millisatoshis>");
+	println!("getinvoice <amt_millisatoshis>");
 	println!("connectpeer pubkey@host:port");
 	println!("listchannels");
 	println!("listpayments");
 	println!("closechannel <channel_id>");
 	println!("forceclosechannel <channel_id>");
+	println!("nodeinfo");
+	println!("listpeers");
 }
 
 fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
@@ -441,6 +443,7 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 			println!("\t\tavailable_balance_for_recv_msat: {},", chan_info.inbound_capacity_msat);
 		}
 		println!("\t\tchannel_can_send_payments: {},", chan_info.is_usable);
+		println!("\t\tpublic: {},", chan_info.is_public);
 		println!("\t}},");
 	}
 	println!("]");
@@ -543,7 +546,7 @@ fn open_channel(
 	}
 	// lnd's max to_self_delay is 2016, so we want to be compatible.
 	config.peer_channel_config_limits.their_to_self_delay = 2016;
-	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, None) {
+	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
 		Ok(_) => {
 			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
 			return Ok(());
