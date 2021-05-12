@@ -546,7 +546,7 @@ fn open_channel(
 	}
 	// lnd's max to_self_delay is 2016, so we want to be compatible.
 	config.peer_channel_config_limits.their_to_self_delay = 2016;
-	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, None) {
+	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
 		Ok(_) => {
 			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
 			return Ok(());
