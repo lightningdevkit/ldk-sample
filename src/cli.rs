@@ -391,14 +391,16 @@ pub(crate) async fn poll_for_user_input(
 }
 
 fn help() {
-	println!("openchannel pubkey@host:port <channel_amt_satoshis>");
+	println!("openchannel pubkey@host:port <amt_satoshis>");
 	println!("sendpayment <invoice>");
-	println!("getinvoice <amt_in_millisatoshis>");
+	println!("getinvoice <amt_millisatoshis>");
 	println!("connectpeer pubkey@host:port");
 	println!("listchannels");
 	println!("listpayments");
 	println!("closechannel <channel_id>");
 	println!("forceclosechannel <channel_id>");
+	println!("nodeinfo");
+	println!("listpeers");
 }
 
 fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
