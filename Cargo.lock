@@ -257,7 +257,7 @@ checksum = "b7282d924be3275cec7f6756ff4121987bc6481325397dde6ba3e7802b1a8b1c"
 [[package]]
 name = "lightning"
 version = "0.0.14"
-source = "git+https://github.com/rust-bitcoin/rust-lightning#7297e138716ec34147e591e125a96aa8a2cb2903"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?branch=main#499d84c165426b6f05bb414f5a49a7423eb9e0c5"
 dependencies = [
  "bitcoin",
 ]
@@ -265,7 +265,7 @@ dependencies = [
 [[package]]
 name = "lightning-background-processor"
 version = "0.0.14"
-source = "git+https://github.com/rust-bitcoin/rust-lightning#7297e138716ec34147e591e125a96aa8a2cb2903"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?branch=main#499d84c165426b6f05bb414f5a49a7423eb9e0c5"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -275,7 +275,7 @@ dependencies = [
 [[package]]
 name = "lightning-block-sync"
 version = "0.0.14"
-source = "git+https://github.com/rust-bitcoin/rust-lightning#7297e138716ec34147e591e125a96aa8a2cb2903"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?branch=main#499d84c165426b6f05bb414f5a49a7423eb9e0c5"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
@@ -288,7 +288,7 @@ dependencies = [
 [[package]]
 name = "lightning-invoice"
 version = "0.5.0"
-source = "git+https://github.com/rust-bitcoin/rust-lightning#7297e138716ec34147e591e125a96aa8a2cb2903"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?branch=main#499d84c165426b6f05bb414f5a49a7423eb9e0c5"
 dependencies = [
  "bech32 0.7.2",
  "bitcoin_hashes",
@@ -300,7 +300,7 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.0.14"
-source = "git+https://github.com/rust-bitcoin/rust-lightning#7297e138716ec34147e591e125a96aa8a2cb2903"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?branch=main#499d84c165426b6f05bb414f5a49a7423eb9e0c5"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -310,7 +310,7 @@ dependencies = [
 [[package]]
 name = "lightning-persister"
 version = "0.0.14"
-source = "git+https://github.com/rust-bitcoin/rust-lightning#7297e138716ec34147e591e125a96aa8a2cb2903"
+source = "git+https://github.com/rust-bitcoin/rust-lightning?branch=main#499d84c165426b6f05bb414f5a49a7423eb9e0c5"
 dependencies = [
  "bitcoin",
  "libc",
@@ -680,9 +680,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.2.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8190d04c665ea9e6b6a0dc45523ade572c088d2e6566244c1122671dbf4ae3a"
+checksum = "83f0c8e7c0addab50b663055baf787d0af7f413a46e6e7fb9559a4e4db7137a5"
 dependencies = [
  "autocfg",
  "bytes",

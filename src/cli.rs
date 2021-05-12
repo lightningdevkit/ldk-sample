@@ -25,7 +25,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_username: String,
@@ -131,8 +130,7 @@ pub(crate) async fn poll_for_user_input(
 	keys_manager: Arc<KeysManager>,
 	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	event_notifier: mpsc::Sender<()>, ldk_data_dir: String, logger: Arc<FilesystemLogger>,
-	network: Network,
+	ldk_data_dir: String, logger: Arc<FilesystemLogger>, network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".");
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
@@ -141,7 +139,6 @@ pub(crate) async fn poll_for_user_input(
 	print!("> ");
 	io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
 	for line in stdin.lock().lines() {
-		let _ = event_notifier.try_send(());
 		let line = line.unwrap();
 		let mut words = line.split_whitespace();
 		if let Some(word) = words.next() {
@@ -176,14 +173,9 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					if connect_peer_if_necessary(
-						pubkey,
-						peer_addr,
-						peer_manager.clone(),
-						event_notifier.clone(),
-					)
-					.await
-					.is_err()
+					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+						.await
+						.is_err()
 					{
 						print!("> ");
 						io::stdout().flush().unwrap();
@@ -326,14 +318,9 @@ pub(crate) async fn poll_for_user_input(
 								continue;
 							}
 						};
-					if connect_peer_if_necessary(
-						pubkey,
-						peer_addr,
-						peer_manager.clone(),
-						event_notifier.clone(),
-					)
-					.await
-					.is_ok()
+					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+						.await
+						.is_ok()
 					{
 						println!("SUCCESS: connected to peer {}", pubkey);
 					}
@@ -493,20 +480,13 @@ fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: Paymen
 
 pub(crate) async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
-	event_notifier: mpsc::Sender<()>,
 ) -> Result<(), ()> {
 	for node_pubkey in peer_manager.get_peer_node_ids() {
 		if node_pubkey == pubkey {
 			return Ok(());
 		}
 	}
-	match lightning_net_tokio::connect_outbound(
-		Arc::clone(&peer_manager),
-		event_notifier,
-		pubkey,
-		peer_addr,
-	)
-	.await
+	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
 		Some(conn_closed_fut) => {
 			let mut closed_fut_box = Box::pin(conn_closed_fut);
