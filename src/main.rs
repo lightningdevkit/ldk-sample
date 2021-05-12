@@ -220,9 +220,9 @@ async fn handle_ldk_events(
 						hex_utils::hex_str(&payment_hash.0)
 					);
 					if rejected_by_dest {
-						println!("rejected by destination node");
+						println!("re-attempting the payment will not succeed");
 					} else {
-						println!("route failed");
+						println!("payment may be retried");
 					}
 					print!("> ");
 					io::stdout().flush().unwrap();
@@ -569,12 +569,33 @@ async fn start_ldk() {
 							peer_addr,
 							peer_manager.clone(),
 							event_ntfn_sender.clone(),
-						);
+						)
+						.await;
 					}
 				}
 			}
 		}
 		Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
+	}
+
+	// Regularly broadcast our node_announcement. This is only required (or possible) if we have
+	// some public channels, and is only useful if we have public listen address(es) to announce.
+	// In a production environment, this should occur only after the announcement of new channels
+	// to avoid churn in the global network graph.
+	let chan_manager = Arc::clone(&channel_manager);
+	let network = args.network;
+	if args.ldk_announced_listen_addr.is_some() {
+		tokio::spawn(async move {
+			let mut interval = tokio::time::interval(Duration::from_secs(60));
+			loop {
+				interval.tick().await;
+				chan_manager.broadcast_node_announcement(
+					[0; 3],
+					args.ldk_announced_node_name,
+					vec![args.ldk_announced_listen_addr.as_ref().unwrap().clone()],
+				);
+			}
+		});
 	}
 
 	// Start the CLI.
@@ -588,7 +609,7 @@ async fn start_ldk() {
 		event_ntfn_sender,
 		ldk_data_dir.clone(),
 		logger.clone(),
-		args.network,
+		network,
 	)
 	.await;
 }
