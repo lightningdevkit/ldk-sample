@@ -672,8 +672,7 @@ pub(crate) fn parse_peer_info(
 	if peer_addr_str.is_none() || peer_addr_str.is_none() {
 		return Err(std::io::Error::new(
 			std::io::ErrorKind::Other,
-			"ERROR: incorrectly formatted peer
-		info. Should be formatted as: `pubkey@host:port`",
+			"ERROR: incorrectly formatted peer info. Should be formatted as: `pubkey@host:port`",
 		));
 	}
 
