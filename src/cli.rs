@@ -443,6 +443,7 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 			println!("\t\tavailable_balance_for_recv_msat: {},", chan_info.inbound_capacity_msat);
 		}
 		println!("\t\tchannel_can_send_payments: {},", chan_info.is_usable);
+		println!("\t\tpublic: {},", chan_info.is_public);
 		println!("\t}},");
 	}
 	println!("]");
