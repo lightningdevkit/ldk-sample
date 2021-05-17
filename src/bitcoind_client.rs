@@ -238,7 +238,20 @@ impl BroadcasterInterface for BitcoindClient {
 		let tx_serialized = serde_json::json!(encode::serialize_hex(tx));
 		tokio::spawn(async move {
 			let mut rpc = bitcoind_rpc_client.lock().await;
-			rpc.call_method::<RawTx>("sendrawtransaction", &vec![tx_serialized]).await.unwrap();
+			// This may error due to RL calling `broadcast_transaction` with the same transaction
+			// multiple times, but the error is safe to ignore.
+			match rpc.call_method::<RawTx>("sendrawtransaction", &vec![tx_serialized]).await {
+				Ok(_) => {}
+				Err(e) => {
+					let err_str = e.get_ref().unwrap().to_string();
+					if !err_str.contains("Transaction already in block chain")
+						&& !err_str.contains("Inputs missing or spent")
+						&& !err_str.contains("non-BIP68-final")
+					{
+						panic!("{}", e);
+					}
+				}
+			}
 		});
 	}
 }
