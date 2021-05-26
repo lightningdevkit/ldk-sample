@@ -490,7 +490,7 @@ async fn start_ldk() {
 		}
 	});
 
-	// Step 15: Event Handling
+	// Step 15: Handle LDK Events
 	let channel_manager_event_listener = channel_manager.clone();
 	let keys_manager_listener = keys_manager.clone();
 	// TODO: persist payment info to disk
@@ -512,7 +512,7 @@ async fn start_ldk() {
 			event,
 		))
 	};
-	// Step 16: ChannelManager Persisting
+	// Step 16: Persist ChannelManager
 	let data_dir = ldk_data_dir.clone();
 	let persist_channel_manager_callback =
 		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
