@@ -608,9 +608,6 @@ fn get_invoice(
 		payment_hash,
 		PaymentInfo {
 			preimage: None,
-			// We can't add payment secrets to invoices until we support features in invoices.
-			// Otherwise lnd errors with "destination hop doesn't understand payment addresses"
-			// (for context, lnd calls payment secrets "payment addresses").
 			secret: invoice.payment_secret().cloned(),
 			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
