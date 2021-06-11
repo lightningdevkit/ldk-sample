@@ -13,7 +13,7 @@ use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
-use lightning::routing::router::RouteHintHop;
+use lightning::routing::router::RouteHint;
 use lightning::util::config::UserConfig;
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
@@ -227,11 +227,7 @@ pub(crate) async fn poll_for_user_input(
 							continue;
 						}
 					};
-					let mut route_hints = invoice.routes().clone();
-					let mut last_hops = Vec::new();
-					for hint in route_hints.drain(..) {
-						last_hops.push(hint[hint.len() - 1].clone());
-					}
+					let last_hops = invoice.route_hints();
 
 					let amt_pico_btc = invoice.amount_pico_btc();
 					if amt_pico_btc.is_none() {
@@ -541,7 +537,7 @@ fn open_channel(
 fn send_payment(
 	payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
 	payment_secret: Option<PaymentSecret>, payee_features: Option<InvoiceFeatures>,
-	route_hints: Vec<RouteHintHop>,
+	route_hints: Vec<&RouteHint>,
 	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
@@ -556,7 +552,7 @@ fn send_payment(
 		&payee,
 		payee_features,
 		Some(&first_hops.iter().collect::<Vec<_>>()),
-		&route_hints.iter().collect::<Vec<_>>(),
+		&route_hints,
 		amt_msat,
 		final_cltv,
 		logger,
