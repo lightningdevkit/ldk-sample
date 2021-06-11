@@ -4,6 +4,7 @@ use crate::{
 	ChannelManager, FilesystemLogger, HTLCStatus, MillisatAmount, PaymentInfo, PaymentInfoStorage,
 	PeerManager,
 };
+use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain;
@@ -240,23 +241,9 @@ pub(crate) async fn poll_for_user_input(
 
 					let payee_pubkey = invoice.recover_payee_pub_key();
 					let final_cltv = invoice.min_final_cltv_expiry() as u32;
-
-					let mut payment_hash = PaymentHash([0; 32]);
-					payment_hash.0.copy_from_slice(&invoice.payment_hash().as_ref()[0..32]);
-
-					let payment_secret = match invoice.payment_secret() {
-						Some(secret) => {
-							let mut payment_secret = PaymentSecret([0; 32]);
-							payment_secret.0.copy_from_slice(&secret.0);
-							Some(payment_secret)
-						}
-						None => None,
-					};
-
-					let invoice_features = match invoice.features() {
-						Some(feat) => Some(feat.clone()),
-						None => None,
-					};
+					let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
+					let payment_secret = invoice.payment_secret().cloned();
+					let invoice_features = invoice.features().cloned();
 
 					send_payment(
 						payee_pubkey,
@@ -616,8 +603,7 @@ fn get_invoice(
 		}
 	};
 
-	let mut payment_hash = PaymentHash([0; 32]);
-	payment_hash.0.copy_from_slice(&invoice.payment_hash().as_ref()[0..32]);
+	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
 	payments.insert(
 		payment_hash,
 		PaymentInfo {
@@ -625,7 +611,7 @@ fn get_invoice(
 			// We can't add payment secrets to invoices until we support features in invoices.
 			// Otherwise lnd errors with "destination hop doesn't understand payment addresses"
 			// (for context, lnd calls payment secrets "payment addresses").
-			secret: Some(invoice.payment_secret().unwrap().clone()),
+			secret: invoice.payment_secret().cloned(),
 			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
