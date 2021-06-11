@@ -14,7 +14,7 @@ use lightning::ln::{PaymentHash, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
 use lightning::routing::router::RouteHint;
-use lightning::util::config::UserConfig;
+use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
@@ -513,15 +513,19 @@ pub(crate) async fn connect_peer_if_necessary(
 }
 
 fn open_channel(
-	peer_pubkey: PublicKey, channel_amt_sat: u64, announce_channel: bool,
+	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool,
 	channel_manager: Arc<ChannelManager>,
 ) -> Result<(), ()> {
-	let mut config = UserConfig::default();
-	if announce_channel {
-		config.channel_options.announced_channel = true;
-	}
-	// lnd's max to_self_delay is 2016, so we want to be compatible.
-	config.peer_channel_config_limits.their_to_self_delay = 2016;
+	let config = UserConfig {
+		peer_channel_config_limits: ChannelHandshakeLimits {
+			// lnd's max to_self_delay is 2016, so we want to be compatible.
+			their_to_self_delay: 2016,
+			..Default::default()
+		},
+		channel_options: ChannelConfig { announced_channel, ..Default::default() },
+		..Default::default()
+	};
+
 	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
 		Ok(_) => {
 			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
