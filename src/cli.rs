@@ -4,6 +4,7 @@ use crate::{
 	ChannelManager, FilesystemLogger, HTLCStatus, MillisatAmount, PaymentInfo, PaymentInfoStorage,
 	PeerManager,
 };
+use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain;
@@ -14,7 +15,7 @@ use lightning::ln::{PaymentHash, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
 use lightning::routing::router::RouteHint;
-use lightning::util::config::UserConfig;
+use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
@@ -240,23 +241,9 @@ pub(crate) async fn poll_for_user_input(
 
 					let payee_pubkey = invoice.recover_payee_pub_key();
 					let final_cltv = invoice.min_final_cltv_expiry() as u32;
-
-					let mut payment_hash = PaymentHash([0; 32]);
-					payment_hash.0.copy_from_slice(&invoice.payment_hash().as_ref()[0..32]);
-
-					let payment_secret = match invoice.payment_secret() {
-						Some(secret) => {
-							let mut payment_secret = PaymentSecret([0; 32]);
-							payment_secret.0.copy_from_slice(&secret.0);
-							Some(payment_secret)
-						}
-						None => None,
-					};
-
-					let invoice_features = match invoice.features() {
-						Some(feat) => Some(feat.clone()),
-						None => None,
-					};
+					let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
+					let payment_secret = invoice.payment_secret().cloned();
+					let invoice_features = invoice.features().cloned();
 
 					send_payment(
 						payee_pubkey,
@@ -484,24 +471,21 @@ pub(crate) async fn connect_peer_if_necessary(
 	}
 	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
-		Some(conn_closed_fut) => {
-			let mut closed_fut_box = Box::pin(conn_closed_fut);
-			let mut peer_connected = false;
-			while !peer_connected {
-				match futures::poll!(&mut closed_fut_box) {
+		Some(connection_closed_future) => {
+			let mut connection_closed_future = Box::pin(connection_closed_future);
+			loop {
+				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
 						println!("ERROR: Peer disconnected before we finished the handshake");
 						return Err(());
 					}
 					std::task::Poll::Pending => {}
 				}
-				for node_pubkey in peer_manager.get_peer_node_ids() {
-					if node_pubkey == pubkey {
-						peer_connected = true;
-					}
-				}
 				// Avoid blocking the tokio context by sleeping a bit
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				match peer_manager.get_peer_node_ids().iter().find(|id| **id == pubkey) {
+					Some(_) => break,
+					None => tokio::time::sleep(Duration::from_millis(10)).await,
+				}
 			}
 		}
 		None => {
@@ -513,15 +497,19 @@ pub(crate) async fn connect_peer_if_necessary(
 }
 
 fn open_channel(
-	peer_pubkey: PublicKey, channel_amt_sat: u64, announce_channel: bool,
+	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool,
 	channel_manager: Arc<ChannelManager>,
 ) -> Result<(), ()> {
-	let mut config = UserConfig::default();
-	if announce_channel {
-		config.channel_options.announced_channel = true;
-	}
-	// lnd's max to_self_delay is 2016, so we want to be compatible.
-	config.peer_channel_config_limits.their_to_self_delay = 2016;
+	let config = UserConfig {
+		peer_channel_config_limits: ChannelHandshakeLimits {
+			// lnd's max to_self_delay is 2016, so we want to be compatible.
+			their_to_self_delay: 2016,
+			..Default::default()
+		},
+		channel_options: ChannelConfig { announced_channel, ..Default::default() },
+		..Default::default()
+	};
+
 	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
 		Ok(_) => {
 			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
@@ -612,16 +600,12 @@ fn get_invoice(
 		}
 	};
 
-	let mut payment_hash = PaymentHash([0; 32]);
-	payment_hash.0.copy_from_slice(&invoice.payment_hash().as_ref()[0..32]);
+	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
 	payments.insert(
 		payment_hash,
 		PaymentInfo {
 			preimage: None,
-			// We can't add payment secrets to invoices until we support features in invoices.
-			// Otherwise lnd errors with "destination hop doesn't understand payment addresses"
-			// (for context, lnd calls payment secrets "payment addresses").
-			secret: Some(invoice.payment_secret().unwrap().clone()),
+			secret: invoice.payment_secret().cloned(),
 			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
