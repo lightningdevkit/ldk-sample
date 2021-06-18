@@ -426,13 +426,33 @@ async fn start_ldk() {
 	}
 
 	// Step 11: Optional: Initialize the NetGraphMsgHandler
-	// XXX persist routing data
 	let genesis = genesis_block(args.network).header.block_hash();
-	let router = Arc::new(NetGraphMsgHandler::new(
-		genesis,
+	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
+	let network_graph = disk::read_network(Path::new(&network_graph_path), genesis);
+	let router = Arc::new(NetGraphMsgHandler::from_net_graph(
 		None::<Arc<dyn chain::Access + Send + Sync>>,
 		logger.clone(),
+		network_graph,
 	));
+	let router_persist = Arc::clone(&router);
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(600));
+		loop {
+			interval.tick().await;
+			if disk::persist_network(
+				Path::new(&network_graph_path),
+				&*router_persist.network_graph.read().unwrap(),
+			)
+			.is_err()
+			{
+				// Persistence errors here are non-fatal as we can just fetch the routing graph
+				// again later, but they may indicate a disk error which could be fatal elsewhere.
+				eprintln!(
+					"Warning: Failed to persist network graph, check your disk and permissions"
+				);
+			}
+		}
+	});
 
 	// Step 12: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
