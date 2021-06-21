@@ -246,6 +246,7 @@ impl BroadcasterInterface for BitcoindClient {
 					let err_str = e.get_ref().unwrap().to_string();
 					if !err_str.contains("Transaction already in block chain")
 						&& !err_str.contains("Inputs missing or spent")
+						&& !err_str.contains("bad-txns-inputs-missingorspent")
 						&& !err_str.contains("non-BIP68-final")
 					{
 						panic!("{}", e);
