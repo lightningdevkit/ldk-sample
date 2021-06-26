@@ -51,7 +51,7 @@ impl TryInto<NewAddress> for JsonResponse {
 }
 
 pub struct FeeResponse {
-	pub feerate: Option<u32>,
+	pub feerate_sat_per_kw: Option<u32>,
 	pub errored: bool,
 }
 
@@ -61,8 +61,13 @@ impl TryInto<FeeResponse> for JsonResponse {
 		let errored = !self.0["errors"].is_null();
 		Ok(FeeResponse {
 			errored,
-			feerate: match self.0["feerate"].as_f64() {
-				Some(fee) => Some((fee * 100_000_000.0).round() as u32),
+			feerate_sat_per_kw: match self.0["feerate"].as_f64() {
+				// Bitcoin Core gives us a feerate in BTC/KvB, which we need to convert to
+				// satoshis/KW. Thus, we first multiply by 10^8 to get satoshis, then divide by 4
+				// to convert virtual-bytes into weight units.
+				Some(feerate_btc_per_kvbyte) => {
+					Some((feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32)
+				}
 				None => None,
 			},
 		})

@@ -60,6 +60,9 @@ impl BlockSource for &BitcoindClient {
 	}
 }
 
+/// The minimum feerate we are allowed to send, as specify by LDK.
+const MIN_FEERATE: u32 = 253;
+
 impl BitcoindClient {
 	pub async fn new(
 		host: String, port: u16, rpc_user: String, rpc_password: String,
@@ -76,7 +79,7 @@ impl BitcoindClient {
 				"Failed to make initial call to bitcoind - please check your RPC user/password and access settings")
 			})?;
 		let mut fees: HashMap<Target, AtomicU32> = HashMap::new();
-		fees.insert(Target::Background, AtomicU32::new(253));
+		fees.insert(Target::Background, AtomicU32::new(MIN_FEERATE));
 		fees.insert(Target::Normal, AtomicU32::new(2000));
 		fees.insert(Target::HighPriority, AtomicU32::new(5000));
 		let client = Self {
@@ -111,12 +114,11 @@ impl BitcoindClient {
 						)
 						.await
 						.unwrap();
-					match resp.feerate {
-						Some(fee) => fee,
-						None => 253,
+					match resp.feerate_sat_per_kw {
+						Some(feerate) => std::cmp::max(feerate, MIN_FEERATE),
+						None => MIN_FEERATE,
 					}
 				};
-				// if background_estimate.
 
 				let normal_estimate = {
 					let mut rpc = rpc_client.lock().await;
@@ -129,8 +131,8 @@ impl BitcoindClient {
 						)
 						.await
 						.unwrap();
-					match resp.feerate {
-						Some(fee) => fee,
+					match resp.feerate_sat_per_kw {
+						Some(feerate) => std::cmp::max(feerate, MIN_FEERATE),
 						None => 2000,
 					}
 				};
@@ -147,8 +149,8 @@ impl BitcoindClient {
 						.await
 						.unwrap();
 
-					match resp.feerate {
-						Some(fee) => fee,
+					match resp.feerate_sat_per_kw {
+						Some(feerate) => std::cmp::max(feerate, MIN_FEERATE),
 						None => 5000,
 					}
 				};
