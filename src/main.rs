@@ -139,7 +139,15 @@ async fn handle_ldk_events(
 			let final_tx: Transaction =
 				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
 			// Give the funding transaction back to LDK for opening the channel.
-			channel_manager.funding_transaction_generated(&temporary_channel_id, final_tx).unwrap();
+			if channel_manager
+				.funding_transaction_generated(&temporary_channel_id, final_tx)
+				.is_err()
+			{
+				println!(
+					"\nERROR: Channel went away before we could fund it. The peer disconnected or refused the channel.");
+				print!("> ");
+				io::stdout().flush().unwrap();
+			}
 		}
 		Event::PaymentReceived { payment_hash, payment_preimage, payment_secret, amt, .. } => {
 			let mut payments = inbound_payments.lock().unwrap();
