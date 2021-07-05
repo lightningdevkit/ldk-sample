@@ -34,14 +34,14 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_host: String,
 	pub(crate) ldk_storage_dir_path: String,
 	pub(crate) ldk_peer_listening_port: u16,
-	pub(crate) ldk_announced_listen_addr: Option<NetAddress>,
+	pub(crate) ldk_announced_listen_addr: Vec<NetAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
 }
 
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	if env::args().len() < 3 {
-		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-listen-addr announced-node-name]`");
+		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*]`");
 		return Err(());
 	}
 	let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
@@ -77,7 +77,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		}
 	};
 
-	let arg_idx = match ldk_peer_port_set {
+	let mut arg_idx = match ldk_peer_port_set {
 		true => 4,
 		false => 3,
 	};
@@ -88,30 +88,38 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		None => Network::Testnet,
 	};
 
-	let ldk_announced_listen_addr = match env::args().skip(arg_idx + 1).next().as_ref() {
-		Some(s) => match IpAddr::from_str(s) {
-			Ok(IpAddr::V4(a)) => {
-				Some(NetAddress::IPv4 { addr: a.octets(), port: ldk_peer_listening_port })
-			}
-			Ok(IpAddr::V6(a)) => {
-				Some(NetAddress::IPv6 { addr: a.octets(), port: ldk_peer_listening_port })
-			}
-			Err(_) => panic!("Failed to parse announced-listen-addr into an IP address"),
-		},
-		None => None,
-	};
-
-	let ldk_announced_node_name = match env::args().skip(arg_idx + 2).next().as_ref() {
+	let ldk_announced_node_name = match env::args().skip(arg_idx + 1).next().as_ref() {
 		Some(s) => {
 			if s.len() > 32 {
 				panic!("Node Alias can not be longer than 32 bytes");
 			}
+			arg_idx += 1;
 			let mut bytes = [0; 32];
 			bytes[..s.len()].copy_from_slice(s.as_bytes());
 			bytes
 		}
 		None => [0; 32],
 	};
+
+	let mut ldk_announced_listen_addr = Vec::new();
+	loop {
+		match env::args().skip(arg_idx + 1).next().as_ref() {
+			Some(s) => match IpAddr::from_str(s) {
+				Ok(IpAddr::V4(a)) => {
+					ldk_announced_listen_addr
+						.push(NetAddress::IPv4 { addr: a.octets(), port: ldk_peer_listening_port });
+					arg_idx += 1;
+				}
+				Ok(IpAddr::V6(a)) => {
+					ldk_announced_listen_addr
+						.push(NetAddress::IPv6 { addr: a.octets(), port: ldk_peer_listening_port });
+					arg_idx += 1;
+				}
+				Err(_) => panic!("Failed to parse announced-listen-addr into an IP address"),
+			},
+			None => break,
+		}
+	}
 
 	Ok(LdkUserInfo {
 		bitcoind_rpc_username,

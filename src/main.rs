@@ -569,7 +569,7 @@ async fn start_ldk() {
 	// to avoid churn in the global network graph.
 	let chan_manager = Arc::clone(&channel_manager);
 	let network = args.network;
-	if args.ldk_announced_listen_addr.is_some() {
+	if !args.ldk_announced_listen_addr.is_empty() {
 		tokio::spawn(async move {
 			let mut interval = tokio::time::interval(Duration::from_secs(60));
 			loop {
@@ -577,7 +577,7 @@ async fn start_ldk() {
 				chan_manager.broadcast_node_announcement(
 					[0; 3],
 					args.ldk_announced_node_name,
-					vec![args.ldk_announced_listen_addr.as_ref().unwrap().clone()],
+					args.ldk_announced_listen_addr.clone(),
 				);
 			}
 		});
