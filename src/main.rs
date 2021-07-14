@@ -19,11 +19,10 @@ use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager};
-use lightning::chain::Filter;
-use lightning::chain::Watch;
+use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
-	BestBlock, ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
@@ -552,7 +551,7 @@ async fn start_ldk() {
 		Ok(mut info) => {
 			for (pubkey, peer_addr) in info.drain() {
 				for chan_info in channel_manager.list_channels() {
-					if pubkey == chan_info.remote_network_id {
+					if pubkey == chan_info.counterparty.node_id {
 						let _ =
 							cli::connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
 								.await;

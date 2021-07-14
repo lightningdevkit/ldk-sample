@@ -401,7 +401,7 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 		}
 		println!(
 			"\t\tpeer_pubkey: {},",
-			hex_utils::hex_str(&chan_info.remote_network_id.serialize())
+			hex_utils::hex_str(&chan_info.counterparty.node_id.serialize())
 		);
 		if let Some(id) = chan_info.short_channel_id {
 			println!("\t\tshort_channel_id: {},", id);
