@@ -28,7 +28,7 @@ use lightning::ln::peer_handler::{MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::util::config::UserConfig;
-use lightning::util::events::Event;
+use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
 use lightning_background_processor::BackgroundProcessor;
 use lightning_block_sync::init;
@@ -148,8 +148,14 @@ async fn handle_ldk_events(
 				io::stdout().flush().unwrap();
 			}
 		}
-		Event::PaymentReceived { payment_hash, payment_preimage, payment_secret, amt, .. } => {
+		Event::PaymentReceived { payment_hash, purpose, amt, .. } => {
 			let mut payments = inbound_payments.lock().unwrap();
+			let (payment_preimage, payment_secret) = match purpose {
+				PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
+					(payment_preimage, Some(payment_secret))
+				}
+				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
+			};
 			let status = match channel_manager.claim_funds(payment_preimage.unwrap()) {
 				true => {
 					println!(
@@ -167,13 +173,13 @@ async fn handle_ldk_events(
 				Entry::Occupied(mut e) => {
 					let payment = e.get_mut();
 					payment.status = status;
-					payment.preimage = Some(payment_preimage.unwrap());
-					payment.secret = Some(payment_secret);
+					payment.preimage = payment_preimage;
+					payment.secret = payment_secret;
 				}
 				Entry::Vacant(e) => {
 					e.insert(PaymentInfo {
-						preimage: Some(payment_preimage.unwrap()),
-						secret: Some(payment_secret),
+						preimage: payment_preimage,
+						secret: payment_secret,
 						status,
 						amt_msat: MillisatAmount(Some(amt)),
 					});

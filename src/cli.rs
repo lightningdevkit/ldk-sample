@@ -267,6 +267,52 @@ pub(crate) async fn poll_for_user_input(
 						logger.clone(),
 					);
 				}
+				"keysend" => {
+					let dest_pubkey = match words.next() {
+						Some(dest) => match hex_utils::to_compressed_pubkey(dest) {
+							Some(pk) => pk,
+							None => {
+								println!("ERROR: couldn't parse destination pubkey");
+								print!("> ");
+								io::stdout().flush().unwrap();
+								continue;
+							}
+						},
+						None => {
+							println!("ERROR: keysend requires a destination pubkey: `keysend <dest_pubkey> <amt_msat>`");
+							print!("> ");
+							io::stdout().flush().unwrap();
+							continue;
+						}
+					};
+					let amt_msat_str = match words.next() {
+						Some(amt) => amt,
+						None => {
+							println!("ERROR: keysend requires an amount in millisatoshis: `keysend <dest_pubkey> <amt_msat>`");
+
+							print!("> ");
+							io::stdout().flush().unwrap();
+							continue;
+						}
+					};
+					let amt_msat: u64 = match amt_msat_str.parse() {
+						Ok(amt) => amt,
+						Err(e) => {
+							println!("ERROR: couldn't parse amount_msat: {}", e);
+							print!("> ");
+							io::stdout().flush().unwrap();
+							continue;
+						}
+					};
+					keysend(
+						dest_pubkey,
+						amt_msat,
+						router.clone(),
+						channel_manager.clone(),
+						outbound_payments.clone(),
+						logger.clone(),
+					);
+				}
 				"getinvoice" => {
 					let amt_str = words.next();
 					if amt_str.is_none() {
@@ -575,6 +621,46 @@ fn send_payment(
 			preimage: None,
 			secret: payment_secret,
 			status,
+			amt_msat: MillisatAmount(Some(amt_msat)),
+		},
+	);
+}
+
+fn keysend(
+	payee: PublicKey, amt_msat: u64,
+	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
+	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
+	logger: Arc<FilesystemLogger>,
+) {
+	let network_graph = router.network_graph.read().unwrap();
+	let first_hops = channel_manager.list_usable_channels();
+	let payer_pubkey = channel_manager.get_our_node_id();
+
+	let route = match router::get_keysend_route(
+		&payer_pubkey,
+		&network_graph,
+		&payee,
+		Some(&first_hops.iter().collect::<Vec<_>>()),
+		&vec![],
+		amt_msat,
+		40,
+		logger,
+	) {
+		Ok(r) => r,
+		Err(e) => {
+			println!("ERROR: failed to find route: {}", e.err);
+			return;
+		}
+	};
+
+	let mut payments = payment_storage.lock().unwrap();
+	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap();
+	payments.insert(
+		payment_hash,
+		PaymentInfo {
+			preimage: None,
+			secret: None,
+			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
 	);
