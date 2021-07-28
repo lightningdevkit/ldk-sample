@@ -347,7 +347,8 @@ async fn start_ldk() {
 	let mut channelmonitors = persister.read_channelmonitors(keys_manager.clone()).unwrap();
 
 	// Step 8: Initialize the ChannelManager
-	let user_config = UserConfig::default();
+	let mut user_config = UserConfig::default();
+	user_config.peer_channel_config_limits.force_announced_channel_preference = false;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, mut channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
