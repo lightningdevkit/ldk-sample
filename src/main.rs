@@ -138,7 +138,15 @@ async fn handle_ldk_events(
 			let final_tx: Transaction =
 				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
 			// Give the funding transaction back to LDK for opening the channel.
-			channel_manager.funding_transaction_generated(&temporary_channel_id, final_tx).unwrap();
+			if channel_manager
+				.funding_transaction_generated(&temporary_channel_id, final_tx)
+				.is_err()
+			{
+				println!(
+					"\nERROR: Channel went away before we could fund it. The peer disconnected or refused the channel.");
+				print!("> ");
+				io::stdout().flush().unwrap();
+			}
 		}
 		Event::PaymentReceived { payment_hash, payment_preimage, payment_secret, amt, .. } => {
 			let mut payments = inbound_payments.lock().unwrap();
@@ -568,7 +576,7 @@ async fn start_ldk() {
 	// to avoid churn in the global network graph.
 	let chan_manager = Arc::clone(&channel_manager);
 	let network = args.network;
-	if args.ldk_announced_listen_addr.is_some() {
+	if !args.ldk_announced_listen_addr.is_empty() {
 		tokio::spawn(async move {
 			let mut interval = tokio::time::interval(Duration::from_secs(60));
 			loop {
@@ -576,7 +584,7 @@ async fn start_ldk() {
 				chan_manager.broadcast_node_announcement(
 					[0; 3],
 					args.ldk_announced_node_name,
-					vec![args.ldk_announced_listen_addr.as_ref().unwrap().clone()],
+					args.ldk_announced_listen_addr.clone(),
 				);
 			}
 		});
