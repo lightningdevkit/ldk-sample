@@ -551,7 +551,7 @@ async fn start_ldk() {
 	let persist_channel_manager_callback =
 		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
 	// Step 17: Background Processing
-	BackgroundProcessor::start(
+	let background_processor = BackgroundProcessor::start(
 		persist_channel_manager_callback,
 		event_handler,
 		chain_monitor.clone(),
@@ -610,6 +610,9 @@ async fn start_ldk() {
 		network,
 	)
 	.await;
+
+	// Stop the background processor.
+	background_processor.stop().unwrap();
 }
 
 #[tokio::main]
