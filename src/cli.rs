@@ -462,6 +462,11 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 		}
 		println!("\t\tis_confirmed_onchain: {},", chan_info.is_funding_locked);
 		println!("\t\tchannel_value_satoshis: {},", chan_info.channel_value_satoshis);
+		println!(
+			"\t\tlocal_balance_msat: {},",
+			chan_info.outbound_capacity_msat
+				+ chan_info.unspendable_punishment_reserve.unwrap_or(0) * 1000
+		);
 		if chan_info.is_usable {
 			println!("\t\tavailable_balance_for_send_msat: {},", chan_info.outbound_capacity_msat);
 			println!("\t\tavailable_balance_for_recv_msat: {},", chan_info.inbound_capacity_msat);
