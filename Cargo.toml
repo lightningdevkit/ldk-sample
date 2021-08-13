@@ -16,9 +16,9 @@ lightning-persister = { version = "0.0.99", git = "https://github.com/rust-bitco
 lightning-background-processor = { version = "0.0.99", git = "https://github.com/rust-bitcoin/rust-lightning", branch = "main" }
 
 base64 = "0.13.0"
-bitcoin = "0.26"
-bitcoin-bech32 = "0.7"
-bech32 = "0.7"
+bitcoin = "0.27"
+bitcoin-bech32 = "0.12"
+bech32 = "0.8"
 hex = "0.3"
 
 futures = "0.3"
