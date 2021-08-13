@@ -224,6 +224,23 @@ async fn handle_ldk_events(
 				payment.status = HTLCStatus::Failed;
 			}
 		}
+		Event::PaymentForwarded { fee_earned_msat, claim_from_onchain_tx } => {
+			let from_onchain_str = if claim_from_onchain_tx {
+				"from onchain downstream claim"
+			} else {
+				"from HTLC fulfill message"
+			};
+			if let Some(fee_earned) = fee_earned_msat {
+				println!(
+					"\nEVENT: Forwarded payment, earning {} msat {}",
+					fee_earned, from_onchain_str
+				);
+			} else {
+				println!("\nEVENT: Forwarded payment, claiming onchain {}", from_onchain_str);
+			}
+			print!("> ");
+			io::stdout().flush().unwrap();
+		}
 		Event::PendingHTLCsForwardable { time_forwardable } => {
 			let forwarding_channel_manager = channel_manager.clone();
 			tokio::spawn(async move {
