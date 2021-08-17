@@ -262,6 +262,7 @@ impl BroadcasterInterface for BitcoindClient {
 						&& !err_str.contains("Inputs missing or spent")
 						&& !err_str.contains("bad-txns-inputs-missingorspent")
 						&& !err_str.contains("non-BIP68-final")
+						&& !err_str.contains("insufficient fee, rejecting replacement ")
 					{
 						panic!("{}", e);
 					}
