@@ -129,8 +129,6 @@ async fn handle_ldk_events(
 			// Have your wallet put the inputs into the transaction such that the output is
 			// satisfied.
 			let funded_tx = bitcoind_client.fund_raw_transaction(raw_tx).await;
-			let change_output_position = funded_tx.changepos;
-			assert!(change_output_position == 0 || change_output_position == 1);
 
 			// Sign the final funding transaction and broadcast it.
 			let signed_tx = bitcoind_client.sign_raw_transaction_with_wallet(funded_tx.hex).await;
