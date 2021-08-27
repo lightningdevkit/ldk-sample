@@ -3,7 +3,7 @@ use base64;
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
-use bitcoin::hash_types::BlockHash;
+use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::util::address::Address;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning_block_sync::http::HttpEndpoint;
@@ -206,7 +206,7 @@ impl BitcoindClient {
 		let mut rpc = self.bitcoind_rpc_client.lock().await;
 
 		let raw_tx_json = serde_json::json!(raw_tx.0);
-		rpc.call_method::<RawTx>("sendrawtransaction", &[raw_tx_json]).await.unwrap();
+		rpc.call_method::<Txid>("sendrawtransaction", &[raw_tx_json]).await.unwrap();
 	}
 
 	pub async fn sign_raw_transaction_with_wallet(&self, tx_hex: String) -> SignedTx {
@@ -254,7 +254,7 @@ impl BroadcasterInterface for BitcoindClient {
 			let mut rpc = bitcoind_rpc_client.lock().await;
 			// This may error due to RL calling `broadcast_transaction` with the same transaction
 			// multiple times, but the error is safe to ignore.
-			match rpc.call_method::<RawTx>("sendrawtransaction", &vec![tx_serialized]).await {
+			match rpc.call_method::<Txid>("sendrawtransaction", &vec![tx_serialized]).await {
 				Ok(_) => {}
 				Err(e) => {
 					let err_str = e.get_ref().unwrap().to_string();
