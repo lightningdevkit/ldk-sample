@@ -70,7 +70,10 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	let mut ldk_peer_port_set = true;
 	let ldk_peer_listening_port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
 		Some(Ok(p)) => p,
-		Some(Err(e)) => panic!("{}", e),
+		Some(Err(_)) => {
+			ldk_peer_port_set = false;
+			9735
+		}
 		None => {
 			ldk_peer_port_set = false;
 			9735
@@ -84,7 +87,9 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	let network: Network = match env::args().skip(arg_idx).next().as_ref().map(String::as_str) {
 		Some("testnet") => Network::Testnet,
 		Some("regtest") => Network::Regtest,
-		Some(_) => panic!("Unsupported network provided. Options are: `regtest`, `testnet`"),
+		Some(net) => {
+			panic!("Unsupported network provided. Options are: `regtest`, `testnet`. Got {}", net);
+		}
 		None => Network::Testnet,
 	};
 
