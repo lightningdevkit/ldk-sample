@@ -24,7 +24,7 @@ use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
-use lightning::ln::peer_handler::{MessageHandler, SimpleArcPeerManager};
+use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::util::config::UserConfig;
@@ -100,7 +100,7 @@ pub(crate) type ChannelManager =
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
 	keys_manager: Arc<KeysManager>, inbound_payments: PaymentInfoStorage,
-	outbound_payments: PaymentInfoStorage, network: Network, event: Event,
+	outbound_payments: PaymentInfoStorage, network: Network, event: &Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -123,7 +123,7 @@ async fn handle_ldk_events(
 			.expect("Lightning funding tx should always be to a SegWit output")
 			.to_address();
 			let mut outputs = vec![HashMap::with_capacity(1)];
-			outputs[0].insert(addr, channel_value_satoshis as f64 / 100_000_000.0);
+			outputs[0].insert(addr, *channel_value_satoshis as f64 / 100_000_000.0);
 			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
 
 			// Have your wallet put the inputs into the transaction such that the output is
@@ -150,9 +150,9 @@ async fn handle_ldk_events(
 			let mut payments = inbound_payments.lock().unwrap();
 			let (payment_preimage, payment_secret) = match purpose {
 				PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
-					(payment_preimage, Some(payment_secret))
+					(*payment_preimage, Some(*payment_secret))
 				}
-				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
+				PaymentPurpose::SpontaneousPayment(preimage) => (Some(*preimage), None),
 			};
 			let status = match channel_manager.claim_funds(payment_preimage.unwrap()) {
 				true => {
@@ -167,7 +167,7 @@ async fn handle_ldk_events(
 				}
 				_ => HTLCStatus::Failed,
 			};
-			match payments.entry(payment_hash) {
+			match payments.entry(*payment_hash) {
 				Entry::Occupied(mut e) => {
 					let payment = e.get_mut();
 					payment.status = status;
@@ -179,7 +179,7 @@ async fn handle_ldk_events(
 						preimage: payment_preimage,
 						secret: payment_secret,
 						status,
-						amt_msat: MillisatAmount(Some(amt)),
+						amt_msat: MillisatAmount(Some(*amt)),
 					});
 				}
 			}
@@ -189,7 +189,7 @@ async fn handle_ldk_events(
 			let mut payments = outbound_payments.lock().unwrap();
 			for (payment_hash, payment) in payments.iter_mut() {
 				if *payment_hash == hashed {
-					payment.preimage = Some(payment_preimage);
+					payment.preimage = Some(*payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 					println!(
 						"\nEVENT: successfully sent payment of {} millisatoshis from \
@@ -203,12 +203,19 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentFailed { payment_hash, rejected_by_dest } => {
+		Event::PaymentPathFailed {
+			payment_hash,
+			rejected_by_dest,
+			network_update: _,
+			all_paths_failed,
+			path: _,
+		} => {
 			print!(
-				"\nEVENT: Failed to send payment to payment hash {:?}: ",
+				"\nEVENT: Failed to send payment{} to payment hash {:?}: ",
+				if *all_paths_failed { "" } else { " along MPP path" },
 				hex_utils::hex_str(&payment_hash.0)
 			);
-			if rejected_by_dest {
+			if *rejected_by_dest {
 				println!("re-attempting the payment will not succeed");
 			} else {
 				println!("payment may be retried");
@@ -223,7 +230,7 @@ async fn handle_ldk_events(
 			}
 		}
 		Event::PaymentForwarded { fee_earned_msat, claim_from_onchain_tx } => {
-			let from_onchain_str = if claim_from_onchain_tx {
+			let from_onchain_str = if *claim_from_onchain_tx {
 				"from onchain downstream claim"
 			} else {
 				"from HTLC fulfill message"
@@ -241,8 +248,8 @@ async fn handle_ldk_events(
 		}
 		Event::PendingHTLCsForwardable { time_forwardable } => {
 			let forwarding_channel_manager = channel_manager.clone();
+			let min = time_forwardable.as_millis() as u64;
 			tokio::spawn(async move {
-				let min = time_forwardable.as_millis() as u64;
 				let millis_to_sleep = thread_rng().gen_range(min, min * 5) as u64;
 				tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
 				forwarding_channel_manager.process_pending_htlc_forwards();
@@ -263,6 +270,15 @@ async fn handle_ldk_events(
 				)
 				.unwrap();
 			bitcoind_client.broadcast_transaction(&spending_tx);
+		}
+		Event::ChannelClosed { channel_id, reason } => {
+			println!(
+				"\nEVENT: Channel {} closed due to: {:?}",
+				hex_utils::hex_str(channel_id),
+				reason
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
 		}
 	}
 }
@@ -458,21 +474,18 @@ async fn start_ldk() {
 	let genesis = genesis_block(args.network).header.block_hash();
 	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
 	let network_graph = disk::read_network(Path::new(&network_graph_path), genesis);
-	let router = Arc::new(NetGraphMsgHandler::from_net_graph(
+	let router = Arc::new(NetGraphMsgHandler::new(
+		network_graph,
 		None::<Arc<dyn chain::Access + Send + Sync>>,
 		logger.clone(),
-		network_graph,
 	));
 	let router_persist = Arc::clone(&router);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(600));
 		loop {
 			interval.tick().await;
-			if disk::persist_network(
-				Path::new(&network_graph_path),
-				&*router_persist.network_graph.read().unwrap(),
-			)
-			.is_err()
+			if disk::persist_network(Path::new(&network_graph_path), &router_persist.network_graph)
+				.is_err()
 			{
 				// Persistence errors here are non-fatal as we can just fetch the routing graph
 				// again later, but they may indicate a disk error which could be fatal elsewhere.
@@ -494,6 +507,7 @@ async fn start_ldk() {
 		keys_manager.get_node_secret(),
 		&ephemeral_bytes,
 		logger.clone(),
+		Arc::new(IgnoringMessageHandler {}),
 	));
 
 	// ## Running LDK
@@ -550,7 +564,7 @@ async fn start_ldk() {
 	let network = args.network;
 	let bitcoind_rpc = bitcoind_client.clone();
 	let handle = tokio::runtime::Handle::current();
-	let event_handler = move |event| {
+	let event_handler = move |event: &Event| {
 		handle.block_on(handle_ldk_events(
 			channel_manager_event_listener.clone(),
 			bitcoind_rpc.clone(),
@@ -559,7 +573,7 @@ async fn start_ldk() {
 			outbound_pmts_for_events.clone(),
 			network,
 			event,
-		))
+		));
 	};
 	// Step 16: Persist ChannelManager
 	let data_dir = ldk_data_dir.clone();
@@ -571,6 +585,7 @@ async fn start_ldk() {
 		event_handler,
 		chain_monitor.clone(),
 		channel_manager.clone(),
+		Some(router.clone()),
 		peer_manager.clone(),
 		logger.clone(),
 	);

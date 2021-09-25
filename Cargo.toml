@@ -8,12 +8,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lightning = { version = "0.0.100", git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d523b6e" }
-lightning-block-sync = { version = "0.0.100", git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d523b6e", features = [ "rpc-client" ] }
-lightning-invoice = { version = "0.8.0", git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d523b6e" }
-lightning-net-tokio = { version = "0.0.100", git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d523b6e" }
-lightning-persister = { version = "0.0.100", git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d523b6e" }
-lightning-background-processor = { version = "0.0.100", git = "https://github.com/rust-bitcoin/rust-lightning", rev = "d523b6e" }
+lightning = { version = "0.0.101" }
+lightning-block-sync = { version = "0.0.101", features = [ "rpc-client" ] }
+lightning-invoice = { version = "0.9.0" }
+lightning-net-tokio = { version = "0.0.101" }
+lightning-persister = { version = "0.0.101" }
+lightning-background-processor = { version = "0.0.101" }
 
 base64 = "0.13.0"
 bitcoin = "0.27"
