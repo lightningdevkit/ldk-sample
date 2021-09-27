@@ -24,6 +24,7 @@ pub struct BitcoindClient {
 	rpc_user: String,
 	rpc_password: String,
 	fees: Arc<HashMap<Target, AtomicU32>>,
+	handle: tokio::runtime::Handle,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -66,6 +67,7 @@ const MIN_FEERATE: u32 = 253;
 impl BitcoindClient {
 	pub async fn new(
 		host: String, port: u16, rpc_user: String, rpc_password: String,
+		handle: tokio::runtime::Handle,
 	) -> std::io::Result<Self> {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
 		let rpc_credentials =
@@ -89,19 +91,21 @@ impl BitcoindClient {
 			rpc_user,
 			rpc_password,
 			fees: Arc::new(fees),
+			handle: handle.clone(),
 		};
 		BitcoindClient::poll_for_fee_estimates(
 			client.fees.clone(),
 			client.bitcoind_rpc_client.clone(),
-		)
-		.await;
+			handle,
+		);
 		Ok(client)
 	}
 
-	async fn poll_for_fee_estimates(
+	fn poll_for_fee_estimates(
 		fees: Arc<HashMap<Target, AtomicU32>>, rpc_client: Arc<Mutex<RpcClient>>,
+		handle: tokio::runtime::Handle,
 	) {
-		tokio::spawn(async move {
+		handle.spawn(async move {
 			loop {
 				let background_estimate = {
 					let mut rpc = rpc_client.lock().await;
@@ -250,7 +254,7 @@ impl BroadcasterInterface for BitcoindClient {
 	fn broadcast_transaction(&self, tx: &Transaction) {
 		let bitcoind_rpc_client = self.bitcoind_rpc_client.clone();
 		let tx_serialized = serde_json::json!(encode::serialize_hex(tx));
-		tokio::spawn(async move {
+		self.handle.spawn(async move {
 			let mut rpc = bitcoind_rpc_client.lock().await;
 			// This may error due to RL calling `broadcast_transaction` with the same transaction
 			// multiple times, but the error is safe to ignore.

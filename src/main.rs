@@ -299,6 +299,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_port,
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
+		tokio::runtime::Handle::current(),
 	)
 	.await
 	{
