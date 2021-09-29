@@ -255,7 +255,7 @@ pub(crate) async fn poll_for_user_input(
 					let payee_pubkey = invoice.recover_payee_pub_key();
 					let final_cltv = invoice.min_final_cltv_expiry() as u32;
 					let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
-					let payment_secret = invoice.payment_secret().cloned();
+					let payment_secret = Some(invoice.payment_secret().clone());
 					let invoice_features = invoice.features().cloned();
 
 					send_payment(
@@ -594,7 +594,7 @@ fn send_payment(
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
 ) {
-	let network_graph = router.network_graph.read().unwrap();
+	let network_graph = &router.network_graph;
 	let first_hops = channel_manager.list_usable_channels();
 	let payer_pubkey = channel_manager.get_our_node_id();
 
@@ -642,7 +642,7 @@ fn keysend(
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
 ) {
-	let network_graph = router.network_graph.read().unwrap();
+	let network_graph = &router.network_graph;
 	let first_hops = channel_manager.list_usable_channels();
 	let payer_pubkey = channel_manager.get_our_node_id();
 
@@ -709,7 +709,7 @@ fn get_invoice(
 		payment_hash,
 		PaymentInfo {
 			preimage: None,
-			secret: invoice.payment_secret().cloned(),
+			secret: Some(invoice.payment_secret().clone()),
 			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
