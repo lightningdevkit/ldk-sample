@@ -45,19 +45,19 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		return Err(());
 	}
 	let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
-	let bitcoind_rpc_info_parts: Vec<&str> = bitcoind_rpc_info.split("@").collect();
+	let bitcoind_rpc_info_parts: Vec<&str> = bitcoind_rpc_info.rsplitn(2, "@").collect();
 	if bitcoind_rpc_info_parts.len() != 2 {
 		println!("ERROR: bad bitcoind RPC URL provided");
 		return Err(());
 	}
-	let rpc_user_and_password: Vec<&str> = bitcoind_rpc_info_parts[0].split(":").collect();
+	let rpc_user_and_password: Vec<&str> = bitcoind_rpc_info_parts[1].split(":").collect();
 	if rpc_user_and_password.len() != 2 {
 		println!("ERROR: bad bitcoind RPC username/password combo provided");
 		return Err(());
 	}
 	let bitcoind_rpc_username = rpc_user_and_password[0].to_string();
 	let bitcoind_rpc_password = rpc_user_and_password[1].to_string();
-	let bitcoind_rpc_path: Vec<&str> = bitcoind_rpc_info_parts[1].split(":").collect();
+	let bitcoind_rpc_path: Vec<&str> = bitcoind_rpc_info_parts[0].split(":").collect();
 	if bitcoind_rpc_path.len() != 2 {
 		println!("ERROR: bad bitcoind RPC path provided");
 		return Err(());
