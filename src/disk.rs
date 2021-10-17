@@ -1,6 +1,7 @@
 use crate::cli;
 use bitcoin::secp256k1::key::PublicKey;
 use bitcoin::BlockHash;
+use chrono::Utc;
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{Readable, Writeable, Writer};
@@ -10,7 +11,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::net::SocketAddr;
 use std::path::Path;
-use time::OffsetDateTime;
 
 pub(crate) struct FilesystemLogger {
 	data_dir: String,
@@ -27,7 +27,10 @@ impl Logger for FilesystemLogger {
 		let raw_log = record.args.to_string();
 		let log = format!(
 			"{} {:<5} [{}:{}] {}\n",
-			OffsetDateTime::now_utc().format("%F %T"),
+			// Note that a "real" lightning node almost certainly does *not* want subsecond
+			// precision for message-receipt information as it makes log entries a target for
+			// deanonymization attacks. For testing, however, its quite useful.
+			Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
 			record.level.to_string(),
 			record.module_path,
 			record.line,
