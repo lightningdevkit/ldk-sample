@@ -15,6 +15,7 @@ use lightning::ln::{PaymentHash, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
 use lightning::routing::router::RouteHint;
+use lightning::routing::scorer::Scorer;
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
@@ -608,6 +609,7 @@ fn send_payment(
 		amt_msat,
 		final_cltv,
 		logger,
+		&Scorer::default(),
 	);
 	if let Err(e) = route {
 		println!("ERROR: failed to find route: {}", e.err);
@@ -615,7 +617,7 @@ fn send_payment(
 	}
 	let status = match channel_manager.send_payment(&route.unwrap(), payment_hash, &payment_secret)
 	{
-		Ok(()) => {
+		Ok(_payment_id) => {
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee);
 			HTLCStatus::Pending
 		}
@@ -655,6 +657,7 @@ fn keysend(
 		amt_msat,
 		40,
 		logger,
+		&Scorer::default(),
 	) {
 		Ok(r) => r,
 		Err(e) => {
@@ -664,7 +667,7 @@ fn keysend(
 	};
 
 	let mut payments = payment_storage.lock().unwrap();
-	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap();
+	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap().0;
 	payments.insert(
 		payment_hash,
 		PaymentInfo {

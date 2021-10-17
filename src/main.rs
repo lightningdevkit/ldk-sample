@@ -9,8 +9,6 @@ use crate::disk::FilesystemLogger;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::BlockHash;
@@ -184,11 +182,10 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentSent { payment_preimage } => {
-			let hashed = PaymentHash(Sha256::hash(&payment_preimage.0).into_inner());
+		Event::PaymentSent { payment_preimage, payment_hash } => {
 			let mut payments = outbound_payments.lock().unwrap();
-			for (payment_hash, payment) in payments.iter_mut() {
-				if *payment_hash == hashed {
+			for (hash, payment) in payments.iter_mut() {
+				if *hash == *payment_hash {
 					payment.preimage = Some(*payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 					println!(
@@ -209,16 +206,20 @@ async fn handle_ldk_events(
 			network_update: _,
 			all_paths_failed,
 			path: _,
+			short_channel_id,
 		} => {
 			print!(
-				"\nEVENT: Failed to send payment{} to payment hash {:?}: ",
+				"\nEVENT: Failed to send payment{} to payment hash {:?}",
 				if *all_paths_failed { "" } else { " along MPP path" },
 				hex_utils::hex_str(&payment_hash.0)
 			);
+			if let Some(scid) = short_channel_id {
+				print!(" because of failure at channel {}", scid);
+			}
 			if *rejected_by_dest {
-				println!("re-attempting the payment will not succeed");
+				println!(": re-attempting the payment will not succeed");
 			} else {
-				println!("payment may be retried");
+				println!(": payment may be retried");
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -271,7 +272,7 @@ async fn handle_ldk_events(
 				.unwrap();
 			bitcoind_client.broadcast_transaction(&spending_tx);
 		}
-		Event::ChannelClosed { channel_id, reason } => {
+		Event::ChannelClosed { channel_id, reason, user_channel_id: _ } => {
 			println!(
 				"\nEVENT: Channel {} closed due to: {:?}",
 				hex_utils::hex_str(channel_id),
@@ -279,6 +280,10 @@ async fn handle_ldk_events(
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
+		}
+		Event::DiscardFunding { .. } => {
+			// A "real" node should probably "lock" the UTXOs spent in funding transactions until
+			// the funding transaction either confirms, or this event is generated.
 		}
 	}
 }
