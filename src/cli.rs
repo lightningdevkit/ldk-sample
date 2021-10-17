@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain;
-use lightning::chain::keysinterface::KeysManager;
+use lightning::chain::keysinterface::{KeysInterface, KeysManager};
 use lightning::ln::features::InvoiceFeatures;
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentSecret};
@@ -412,6 +412,24 @@ pub(crate) async fn poll_for_user_input(
 				}
 				"nodeinfo" => node_info(channel_manager.clone(), peer_manager.clone()),
 				"listpeers" => list_peers(peer_manager.clone()),
+				"signmessage" => {
+					const MSG_STARTPOS: usize = "signmsg".len() + 1;
+					if line.as_bytes().len() <= MSG_STARTPOS {
+						println!("ERROR: signmsg requires a message");
+						print!("> ");
+						io::stdout().flush().unwrap();
+						continue;
+					}
+					println!(
+						"{:?}",
+						lightning::util::message_signing::sign(
+							&line.as_bytes()[MSG_STARTPOS..],
+							&keys_manager.get_node_secret()
+						)
+					);
+					print!("> ");
+					io::stdout().flush().unwrap();
+				}
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
 		}
@@ -431,6 +449,7 @@ fn help() {
 	println!("forceclosechannel <channel_id>");
 	println!("nodeinfo");
 	println!("listpeers");
+	println!("signmessage <message>");
 }
 
 fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
