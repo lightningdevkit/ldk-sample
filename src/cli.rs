@@ -8,13 +8,14 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain;
-use lightning::chain::keysinterface::KeysManager;
+use lightning::chain::keysinterface::{KeysInterface, KeysManager};
 use lightning::ln::features::InvoiceFeatures;
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentSecret};
 use lightning::routing::network_graph::NetGraphMsgHandler;
 use lightning::routing::router;
 use lightning::routing::router::RouteHint;
+use lightning::routing::scorer::Scorer;
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
@@ -411,6 +412,24 @@ pub(crate) async fn poll_for_user_input(
 				}
 				"nodeinfo" => node_info(channel_manager.clone(), peer_manager.clone()),
 				"listpeers" => list_peers(peer_manager.clone()),
+				"signmessage" => {
+					const MSG_STARTPOS: usize = "signmsg".len() + 1;
+					if line.as_bytes().len() <= MSG_STARTPOS {
+						println!("ERROR: signmsg requires a message");
+						print!("> ");
+						io::stdout().flush().unwrap();
+						continue;
+					}
+					println!(
+						"{:?}",
+						lightning::util::message_signing::sign(
+							&line.as_bytes()[MSG_STARTPOS..],
+							&keys_manager.get_node_secret()
+						)
+					);
+					print!("> ");
+					io::stdout().flush().unwrap();
+				}
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
 		}
@@ -430,6 +449,7 @@ fn help() {
 	println!("forceclosechannel <channel_id>");
 	println!("nodeinfo");
 	println!("listpeers");
+	println!("signmessage <message>");
 }
 
 fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
@@ -608,6 +628,7 @@ fn send_payment(
 		amt_msat,
 		final_cltv,
 		logger,
+		&Scorer::default(),
 	);
 	if let Err(e) = route {
 		println!("ERROR: failed to find route: {}", e.err);
@@ -615,7 +636,7 @@ fn send_payment(
 	}
 	let status = match channel_manager.send_payment(&route.unwrap(), payment_hash, &payment_secret)
 	{
-		Ok(()) => {
+		Ok(_payment_id) => {
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee);
 			HTLCStatus::Pending
 		}
@@ -655,6 +676,7 @@ fn keysend(
 		amt_msat,
 		40,
 		logger,
+		&Scorer::default(),
 	) {
 		Ok(r) => r,
 		Err(e) => {
@@ -664,7 +686,7 @@ fn keysend(
 	};
 
 	let mut payments = payment_storage.lock().unwrap();
-	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap();
+	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap().0;
 	payments.insert(
 		payment_hash,
 		PaymentInfo {
