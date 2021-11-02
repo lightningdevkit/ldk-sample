@@ -24,7 +24,8 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::routing::network_graph::NetGraphMsgHandler;
+use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
+use lightning::routing::scorer::Scorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -33,6 +34,8 @@ use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
+use lightning_invoice::payment;
+use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
@@ -94,6 +97,16 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
+
+pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
+	Arc<ChannelManager>,
+	Router,
+	Arc<Mutex<Scorer>>,
+	Arc<FilesystemLogger>,
+	E,
+>;
+
+type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
@@ -203,9 +216,7 @@ async fn handle_ldk_events(
 		Event::PaymentPathFailed {
 			payment_hash,
 			rejected_by_dest,
-			network_update: _,
 			all_paths_failed,
-			path: _,
 			short_channel_id,
 			..
 		} => {
@@ -220,7 +231,7 @@ async fn handle_ldk_events(
 			if *rejected_by_dest {
 				println!(": re-attempting the payment will not succeed");
 			} else {
-				println!(": payment may be retried");
+				println!(": exhausted payment retry attempts");
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -584,14 +595,28 @@ async fn start_ldk() {
 			event,
 		));
 	};
-	// Step 16: Persist ChannelManager
+
+	// Step 16: Create InvoicePayer
+	let router = DefaultRouter::new(network_graph.clone(), logger.clone());
+	let scorer = Arc::new(Mutex::new(Scorer::default()));
+	let invoice_payer = Arc::new(InvoicePayer::new(
+		channel_manager.clone(),
+		router,
+		scorer.clone(),
+		logger.clone(),
+		event_handler,
+		payment::RetryAttempts(5),
+	));
+
+	// Step 17: Persist ChannelManager
 	let data_dir = ldk_data_dir.clone();
 	let persist_channel_manager_callback =
 		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
-	// Step 17: Background Processing
+
+	// Step 18: Background Processing
 	let background_processor = BackgroundProcessor::start(
 		persist_channel_manager_callback,
-		event_handler,
+		invoice_payer.clone(),
 		chain_monitor.clone(),
 		channel_manager.clone(),
 		Some(network_gossip.clone()),
@@ -638,10 +663,12 @@ async fn start_ldk() {
 
 	// Start the CLI.
 	cli::poll_for_user_input(
+		invoice_payer.clone(),
 		peer_manager.clone(),
 		channel_manager.clone(),
 		keys_manager.clone(),
 		network_graph.clone(),
+		scorer.clone(),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
