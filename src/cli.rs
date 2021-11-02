@@ -7,14 +7,13 @@ use crate::{
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
-use lightning::chain;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager};
 use lightning::ln::features::InvoiceFeatures;
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentSecret};
-use lightning::routing::network_graph::NetGraphMsgHandler;
+use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::router;
-use lightning::routing::router::RouteHint;
+use lightning::routing::router::{Payee, RouteHint, RouteParameters};
 use lightning::routing::scorer::Scorer;
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning_invoice::{utils, Currency, Invoice};
@@ -142,8 +141,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 
 pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
-	keys_manager: Arc<KeysManager>,
-	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
+	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
 	ldk_data_dir: String, logger: Arc<FilesystemLogger>, network: Network,
 ) {
@@ -244,14 +242,13 @@ pub(crate) async fn poll_for_user_input(
 					};
 					let last_hops = invoice.route_hints();
 
-					let amt_pico_btc = invoice.amount_pico_btc();
-					if amt_pico_btc.is_none() {
+					let amt_msat = invoice.amount_milli_satoshis();
+					if amt_msat.is_none() {
 						println!("ERROR: invalid invoice: must contain amount to pay");
 						print!("> ");
 						io::stdout().flush().unwrap();
 						continue;
 					}
-					let amt_msat = amt_pico_btc.unwrap() / 10;
 
 					let payee_pubkey = invoice.recover_payee_pub_key();
 					let final_cltv = invoice.min_final_cltv_expiry() as u32;
@@ -261,13 +258,13 @@ pub(crate) async fn poll_for_user_input(
 
 					send_payment(
 						payee_pubkey,
-						amt_msat,
+						amt_msat.unwrap(),
 						final_cltv,
 						payment_hash,
 						payment_secret,
 						invoice_features,
 						last_hops,
-						router.clone(),
+						network_graph.clone(),
 						channel_manager.clone(),
 						outbound_payments.clone(),
 						logger.clone(),
@@ -313,7 +310,7 @@ pub(crate) async fn poll_for_user_input(
 					keysend(
 						dest_pubkey,
 						amt_msat,
-						router.clone(),
+						network_graph.clone(),
 						channel_manager.clone(),
 						outbound_payments.clone(),
 						logger.clone(),
@@ -607,26 +604,27 @@ fn open_channel(
 }
 
 fn send_payment(
-	payee: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
+	payee_pubkey: PublicKey, amt_msat: u64, final_cltv: u32, payment_hash: PaymentHash,
 	payment_secret: Option<PaymentSecret>, payee_features: Option<InvoiceFeatures>,
-	route_hints: Vec<&RouteHint>,
-	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
+	route_hints: Vec<RouteHint>, network_graph: Arc<NetworkGraph>,
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
 ) {
-	let network_graph = &router.network_graph;
 	let first_hops = channel_manager.list_usable_channels();
 	let payer_pubkey = channel_manager.get_our_node_id();
 
-	let route = router::get_route(
+	let mut payee = Payee::from_node_id(payee_pubkey).with_route_hints(route_hints);
+	if let Some(features) = payee_features {
+		payee = payee.with_features(features);
+	}
+	let params =
+		RouteParameters { payee, final_value_msat: amt_msat, final_cltv_expiry_delta: final_cltv };
+
+	let route = router::find_route(
 		&payer_pubkey,
+		&params,
 		&network_graph,
-		&payee,
-		payee_features,
 		Some(&first_hops.iter().collect::<Vec<_>>()),
-		&route_hints,
-		amt_msat,
-		final_cltv,
 		logger,
 		&Scorer::default(),
 	);
@@ -637,7 +635,7 @@ fn send_payment(
 	let status = match channel_manager.send_payment(&route.unwrap(), payment_hash, &payment_secret)
 	{
 		Ok(_payment_id) => {
-			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee);
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 			HTLCStatus::Pending
 		}
 		Err(e) => {
@@ -658,23 +656,21 @@ fn send_payment(
 }
 
 fn keysend(
-	payee: PublicKey, amt_msat: u64,
-	router: Arc<NetGraphMsgHandler<Arc<dyn chain::Access + Send + Sync>, Arc<FilesystemLogger>>>,
+	payee_pubkey: PublicKey, amt_msat: u64, network_graph: Arc<NetworkGraph>,
 	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
 	logger: Arc<FilesystemLogger>,
 ) {
-	let network_graph = &router.network_graph;
 	let first_hops = channel_manager.list_usable_channels();
 	let payer_pubkey = channel_manager.get_our_node_id();
 
-	let route = match router::get_keysend_route(
+	let payee = Payee::for_keysend(payee_pubkey);
+	let params = RouteParameters { payee, final_value_msat: amt_msat, final_cltv_expiry_delta: 40 };
+
+	let route = match router::find_route(
 		&payer_pubkey,
+		&params,
 		&network_graph,
-		&payee,
 		Some(&first_hops.iter().collect::<Vec<_>>()),
-		&vec![],
-		amt_msat,
-		40,
 		logger,
 		&Scorer::default(),
 	) {

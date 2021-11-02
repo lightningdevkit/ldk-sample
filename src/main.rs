@@ -182,7 +182,7 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentSent { payment_preimage, payment_hash } => {
+		Event::PaymentSent { payment_preimage, payment_hash, .. } => {
 			let mut payments = outbound_payments.lock().unwrap();
 			for (hash, payment) in payments.iter_mut() {
 				if *hash == *payment_hash {
@@ -207,6 +207,7 @@ async fn handle_ldk_events(
 			all_paths_failed,
 			path: _,
 			short_channel_id,
+			..
 		} => {
 			print!(
 				"\nEVENT: Failed to send payment{} to payment hash {:?}",
@@ -479,18 +480,18 @@ async fn start_ldk() {
 	// Step 11: Optional: Initialize the NetGraphMsgHandler
 	let genesis = genesis_block(args.network).header.block_hash();
 	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
-	let network_graph = disk::read_network(Path::new(&network_graph_path), genesis);
-	let router = Arc::new(NetGraphMsgHandler::new(
-		network_graph,
+	let network_graph = Arc::new(disk::read_network(Path::new(&network_graph_path), genesis));
+	let network_gossip = Arc::new(NetGraphMsgHandler::new(
+		Arc::clone(&network_graph),
 		None::<Arc<dyn chain::Access + Send + Sync>>,
 		logger.clone(),
 	));
-	let router_persist = Arc::clone(&router);
+	let network_graph_persist = Arc::clone(&network_graph);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(600));
 		loop {
 			interval.tick().await;
-			if disk::persist_network(Path::new(&network_graph_path), &router_persist.network_graph)
+			if disk::persist_network(Path::new(&network_graph_path), &network_graph_persist)
 				.is_err()
 			{
 				// Persistence errors here are non-fatal as we can just fetch the routing graph
@@ -506,8 +507,10 @@ async fn start_ldk() {
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 	let mut ephemeral_bytes = [0; 32];
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
-	let lightning_msg_handler =
-		MessageHandler { chan_handler: channel_manager.clone(), route_handler: router.clone() };
+	let lightning_msg_handler = MessageHandler {
+		chan_handler: channel_manager.clone(),
+		route_handler: network_gossip.clone(),
+	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		keys_manager.get_node_secret(),
@@ -591,7 +594,7 @@ async fn start_ldk() {
 		event_handler,
 		chain_monitor.clone(),
 		channel_manager.clone(),
-		Some(router.clone()),
+		Some(network_gossip.clone()),
 		peer_manager.clone(),
 		logger.clone(),
 	);
@@ -638,7 +641,7 @@ async fn start_ldk() {
 		peer_manager.clone(),
 		channel_manager.clone(),
 		keys_manager.clone(),
-		router.clone(),
+		network_graph.clone(),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
