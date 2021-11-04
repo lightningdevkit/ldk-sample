@@ -24,7 +24,8 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::routing::network_graph::NetGraphMsgHandler;
+use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
+use lightning::routing::scorer::Scorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -33,6 +34,8 @@ use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
+use lightning_invoice::payment;
+use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
@@ -94,6 +97,16 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
+
+pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
+	Arc<ChannelManager>,
+	Router,
+	Arc<Mutex<Scorer>>,
+	Arc<FilesystemLogger>,
+	E,
+>;
+
+type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
@@ -182,7 +195,7 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentSent { payment_preimage, payment_hash } => {
+		Event::PaymentSent { payment_preimage, payment_hash, .. } => {
 			let mut payments = outbound_payments.lock().unwrap();
 			for (hash, payment) in payments.iter_mut() {
 				if *hash == *payment_hash {
@@ -203,10 +216,9 @@ async fn handle_ldk_events(
 		Event::PaymentPathFailed {
 			payment_hash,
 			rejected_by_dest,
-			network_update: _,
 			all_paths_failed,
-			path: _,
 			short_channel_id,
+			..
 		} => {
 			print!(
 				"\nEVENT: Failed to send payment{} to payment hash {:?}",
@@ -219,7 +231,7 @@ async fn handle_ldk_events(
 			if *rejected_by_dest {
 				println!(": re-attempting the payment will not succeed");
 			} else {
-				println!(": payment may be retried");
+				println!(": exhausted payment retry attempts");
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -479,18 +491,18 @@ async fn start_ldk() {
 	// Step 11: Optional: Initialize the NetGraphMsgHandler
 	let genesis = genesis_block(args.network).header.block_hash();
 	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
-	let network_graph = disk::read_network(Path::new(&network_graph_path), genesis);
-	let router = Arc::new(NetGraphMsgHandler::new(
-		network_graph,
+	let network_graph = Arc::new(disk::read_network(Path::new(&network_graph_path), genesis));
+	let network_gossip = Arc::new(NetGraphMsgHandler::new(
+		Arc::clone(&network_graph),
 		None::<Arc<dyn chain::Access + Send + Sync>>,
 		logger.clone(),
 	));
-	let router_persist = Arc::clone(&router);
+	let network_graph_persist = Arc::clone(&network_graph);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(600));
 		loop {
 			interval.tick().await;
-			if disk::persist_network(Path::new(&network_graph_path), &router_persist.network_graph)
+			if disk::persist_network(Path::new(&network_graph_path), &network_graph_persist)
 				.is_err()
 			{
 				// Persistence errors here are non-fatal as we can just fetch the routing graph
@@ -506,8 +518,10 @@ async fn start_ldk() {
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 	let mut ephemeral_bytes = [0; 32];
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
-	let lightning_msg_handler =
-		MessageHandler { chan_handler: channel_manager.clone(), route_handler: router.clone() };
+	let lightning_msg_handler = MessageHandler {
+		chan_handler: channel_manager.clone(),
+		route_handler: network_gossip.clone(),
+	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		keys_manager.get_node_secret(),
@@ -581,17 +595,48 @@ async fn start_ldk() {
 			event,
 		));
 	};
-	// Step 16: Persist ChannelManager
+
+	// Step 16: Initialize routing Scorer
+	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
+	let scorer = Arc::new(Mutex::new(disk::read_scorer(Path::new(&scorer_path))));
+	let scorer_persist = Arc::clone(&scorer);
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(600));
+		loop {
+			interval.tick().await;
+			if disk::persist_scorer(Path::new(&scorer_path), &scorer_persist.lock().unwrap())
+				.is_err()
+			{
+				// Persistence errors here are non-fatal as channels will be re-scored as payments
+				// fail, but they may indicate a disk error which could be fatal elsewhere.
+				eprintln!("Warning: Failed to persist scorer, check your disk and permissions");
+			}
+		}
+	});
+
+	// Step 17: Create InvoicePayer
+	let router = DefaultRouter::new(network_graph.clone(), logger.clone());
+	let invoice_payer = Arc::new(InvoicePayer::new(
+		channel_manager.clone(),
+		router,
+		scorer.clone(),
+		logger.clone(),
+		event_handler,
+		payment::RetryAttempts(5),
+	));
+
+	// Step 18: Persist ChannelManager
 	let data_dir = ldk_data_dir.clone();
 	let persist_channel_manager_callback =
 		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
-	// Step 17: Background Processing
+
+	// Step 19: Background Processing
 	let background_processor = BackgroundProcessor::start(
 		persist_channel_manager_callback,
-		event_handler,
+		invoice_payer.clone(),
 		chain_monitor.clone(),
 		channel_manager.clone(),
-		Some(router.clone()),
+		Some(network_gossip.clone()),
 		peer_manager.clone(),
 		logger.clone(),
 	);
@@ -635,10 +680,12 @@ async fn start_ldk() {
 
 	// Start the CLI.
 	cli::poll_for_user_input(
+		invoice_payer.clone(),
 		peer_manager.clone(),
 		channel_manager.clone(),
 		keys_manager.clone(),
-		router.clone(),
+		network_graph.clone(),
+		scorer.clone(),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
