@@ -388,8 +388,14 @@ fn help() {
 fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
 	println!("\t{{");
 	println!("\t\t node_pubkey: {}", channel_manager.get_our_node_id());
-	println!("\t\t num_channels: {}", channel_manager.list_channels().len());
-	println!("\t\t num_usable_channels: {}", channel_manager.list_usable_channels().len());
+	let chans = channel_manager.list_channels();
+	println!("\t\t num_channels: {}", chans.len());
+	println!("\t\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
+	let local_balance_msat = chans
+		.iter()
+		.map(|c| c.unspendable_punishment_reserve.unwrap_or(0) * 1000 + c.outbound_capacity_msat)
+		.sum::<u64>();
+	println!("\t\t local_balance_msat: {}", local_balance_msat);
 	println!("\t\t num_peers: {}", peer_manager.get_peer_node_ids().len());
 	println!("\t}},");
 }
