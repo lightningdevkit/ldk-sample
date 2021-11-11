@@ -492,6 +492,16 @@ pub(crate) async fn connect_peer_if_necessary(
 			return Ok(());
 		}
 	}
+	let res = do_connect_peer(pubkey, peer_addr, peer_manager).await;
+	if res.is_err() {
+		println!("ERROR: failed to connect to peer");
+	}
+	res
+}
+
+pub(crate) async fn do_connect_peer(
+	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+) -> Result<(), ()> {
 	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
 		Some(connection_closed_future) => {
@@ -499,24 +509,19 @@ pub(crate) async fn connect_peer_if_necessary(
 			loop {
 				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
-						println!("ERROR: Peer disconnected before we finished the handshake");
 						return Err(());
 					}
 					std::task::Poll::Pending => {}
 				}
 				// Avoid blocking the tokio context by sleeping a bit
 				match peer_manager.get_peer_node_ids().iter().find(|id| **id == pubkey) {
-					Some(_) => break,
+					Some(_) => return Ok(()),
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}
 			}
 		}
-		None => {
-			println!("ERROR: failed to connect to peer");
-			return Err(());
-		}
+		None => Err(()),
 	}
-	Ok(())
 }
 
 fn open_channel(

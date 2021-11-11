@@ -641,22 +641,39 @@ async fn start_ldk() {
 		logger.clone(),
 	);
 
-	// Reconnect to channel peers if possible.
+	// Regularly reconnect to channel peers.
+	let connect_cm = Arc::clone(&channel_manager);
+	let connect_pm = Arc::clone(&peer_manager);
 	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
-	match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
-		Ok(mut info) => {
-			for (pubkey, peer_addr) in info.drain() {
-				for chan_info in channel_manager.list_channels() {
-					if pubkey == chan_info.counterparty.node_id {
-						let _ =
-							cli::connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(1));
+		loop {
+			interval.tick().await;
+			match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
+				Ok(info) => {
+					let peers = connect_pm.get_peer_node_ids();
+					for node_id in connect_cm
+						.list_channels()
+						.iter()
+						.map(|chan| chan.counterparty.node_id)
+						.filter(|id| !peers.contains(id))
+					{
+						for (pubkey, peer_addr) in info.iter() {
+							if *pubkey == node_id {
+								let _ = cli::do_connect_peer(
+									*pubkey,
+									peer_addr.clone(),
+									Arc::clone(&connect_pm),
+								)
 								.await;
+							}
+						}
 					}
 				}
+				Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
 			}
 		}
-		Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
-	}
+	});
 
 	// Regularly broadcast our node_announcement. This is only required (or possible) if we have
 	// some public channels, and is only useful if we have public listen address(es) to announce.
