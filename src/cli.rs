@@ -352,7 +352,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 				"nodeinfo" => node_info(channel_manager.clone(), peer_manager.clone()),
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
-					const MSG_STARTPOS: usize = "signmsg".len() + 1;
+					const MSG_STARTPOS: usize = "signmessage".len() + 1;
 					if line.as_bytes().len() <= MSG_STARTPOS {
 						println!("ERROR: signmsg requires a message");
 						continue;
