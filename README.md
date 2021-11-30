@@ -13,7 +13,7 @@ cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<b
 ```
 `bitcoind`'s RPC username and password likely can be found through `cat ~/.bitcoin/.cookie`.
 
-`bitcoin-network`: defaults to `testnet`. Options: `testnet`, `regtest`.
+`bitcoin-network`: defaults to `testnet`. Options: `testnet`, `regtest`, and `signet`.
 
 `ldk-peer-listening-port`: defaults to 9735.
 

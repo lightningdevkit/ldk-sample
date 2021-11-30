@@ -88,8 +88,9 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	let network: Network = match env::args().skip(arg_idx).next().as_ref().map(String::as_str) {
 		Some("testnet") => Network::Testnet,
 		Some("regtest") => Network::Regtest,
+		Some("signet") => Network::Signet,
 		Some(net) => {
-			panic!("Unsupported network provided. Options are: `regtest`, `testnet`. Got {}", net);
+			panic!("Unsupported network provided. Options are: `regtest`, `testnet`, and `signet`. Got {}", net);
 		}
 		None => Network::Testnet,
 	};
@@ -669,7 +670,7 @@ fn get_invoice(
 		Network::Bitcoin => Currency::Bitcoin,
 		Network::Testnet => Currency::BitcoinTestnet,
 		Network::Regtest => Currency::Regtest,
-		Network::Signet => panic!("Signet unsupported"),
+		Network::Signet => Currency::Signet,
 	};
 	let invoice = match utils::create_invoice_from_channelmanager(
 		&channel_manager,
