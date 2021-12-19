@@ -195,16 +195,21 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentSent { payment_preimage, payment_hash, .. } => {
+		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 			let mut payments = outbound_payments.lock().unwrap();
 			for (hash, payment) in payments.iter_mut() {
 				if *hash == *payment_hash {
 					payment.preimage = Some(*payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 					println!(
-						"\nEVENT: successfully sent payment of {} millisatoshis from \
+						"\nEVENT: successfully sent payment of {} millisatoshis{} from \
 								 payment hash {:?} with preimage {:?}",
 						payment.amt_msat,
+						if let Some(fee) = fee_paid_msat {
+							format!(" (fee {} msat)", fee)
+						} else {
+							"".to_string()
+						},
 						hex_utils::hex_str(&payment_hash.0),
 						hex_utils::hex_str(&payment_preimage.0)
 					);
