@@ -3,7 +3,7 @@ use bitcoin::secp256k1::key::PublicKey;
 use bitcoin::BlockHash;
 use chrono::Utc;
 use lightning::routing::network_graph::NetworkGraph;
-use lightning::routing::scorer::Scorer;
+use lightning::routing::scoring::Scorer;
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use std::collections::HashMap;

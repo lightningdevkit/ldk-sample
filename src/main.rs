@@ -25,7 +25,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
-use lightning::routing::scorer::Scorer;
+use lightning::routing::scoring::Scorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -213,26 +213,13 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentPathFailed {
-			payment_hash,
-			rejected_by_dest,
-			all_paths_failed,
-			short_channel_id,
-			..
-		} => {
+		Event::PaymentPathSuccessful { .. } => {}
+		Event::PaymentPathFailed { .. } => {}
+		Event::PaymentFailed { payment_hash, .. } => {
 			print!(
-				"\nEVENT: Failed to send payment{} to payment hash {:?}",
-				if *all_paths_failed { "" } else { " along MPP path" },
+				"\nEVENT: Failed to send payment to payment hash {:?}: exhausted payment retry attempts",
 				hex_utils::hex_str(&payment_hash.0)
 			);
-			if let Some(scid) = short_channel_id {
-				print!(" because of failure at channel {}", scid);
-			}
-			if *rejected_by_dest {
-				println!(": re-attempting the payment will not succeed");
-			} else {
-				println!(": exhausted payment retry attempts");
-			}
 			print!("> ");
 			io::stdout().flush().unwrap();
 

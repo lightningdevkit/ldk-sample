@@ -13,7 +13,7 @@ use lightning::ln::PaymentHash;
 use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::router;
 use lightning::routing::router::{Payee, RouteParameters};
-use lightning::routing::scorer::Scorer;
+use lightning::routing::scoring::Scorer;
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
 use lightning_invoice::payment::PaymentError;
