@@ -8,7 +8,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lightning = { version = "0.0.104" }
+lightning = { version = "0.0.104", features = ["max_level_trace"] }
 lightning-block-sync = { version = "0.0.104", features = [ "rpc-client" ] }
 lightning-invoice = { version = "0.12.0" }
 lightning-net-tokio = { version = "0.0.104" }
