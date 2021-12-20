@@ -693,12 +693,9 @@ async fn start_ldk() {
 		peer_manager.clone(),
 		channel_manager.clone(),
 		keys_manager.clone(),
-		network_graph.clone(),
-		scorer.clone(),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
-		logger.clone(),
 		network,
 	)
 	.await;

@@ -1,19 +1,16 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, FilesystemLogger, HTLCStatus, InvoicePayer, MillisatAmount, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, PaymentInfo, PaymentInfoStorage,
+	PeerManager,
 };
+use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager};
 use lightning::ln::msgs::NetAddress;
-use lightning::ln::PaymentHash;
-use lightning::routing::network_graph::NetworkGraph;
-use lightning::routing::router;
-use lightning::routing::router::{Payee, RouteParameters};
-use lightning::routing::scoring::Scorer;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
 use lightning_invoice::payment::PaymentError;
@@ -25,7 +22,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct LdkUserInfo {
@@ -143,9 +140,8 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
 	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-	network_graph: Arc<NetworkGraph>, scorer: Arc<Mutex<Scorer>>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	ldk_data_dir: String, logger: Arc<FilesystemLogger>, network: Network,
+	ldk_data_dir: String, network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".");
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
@@ -253,7 +249,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Some(amt) => amt,
 						None => {
 							println!("ERROR: keysend requires an amount in millisatoshis: `keysend <dest_pubkey> <amt_msat>`");
-
 							continue;
 						}
 					};
@@ -265,13 +260,11 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						}
 					};
 					keysend(
+						&*invoice_payer,
 						dest_pubkey,
 						amt_msat,
-						network_graph.clone(),
-						channel_manager.clone(),
+						&*keys_manager,
 						outbound_payments.clone(),
-						logger.clone(),
-						scorer.clone(),
 					);
 				}
 				"getinvoice" => {
@@ -592,40 +585,47 @@ fn send_payment<E: EventHandler>(
 	);
 }
 
-fn keysend(
-	payee_pubkey: PublicKey, amt_msat: u64, network_graph: Arc<NetworkGraph>,
-	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
-	logger: Arc<FilesystemLogger>, scorer: Arc<Mutex<Scorer>>,
+fn keysend<E: EventHandler, K: KeysInterface>(
+	invoice_payer: &InvoicePayer<E>, payee_pubkey: PublicKey, amt_msat: u64, keys: &K,
+	payment_storage: PaymentInfoStorage,
 ) {
-	let first_hops = channel_manager.list_usable_channels();
-	let payer_pubkey = channel_manager.get_our_node_id();
+	let payment_preimage = keys.get_secure_random_bytes();
 
-	let payee = Payee::for_keysend(payee_pubkey);
-	let params = RouteParameters { payee, final_value_msat: amt_msat, final_cltv_expiry_delta: 40 };
-
-	let route = match router::find_route(
-		&payer_pubkey,
-		&params,
-		&network_graph,
-		Some(&first_hops.iter().collect::<Vec<_>>()),
-		logger,
-		&scorer.lock().unwrap(),
+	let status = match invoice_payer.pay_pubkey(
+		payee_pubkey,
+		PaymentPreimage(payment_preimage),
+		amt_msat,
+		40,
 	) {
-		Ok(r) => r,
-		Err(e) => {
-			println!("ERROR: failed to find route: {}", e.err);
+		Ok(_payment_id) => {
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			print!("> ");
+			HTLCStatus::Pending
+		}
+		Err(PaymentError::Invoice(e)) => {
+			println!("ERROR: invalid payee: {}", e);
+			print!("> ");
 			return;
+		}
+		Err(PaymentError::Routing(e)) => {
+			println!("ERROR: failed to find route: {}", e.err);
+			print!("> ");
+			return;
+		}
+		Err(PaymentError::Sending(e)) => {
+			println!("ERROR: failed to send payment: {:?}", e);
+			print!("> ");
+			HTLCStatus::Failed
 		}
 	};
 
 	let mut payments = payment_storage.lock().unwrap();
-	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap().0;
 	payments.insert(
-		payment_hash,
+		PaymentHash(Sha256::hash(&payment_preimage).into_inner()),
 		PaymentInfo {
 			preimage: None,
 			secret: None,
-			status: HTLCStatus::Pending,
+			status,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
 	);
