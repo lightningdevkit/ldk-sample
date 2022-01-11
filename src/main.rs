@@ -25,7 +25,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
-use lightning::routing::scorer::Scorer;
+use lightning::routing::scoring::Scorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -195,16 +195,21 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentSent { payment_preimage, payment_hash, .. } => {
+		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 			let mut payments = outbound_payments.lock().unwrap();
 			for (hash, payment) in payments.iter_mut() {
 				if *hash == *payment_hash {
 					payment.preimage = Some(*payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 					println!(
-						"\nEVENT: successfully sent payment of {} millisatoshis from \
+						"\nEVENT: successfully sent payment of {} millisatoshis{} from \
 								 payment hash {:?} with preimage {:?}",
 						payment.amt_msat,
+						if let Some(fee) = fee_paid_msat {
+							format!(" (fee {} msat)", fee)
+						} else {
+							"".to_string()
+						},
 						hex_utils::hex_str(&payment_hash.0),
 						hex_utils::hex_str(&payment_preimage.0)
 					);
@@ -213,26 +218,13 @@ async fn handle_ldk_events(
 				}
 			}
 		}
-		Event::PaymentPathFailed {
-			payment_hash,
-			rejected_by_dest,
-			all_paths_failed,
-			short_channel_id,
-			..
-		} => {
+		Event::PaymentPathSuccessful { .. } => {}
+		Event::PaymentPathFailed { .. } => {}
+		Event::PaymentFailed { payment_hash, .. } => {
 			print!(
-				"\nEVENT: Failed to send payment{} to payment hash {:?}",
-				if *all_paths_failed { "" } else { " along MPP path" },
+				"\nEVENT: Failed to send payment to payment hash {:?}: exhausted payment retry attempts",
 				hex_utils::hex_str(&payment_hash.0)
 			);
-			if let Some(scid) = short_channel_id {
-				print!(" because of failure at channel {}", scid);
-			}
-			if *rejected_by_dest {
-				println!(": re-attempting the payment will not succeed");
-			} else {
-				println!(": exhausted payment retry attempts");
-			}
 			print!("> ");
 			io::stdout().flush().unwrap();
 
@@ -641,22 +633,39 @@ async fn start_ldk() {
 		logger.clone(),
 	);
 
-	// Reconnect to channel peers if possible.
+	// Regularly reconnect to channel peers.
+	let connect_cm = Arc::clone(&channel_manager);
+	let connect_pm = Arc::clone(&peer_manager);
 	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
-	match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
-		Ok(mut info) => {
-			for (pubkey, peer_addr) in info.drain() {
-				for chan_info in channel_manager.list_channels() {
-					if pubkey == chan_info.counterparty.node_id {
-						let _ =
-							cli::connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(1));
+		loop {
+			interval.tick().await;
+			match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
+				Ok(info) => {
+					let peers = connect_pm.get_peer_node_ids();
+					for node_id in connect_cm
+						.list_channels()
+						.iter()
+						.map(|chan| chan.counterparty.node_id)
+						.filter(|id| !peers.contains(id))
+					{
+						for (pubkey, peer_addr) in info.iter() {
+							if *pubkey == node_id {
+								let _ = cli::do_connect_peer(
+									*pubkey,
+									peer_addr.clone(),
+									Arc::clone(&connect_pm),
+								)
 								.await;
+							}
+						}
 					}
 				}
+				Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
 			}
 		}
-		Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
-	}
+	});
 
 	// Regularly broadcast our node_announcement. This is only required (or possible) if we have
 	// some public channels, and is only useful if we have public listen address(es) to announce.
@@ -684,12 +693,9 @@ async fn start_ldk() {
 		peer_manager.clone(),
 		channel_manager.clone(),
 		keys_manager.clone(),
-		network_graph.clone(),
-		scorer.clone(),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
-		logger.clone(),
 		network,
 	)
 	.await;

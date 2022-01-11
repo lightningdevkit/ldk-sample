@@ -1,19 +1,16 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, FilesystemLogger, HTLCStatus, InvoicePayer, MillisatAmount, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, PaymentInfo, PaymentInfoStorage,
+	PeerManager,
 };
+use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager};
 use lightning::ln::msgs::NetAddress;
-use lightning::ln::PaymentHash;
-use lightning::routing::network_graph::NetworkGraph;
-use lightning::routing::router;
-use lightning::routing::router::{Payee, RouteParameters};
-use lightning::routing::scorer::Scorer;
+use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
 use lightning_invoice::payment::PaymentError;
@@ -25,7 +22,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct LdkUserInfo {
@@ -144,18 +141,21 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
 	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-	network_graph: Arc<NetworkGraph>, scorer: Arc<Mutex<Scorer>>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	ldk_data_dir: String, logger: Arc<FilesystemLogger>, network: Network,
+	ldk_data_dir: String, network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".");
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
 	let stdin = io::stdin();
-	print!("> ");
-	io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
-	for line in stdin.lock().lines() {
-		let line = line.unwrap();
+	let mut line_reader = stdin.lock().lines();
+	loop {
+		print!("> ");
+		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
+		let line = match line_reader.next() {
+			Some(l) => l.unwrap(),
+			None => break,
+		};
 		let mut words = line.split_whitespace();
 		if let Some(word) = words.next() {
 			match word {
@@ -165,8 +165,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					let channel_value_sat = words.next();
 					if peer_pubkey_and_ip_addr.is_none() || channel_value_sat.is_none() {
 						println!("ERROR: openchannel has 2 required arguments: `openchannel pubkey@host:port channel_amt_satoshis` [--public]");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
@@ -175,8 +173,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 							Ok(info) => info,
 							Err(e) => {
 								println!("{:?}", e.into_inner().unwrap());
-								print!("> ");
-								io::stdout().flush().unwrap();
 								continue;
 							}
 						};
@@ -184,8 +180,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
 					if chan_amt_sat.is_err() {
 						println!("ERROR: channel amount must be a number");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 
@@ -193,8 +187,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						.await
 						.is_err()
 					{
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					};
 
@@ -203,8 +195,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Some("--public=false") => false,
 						Some(_) => {
 							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
-							print!("> ");
-							io::stdout().flush().unwrap();
 							continue;
 						}
 						None => false,
@@ -229,8 +219,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					let invoice_str = words.next();
 					if invoice_str.is_none() {
 						println!("ERROR: sendpayment requires an invoice: `sendpayment <invoice>`");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 
@@ -238,8 +226,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Ok(inv) => inv,
 						Err(e) => {
 							println!("ERROR: invalid invoice: {:?}", e);
-							print!("> ");
-							io::stdout().flush().unwrap();
 							continue;
 						}
 					};
@@ -252,15 +238,11 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 							Some(pk) => pk,
 							None => {
 								println!("ERROR: couldn't parse destination pubkey");
-								print!("> ");
-								io::stdout().flush().unwrap();
 								continue;
 							}
 						},
 						None => {
 							println!("ERROR: keysend requires a destination pubkey: `keysend <dest_pubkey> <amt_msat>`");
-							print!("> ");
-							io::stdout().flush().unwrap();
 							continue;
 						}
 					};
@@ -268,9 +250,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Some(amt) => amt,
 						None => {
 							println!("ERROR: keysend requires an amount in millisatoshis: `keysend <dest_pubkey> <amt_msat>`");
-
-							print!("> ");
-							io::stdout().flush().unwrap();
 							continue;
 						}
 					};
@@ -278,35 +257,27 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Ok(amt) => amt,
 						Err(e) => {
 							println!("ERROR: couldn't parse amount_msat: {}", e);
-							print!("> ");
-							io::stdout().flush().unwrap();
 							continue;
 						}
 					};
 					keysend(
+						&*invoice_payer,
 						dest_pubkey,
 						amt_msat,
-						network_graph.clone(),
-						channel_manager.clone(),
+						&*keys_manager,
 						outbound_payments.clone(),
-						logger.clone(),
-						scorer.clone(),
 					);
 				}
 				"getinvoice" => {
 					let amt_str = words.next();
 					if amt_str.is_none() {
 						println!("ERROR: getinvoice requires an amount in millisatoshis");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 
 					let amt_msat: Result<u64, _> = amt_str.unwrap().parse();
 					if amt_msat.is_err() {
 						println!("ERROR: getinvoice provided payment amount was not a number");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					get_invoice(
@@ -321,8 +292,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					let peer_pubkey_and_ip_addr = words.next();
 					if peer_pubkey_and_ip_addr.is_none() {
 						println!("ERROR: connectpeer requires peer connection info: `connectpeer pubkey@host:port`");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					let (pubkey, peer_addr) =
@@ -330,8 +299,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 							Ok(info) => info,
 							Err(e) => {
 								println!("{:?}", e.into_inner().unwrap());
-								print!("> ");
-								io::stdout().flush().unwrap();
 								continue;
 							}
 						};
@@ -350,15 +317,11 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
 						println!("ERROR: closechannel requires a channel ID: `closechannel <channel_id>`");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
 					if channel_id_vec.is_none() {
 						println!("ERROR: couldn't parse channel_id as hex");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					let mut channel_id = [0; 32];
@@ -369,15 +332,11 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
 						println!("ERROR: forceclosechannel requires a channel ID: `forceclosechannel <channel_id>`");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
 					if channel_id_vec.is_none() {
 						println!("ERROR: couldn't parse channel_id as hex");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					let mut channel_id = [0; 32];
@@ -387,11 +346,9 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 				"nodeinfo" => node_info(channel_manager.clone(), peer_manager.clone()),
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
-					const MSG_STARTPOS: usize = "signmsg".len() + 1;
+					const MSG_STARTPOS: usize = "signmessage".len() + 1;
 					if line.as_bytes().len() <= MSG_STARTPOS {
 						println!("ERROR: signmsg requires a message");
-						print!("> ");
-						io::stdout().flush().unwrap();
 						continue;
 					}
 					println!(
@@ -401,14 +358,10 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 							&keys_manager.get_node_secret()
 						)
 					);
-					print!("> ");
-					io::stdout().flush().unwrap();
 				}
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
 		}
-		print!("> ");
-		io::stdout().flush().unwrap();
 	}
 }
 
@@ -429,8 +382,14 @@ fn help() {
 fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
 	println!("\t{{");
 	println!("\t\t node_pubkey: {}", channel_manager.get_our_node_id());
-	println!("\t\t num_channels: {}", channel_manager.list_channels().len());
-	println!("\t\t num_usable_channels: {}", channel_manager.list_usable_channels().len());
+	let chans = channel_manager.list_channels();
+	println!("\t\t num_channels: {}", chans.len());
+	println!("\t\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
+	let local_balance_msat = chans
+		.iter()
+		.map(|c| c.unspendable_punishment_reserve.unwrap_or(0) * 1000 + c.outbound_capacity_msat)
+		.sum::<u64>();
+	println!("\t\t local_balance_msat: {}", local_balance_msat);
 	println!("\t\t num_peers: {}", peer_manager.get_peer_node_ids().len());
 	println!("\t}},");
 }
@@ -527,6 +486,16 @@ pub(crate) async fn connect_peer_if_necessary(
 			return Ok(());
 		}
 	}
+	let res = do_connect_peer(pubkey, peer_addr, peer_manager).await;
+	if res.is_err() {
+		println!("ERROR: failed to connect to peer");
+	}
+	res
+}
+
+pub(crate) async fn do_connect_peer(
+	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
+) -> Result<(), ()> {
 	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), pubkey, peer_addr).await
 	{
 		Some(connection_closed_future) => {
@@ -534,24 +503,19 @@ pub(crate) async fn connect_peer_if_necessary(
 			loop {
 				match futures::poll!(&mut connection_closed_future) {
 					std::task::Poll::Ready(_) => {
-						println!("ERROR: Peer disconnected before we finished the handshake");
 						return Err(());
 					}
 					std::task::Poll::Pending => {}
 				}
 				// Avoid blocking the tokio context by sleeping a bit
 				match peer_manager.get_peer_node_ids().iter().find(|id| **id == pubkey) {
-					Some(_) => break,
+					Some(_) => return Ok(()),
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}
 			}
 		}
-		None => {
-			println!("ERROR: failed to connect to peer");
-			return Err(());
-		}
+		None => Err(()),
 	}
-	Ok(())
 }
 
 fn open_channel(
@@ -622,40 +586,47 @@ fn send_payment<E: EventHandler>(
 	);
 }
 
-fn keysend(
-	payee_pubkey: PublicKey, amt_msat: u64, network_graph: Arc<NetworkGraph>,
-	channel_manager: Arc<ChannelManager>, payment_storage: PaymentInfoStorage,
-	logger: Arc<FilesystemLogger>, scorer: Arc<Mutex<Scorer>>,
+fn keysend<E: EventHandler, K: KeysInterface>(
+	invoice_payer: &InvoicePayer<E>, payee_pubkey: PublicKey, amt_msat: u64, keys: &K,
+	payment_storage: PaymentInfoStorage,
 ) {
-	let first_hops = channel_manager.list_usable_channels();
-	let payer_pubkey = channel_manager.get_our_node_id();
+	let payment_preimage = keys.get_secure_random_bytes();
 
-	let payee = Payee::for_keysend(payee_pubkey);
-	let params = RouteParameters { payee, final_value_msat: amt_msat, final_cltv_expiry_delta: 40 };
-
-	let route = match router::find_route(
-		&payer_pubkey,
-		&params,
-		&network_graph,
-		Some(&first_hops.iter().collect::<Vec<_>>()),
-		logger,
-		&scorer.lock().unwrap(),
+	let status = match invoice_payer.pay_pubkey(
+		payee_pubkey,
+		PaymentPreimage(payment_preimage),
+		amt_msat,
+		40,
 	) {
-		Ok(r) => r,
-		Err(e) => {
-			println!("ERROR: failed to find route: {}", e.err);
+		Ok(_payment_id) => {
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			print!("> ");
+			HTLCStatus::Pending
+		}
+		Err(PaymentError::Invoice(e)) => {
+			println!("ERROR: invalid payee: {}", e);
+			print!("> ");
 			return;
+		}
+		Err(PaymentError::Routing(e)) => {
+			println!("ERROR: failed to find route: {}", e.err);
+			print!("> ");
+			return;
+		}
+		Err(PaymentError::Sending(e)) => {
+			println!("ERROR: failed to send payment: {:?}", e);
+			print!("> ");
+			HTLCStatus::Failed
 		}
 	};
 
 	let mut payments = payment_storage.lock().unwrap();
-	let payment_hash = channel_manager.send_spontaneous_payment(&route, None).unwrap().0;
 	payments.insert(
-		payment_hash,
+		PaymentHash(Sha256::hash(&payment_preimage).into_inner()),
 		PaymentInfo {
 			preimage: None,
 			secret: None,
-			status: HTLCStatus::Pending,
+			status,
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
 	);
