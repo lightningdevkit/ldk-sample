@@ -3,15 +3,16 @@ use bitcoin::secp256k1::key::PublicKey;
 use bitcoin::BlockHash;
 use chrono::Utc;
 use lightning::routing::network_graph::NetworkGraph;
-use lightning::routing::scoring::Scorer;
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::logger::{Logger, Record};
-use lightning::util::ser::{Readable, Writeable, Writer};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 
 pub(crate) struct FilesystemLogger {
 	data_dir: String,
@@ -94,7 +95,9 @@ pub(crate) fn read_network(path: &Path, genesis_hash: BlockHash) -> NetworkGraph
 	NetworkGraph::new(genesis_hash)
 }
 
-pub(crate) fn persist_scorer(path: &Path, scorer: &Scorer) -> std::io::Result<()> {
+pub(crate) fn persist_scorer(
+	path: &Path, scorer: &ProbabilisticScorer<Arc<NetworkGraph>>,
+) -> std::io::Result<()> {
 	let mut tmp_path = path.to_path_buf().into_os_string();
 	tmp_path.push(".tmp");
 	let file = fs::OpenOptions::new().write(true).create(true).open(&tmp_path)?;
@@ -107,11 +110,16 @@ pub(crate) fn persist_scorer(path: &Path, scorer: &Scorer) -> std::io::Result<()
 	}
 }
 
-pub(crate) fn read_scorer(path: &Path) -> Scorer {
+pub(crate) fn read_scorer(
+	path: &Path, graph: Arc<NetworkGraph>,
+) -> ProbabilisticScorer<Arc<NetworkGraph>> {
+	let params = ProbabilisticScoringParameters::default();
 	if let Ok(file) = File::open(path) {
-		if let Ok(scorer) = Scorer::read(&mut BufReader::new(file)) {
+		if let Ok(scorer) =
+			ProbabilisticScorer::read(&mut BufReader::new(file), (params, Arc::clone(&graph)))
+		{
 			return scorer;
 		}
 	}
-	Scorer::default()
+	ProbabilisticScorer::new(params, graph)
 }

@@ -25,7 +25,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
-use lightning::routing::scoring::Scorer;
+use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -101,7 +101,7 @@ pub(crate) type ChannelManager =
 pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 	Arc<ChannelManager>,
 	Router,
-	Arc<Mutex<Scorer>>,
+	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>>>>,
 	Arc<FilesystemLogger>,
 	E,
 >;
@@ -589,9 +589,12 @@ async fn start_ldk() {
 		));
 	};
 
-	// Step 16: Initialize routing Scorer
-	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
-	let scorer = Arc::new(Mutex::new(disk::read_scorer(Path::new(&scorer_path))));
+	// Step 16: Initialize routing ProbabilisticScorer
+	let scorer_path = format!("{}/prob_scorer", ldk_data_dir.clone());
+	let scorer = Arc::new(Mutex::new(disk::read_scorer(
+		Path::new(&scorer_path),
+		Arc::clone(&network_graph),
+	)));
 	let scorer_persist = Arc::clone(&scorer);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(600));
