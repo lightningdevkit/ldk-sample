@@ -8,7 +8,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::key::PublicKey;
-use lightning::chain::keysinterface::{KeysInterface, KeysManager};
+use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
@@ -355,7 +355,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						"{:?}",
 						lightning::util::message_signing::sign(
 							&line.as_bytes()[MSG_STARTPOS..],
-							&keys_manager.get_node_secret()
+							&keys_manager.get_node_secret(Recipient::Node).unwrap()
 						)
 					);
 				}

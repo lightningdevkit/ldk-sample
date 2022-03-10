@@ -16,7 +16,7 @@ use bitcoin_bech32::WitnessProgram;
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::chainmonitor;
-use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager};
+use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
 use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
@@ -25,7 +25,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
-use lightning::routing::scoring::Scorer;
+use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -101,7 +101,7 @@ pub(crate) type ChannelManager =
 pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 	Arc<ChannelManager>,
 	Router,
-	Arc<Mutex<Scorer>>,
+	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>>>>,
 	Arc<FilesystemLogger>,
 	E,
 >;
@@ -217,6 +217,9 @@ async fn handle_ldk_events(
 					io::stdout().flush().unwrap();
 				}
 			}
+		}
+		Event::OpenChannelRequest { .. } => {
+			// Unreachable, we don't set manually_accept_inbound_channels
 		}
 		Event::PaymentPathSuccessful { .. } => {}
 		Event::PaymentPathFailed { .. } => {}
@@ -397,7 +400,7 @@ async fn start_ldk() {
 	let mut user_config = UserConfig::default();
 	user_config.peer_channel_config_limits.force_announced_channel_preference = false;
 	let mut restarting_node = true;
-	let (channel_manager_blockhash, mut channel_manager) = {
+	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
 			let mut channel_monitor_mut_references = Vec::new();
 			for (_, channel_monitor) in channelmonitors.iter_mut() {
@@ -444,7 +447,7 @@ async fn start_ldk() {
 	let mut chain_tip: Option<poll::ValidatedBlockHeader> = None;
 	if restarting_node {
 		let mut chain_listeners =
-			vec![(channel_manager_blockhash, &mut channel_manager as &mut dyn chain::Listen)];
+			vec![(channel_manager_blockhash, &channel_manager as &dyn chain::Listen)];
 
 		for (blockhash, channel_monitor) in channelmonitors.drain(..) {
 			let outpoint = channel_monitor.get_funding_txo().0;
@@ -456,10 +459,8 @@ async fn start_ldk() {
 		}
 
 		for monitor_listener_info in chain_listener_channel_monitors.iter_mut() {
-			chain_listeners.push((
-				monitor_listener_info.0,
-				&mut monitor_listener_info.1 as &mut dyn chain::Listen,
-			));
+			chain_listeners
+				.push((monitor_listener_info.0, &monitor_listener_info.1 as &dyn chain::Listen));
 		}
 		chain_tip = Some(
 			init::synchronize_listeners(
@@ -516,7 +517,7 @@ async fn start_ldk() {
 	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
-		keys_manager.get_node_secret(),
+		keys_manager.get_node_secret(Recipient::Node).unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
 		Arc::new(IgnoringMessageHandler {}),
@@ -588,9 +589,12 @@ async fn start_ldk() {
 		));
 	};
 
-	// Step 16: Initialize routing Scorer
-	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
-	let scorer = Arc::new(Mutex::new(disk::read_scorer(Path::new(&scorer_path))));
+	// Step 16: Initialize routing ProbabilisticScorer
+	let scorer_path = format!("{}/prob_scorer", ldk_data_dir.clone());
+	let scorer = Arc::new(Mutex::new(disk::read_scorer(
+		Path::new(&scorer_path),
+		Arc::clone(&network_graph),
+	)));
 	let scorer_persist = Arc::clone(&scorer);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(600));
