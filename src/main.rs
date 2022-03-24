@@ -48,6 +48,7 @@ use std::io;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -528,6 +529,8 @@ async fn start_ldk() {
 
 	let peer_manager_connection_handler = peer_manager.clone();
 	let listening_port = args.ldk_peer_listening_port;
+	let stop_listen = Arc::new(AtomicBool::new(false));
+	let stop_listen_ref = Arc::clone(&stop_listen);
 	tokio::spawn(async move {
 		let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port))
 			.await
@@ -535,6 +538,9 @@ async fn start_ldk() {
 		loop {
 			let peer_mgr = peer_manager_connection_handler.clone();
 			let tcp_stream = listener.accept().await.unwrap().0;
+			if stop_listen_ref.load(Ordering::Acquire) {
+				return;
+			}
 			tokio::spawn(async move {
 				lightning_net_tokio::setup_inbound(
 					peer_mgr.clone(),
@@ -703,6 +709,11 @@ async fn start_ldk() {
 		network,
 	)
 	.await;
+
+	// Disconnect our peers and stop accepting new connections. This ensures we don't continue
+	// updating our channel data after we've stopped the background processor.
+	stop_listen.store(true, Ordering::Release);
+	peer_manager.disconnect_all_peers();
 
 	// Stop the background processor.
 	background_processor.stop().unwrap();
