@@ -309,7 +309,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						println!("SUCCESS: connected to peer {}", pubkey);
 					}
 				}
-				"listchannels" => list_channels(channel_manager.clone()),
+				"listchannels" => list_channels(&channel_manager),
 				"listpayments" => {
 					list_payments(inbound_payments.clone(), outbound_payments.clone())
 				}
@@ -343,7 +343,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					channel_id.copy_from_slice(&channel_id_vec.unwrap());
 					force_close_channel(channel_id, channel_manager.clone());
 				}
-				"nodeinfo" => node_info(channel_manager.clone(), peer_manager.clone()),
+				"nodeinfo" => node_info(&channel_manager, &peer_manager),
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
 					const MSG_STARTPOS: usize = "signmessage".len() + 1;
@@ -379,16 +379,13 @@ fn help() {
 	println!("signmessage <message>");
 }
 
-fn node_info(channel_manager: Arc<ChannelManager>, peer_manager: Arc<PeerManager>) {
+fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
 	println!("\t{{");
 	println!("\t\t node_pubkey: {}", channel_manager.get_our_node_id());
 	let chans = channel_manager.list_channels();
 	println!("\t\t num_channels: {}", chans.len());
 	println!("\t\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
-	let local_balance_msat = chans
-		.iter()
-		.map(|c| c.unspendable_punishment_reserve.unwrap_or(0) * 1000 + c.outbound_capacity_msat)
-		.sum::<u64>();
+	let local_balance_msat = chans.iter().map(|c| c.balance_msat).sum::<u64>();
 	println!("\t\t local_balance_msat: {}", local_balance_msat);
 	println!("\t\t num_peers: {}", peer_manager.get_peer_node_ids().len());
 	println!("\t}},");
@@ -402,7 +399,7 @@ fn list_peers(peer_manager: Arc<PeerManager>) {
 	println!("\t}},");
 }
 
-fn list_channels(channel_manager: Arc<ChannelManager>) {
+fn list_channels(channel_manager: &Arc<ChannelManager>) {
 	print!("[");
 	for chan_info in channel_manager.list_channels() {
 		println!("");
@@ -420,11 +417,7 @@ fn list_channels(channel_manager: Arc<ChannelManager>) {
 		}
 		println!("\t\tis_confirmed_onchain: {},", chan_info.is_funding_locked);
 		println!("\t\tchannel_value_satoshis: {},", chan_info.channel_value_satoshis);
-		println!(
-			"\t\tlocal_balance_msat: {},",
-			chan_info.outbound_capacity_msat
-				+ chan_info.unspendable_punishment_reserve.unwrap_or(0) * 1000
-		);
+		println!("\t\tlocal_balance_msat: {},", chan_info.balance_msat);
 		if chan_info.is_usable {
 			println!("\t\tavailable_balance_for_send_msat: {},", chan_info.outbound_capacity_msat);
 			println!("\t\tavailable_balance_for_recv_msat: {},", chan_info.inbound_capacity_msat);
