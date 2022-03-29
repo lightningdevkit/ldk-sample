@@ -320,8 +320,8 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						continue;
 					}
 					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
-					if channel_id_vec.is_none() {
-						println!("ERROR: couldn't parse channel_id as hex");
+					if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
+						println!("ERROR: couldn't parse channel_id");
 						continue;
 					}
 					let mut channel_id = [0; 32];
@@ -335,8 +335,8 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						continue;
 					}
 					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
-					if channel_id_vec.is_none() {
-						println!("ERROR: couldn't parse channel_id as hex");
+					if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
+						println!("ERROR: couldn't parse channel_id");
 						continue;
 					}
 					let mut channel_id = [0; 32];

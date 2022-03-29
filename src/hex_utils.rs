@@ -31,6 +31,9 @@ pub fn hex_str(value: &[u8]) -> String {
 }
 
 pub fn to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
+	if hex.len() != 33 * 2 {
+		return None;
+	}
 	let data = match to_vec(&hex[0..33 * 2]) {
 		Some(bytes) => bytes,
 		None => return None,
