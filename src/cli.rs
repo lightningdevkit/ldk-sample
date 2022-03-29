@@ -11,6 +11,7 @@ use bitcoin::secp256k1::key::PublicKey;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::routing::network_graph::{NetworkGraph, NodeId};
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
 use lightning_invoice::payment::PaymentError;
@@ -141,8 +142,8 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
 	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	ldk_data_dir: String, network: Network,
+	network_graph: Arc<NetworkGraph>, inbound_payments: PaymentInfoStorage,
+	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".");
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
@@ -309,7 +310,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						println!("SUCCESS: connected to peer {}", pubkey);
 					}
 				}
-				"listchannels" => list_channels(&channel_manager),
+				"listchannels" => list_channels(&channel_manager, &network_graph),
 				"listpayments" => {
 					list_payments(inbound_payments.clone(), outbound_payments.clone())
 				}
@@ -399,7 +400,20 @@ fn list_peers(peer_manager: Arc<PeerManager>) {
 	println!("\t}},");
 }
 
-fn list_channels(channel_manager: &Arc<ChannelManager>) {
+/// Takes some untrusted bytes and returns a sanitized string that is safe to print
+fn sanitize_string(bytes: &[u8]) -> String {
+	let mut ret = String::with_capacity(bytes.len());
+	// We should really support some sane subset of UTF-8 here, but limiting to printable ASCII
+	// instead makes this trivial.
+	for b in bytes {
+		if *b >= 0x20 && *b <= 0x7e {
+			ret.push(*b as char);
+		}
+	}
+	ret
+}
+
+fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<NetworkGraph>) {
 	print!("[");
 	for chan_info in channel_manager.list_channels() {
 		println!("");
@@ -408,10 +422,21 @@ fn list_channels(channel_manager: &Arc<ChannelManager>) {
 		if let Some(funding_txo) = chan_info.funding_txo {
 			println!("\t\tfunding_txid: {},", funding_txo.txid);
 		}
+
 		println!(
 			"\t\tpeer_pubkey: {},",
 			hex_utils::hex_str(&chan_info.counterparty.node_id.serialize())
 		);
+		if let Some(node_info) = network_graph
+			.read_only()
+			.nodes()
+			.get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
+		{
+			if let Some(announcement) = &node_info.announcement_info {
+				println!("\t\tpeer_alias: {}", sanitize_string(&announcement.alias));
+			}
+		}
+
 		if let Some(id) = chan_info.short_channel_id {
 			println!("\t\tshort_channel_id: {},", id);
 		}

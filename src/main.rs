@@ -699,10 +699,11 @@ async fn start_ldk() {
 
 	// Start the CLI.
 	cli::poll_for_user_input(
-		invoice_payer.clone(),
-		peer_manager.clone(),
-		channel_manager.clone(),
-		keys_manager.clone(),
+		Arc::clone(&invoice_payer),
+		Arc::clone(&peer_manager),
+		Arc::clone(&channel_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&network_graph),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
