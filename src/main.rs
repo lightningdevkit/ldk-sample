@@ -29,7 +29,7 @@ use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
-use lightning_background_processor::BackgroundProcessor;
+use lightning_background_processor::{BackgroundProcessor, Persister};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
@@ -108,6 +108,36 @@ pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 >;
 
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
+
+struct DataPersister {
+	data_dir: String,
+}
+
+impl
+	Persister<
+		InMemorySigner,
+		Arc<ChainMonitor>,
+		Arc<BitcoindClient>,
+		Arc<KeysManager>,
+		Arc<BitcoindClient>,
+		Arc<FilesystemLogger>,
+	> for DataPersister
+{
+	fn persist_manager(&self, channel_manager: &ChannelManager) -> Result<(), std::io::Error> {
+		FilesystemPersister::persist_manager(self.data_dir.clone(), channel_manager)
+	}
+
+	fn persist_graph(&self, network_graph: &NetworkGraph) -> Result<(), std::io::Error> {
+		if FilesystemPersister::persist_network_graph(self.data_dir.clone(), network_graph).is_err()
+		{
+			// Persistence errors here are non-fatal as we can just fetch the routing graph
+			// again later, but they may indicate a disk error which could be fatal elsewhere.
+			eprintln!("Warning: Failed to persist network graph, check your disk and permissions");
+		}
+
+		Ok(())
+	}
+}
 
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
@@ -491,22 +521,6 @@ async fn start_ldk() {
 		None::<Arc<dyn chain::Access + Send + Sync>>,
 		logger.clone(),
 	));
-	let network_graph_persist = Arc::clone(&network_graph);
-	tokio::spawn(async move {
-		let mut interval = tokio::time::interval(Duration::from_secs(600));
-		loop {
-			interval.tick().await;
-			if disk::persist_network(Path::new(&network_graph_path), &network_graph_persist)
-				.is_err()
-			{
-				// Persistence errors here are non-fatal as we can just fetch the routing graph
-				// again later, but they may indicate a disk error which could be fatal elsewhere.
-				eprintln!(
-					"Warning: Failed to persist network graph, check your disk and permissions"
-				);
-			}
-		}
-	});
 
 	// Step 12: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
@@ -617,7 +631,11 @@ async fn start_ldk() {
 	});
 
 	// Step 17: Create InvoicePayer
-	let router = DefaultRouter::new(network_graph.clone(), logger.clone());
+	let router = DefaultRouter::new(
+		network_graph.clone(),
+		logger.clone(),
+		keys_manager.get_secure_random_bytes(),
+	);
 	let invoice_payer = Arc::new(InvoicePayer::new(
 		channel_manager.clone(),
 		router,
@@ -627,14 +645,12 @@ async fn start_ldk() {
 		payment::RetryAttempts(5),
 	));
 
-	// Step 18: Persist ChannelManager
-	let data_dir = ldk_data_dir.clone();
-	let persist_channel_manager_callback =
-		move |node: &ChannelManager| FilesystemPersister::persist_manager(data_dir.clone(), &*node);
+	// Step 18: Persist ChannelManager and NetworkGraph
+	let persister = DataPersister { data_dir: ldk_data_dir.clone() };
 
 	// Step 19: Background Processing
 	let background_processor = BackgroundProcessor::start(
-		persist_channel_manager_callback,
+		persister,
 		invoice_payer.clone(),
 		chain_monitor.clone(),
 		channel_manager.clone(),

@@ -73,19 +73,6 @@ pub(crate) fn read_channel_peer_data(
 	Ok(peer_data)
 }
 
-pub(crate) fn persist_network(path: &Path, network_graph: &NetworkGraph) -> std::io::Result<()> {
-	let mut tmp_path = path.to_path_buf().into_os_string();
-	tmp_path.push(".tmp");
-	let file = fs::OpenOptions::new().write(true).create(true).open(&tmp_path)?;
-	let write_res = network_graph.write(&mut BufWriter::new(file));
-	if let Err(e) = write_res.and_then(|_| fs::rename(&tmp_path, path)) {
-		let _ = fs::remove_file(&tmp_path);
-		Err(e)
-	} else {
-		Ok(())
-	}
-}
-
 pub(crate) fn read_network(path: &Path, genesis_hash: BlockHash) -> NetworkGraph {
 	if let Ok(file) = File::open(path) {
 		if let Ok(graph) = NetworkGraph::read(&mut BufReader::new(file)) {
