@@ -543,8 +543,8 @@ async fn start_ldk() {
 
 	let peer_manager_connection_handler = peer_manager.clone();
 	let listening_port = args.ldk_peer_listening_port;
-	let stop_listen = Arc::new(AtomicBool::new(false));
-	let stop_listen_ref = Arc::clone(&stop_listen);
+	let stop_listen_connect = Arc::new(AtomicBool::new(false));
+	let stop_listen = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
 		let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port))
 			.await
@@ -552,7 +552,7 @@ async fn start_ldk() {
 		loop {
 			let peer_mgr = peer_manager_connection_handler.clone();
 			let tcp_stream = listener.accept().await.unwrap().0;
-			if stop_listen_ref.load(Ordering::Acquire) {
+			if stop_listen.load(Ordering::Acquire) {
 				return;
 			}
 			tokio::spawn(async move {
@@ -663,6 +663,7 @@ async fn start_ldk() {
 	let connect_cm = Arc::clone(&channel_manager);
 	let connect_pm = Arc::clone(&peer_manager);
 	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+	let stop_connect = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
 		loop {
@@ -676,6 +677,9 @@ async fn start_ldk() {
 						.map(|chan| chan.counterparty.node_id)
 						.filter(|id| !peers.contains(id))
 					{
+						if stop_connect.load(Ordering::Acquire) {
+							return;
+						}
 						for (pubkey, peer_addr) in info.iter() {
 							if *pubkey == node_id {
 								let _ = cli::do_connect_peer(
@@ -729,7 +733,7 @@ async fn start_ldk() {
 
 	// Disconnect our peers and stop accepting new connections. This ensures we don't continue
 	// updating our channel data after we've stopped the background processor.
-	stop_listen.store(true, Ordering::Release);
+	stop_listen_connect.store(true, Ordering::Release);
 	peer_manager.disconnect_all_peers();
 
 	// Stop the background processor.
