@@ -369,6 +369,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 fn help() {
 	println!("openchannel pubkey@host:port <amt_satoshis>");
 	println!("sendpayment <invoice>");
+	println!("keysend <dest_pubkey> <amt_msat>");
 	println!("getinvoice <amt_millisatoshis>");
 	println!("connectpeer pubkey@host:port");
 	println!("listchannels");
