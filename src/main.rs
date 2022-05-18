@@ -24,12 +24,14 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::routing::network_graph::{NetGraphMsgHandler, NetworkGraph};
+use lightning::log_bytes;
+use lightning::routing::gossip;
+use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
-use lightning_background_processor::{BackgroundProcessor, Persister};
+use lightning_background_processor::BackgroundProcessor;
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
@@ -38,6 +40,7 @@ use lightning_invoice::payment;
 use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
+use lightning_rapid_gossip_sync::RapidGossipSync;
 use rand::{thread_rng, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -102,42 +105,17 @@ pub(crate) type ChannelManager =
 pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 	Arc<ChannelManager>,
 	Router,
-	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>>>>,
+	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>>>,
 	Arc<FilesystemLogger>,
 	E,
 >;
 
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 
-struct DataPersister {
-	data_dir: String,
-}
+type GossipSync<P, G, A, L> =
+	lightning_background_processor::GossipSync<P, Arc<RapidGossipSync<G, L>>, G, A, L>;
 
-impl
-	Persister<
-		InMemorySigner,
-		Arc<ChainMonitor>,
-		Arc<BitcoindClient>,
-		Arc<KeysManager>,
-		Arc<BitcoindClient>,
-		Arc<FilesystemLogger>,
-	> for DataPersister
-{
-	fn persist_manager(&self, channel_manager: &ChannelManager) -> Result<(), std::io::Error> {
-		FilesystemPersister::persist_manager(self.data_dir.clone(), channel_manager)
-	}
-
-	fn persist_graph(&self, network_graph: &NetworkGraph) -> Result<(), std::io::Error> {
-		if FilesystemPersister::persist_network_graph(self.data_dir.clone(), network_graph).is_err()
-		{
-			// Persistence errors here are non-fatal as we can just fetch the routing graph
-			// again later, but they may indicate a disk error which could be fatal elsewhere.
-			eprintln!("Warning: Failed to persist network graph, check your disk and permissions");
-		}
-
-		Ok(())
-	}
-}
+pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
@@ -147,6 +125,7 @@ async fn handle_ldk_events(
 	match event {
 		Event::FundingGenerationReady {
 			temporary_channel_id,
+			counterparty_node_id,
 			channel_value_satoshis,
 			output_script,
 			..
@@ -179,7 +158,11 @@ async fn handle_ldk_events(
 				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
 			// Give the funding transaction back to LDK for opening the channel.
 			if channel_manager
-				.funding_transaction_generated(&temporary_channel_id, final_tx)
+				.funding_transaction_generated(
+					&temporary_channel_id,
+					counterparty_node_id,
+					final_tx,
+				)
 				.is_err()
 			{
 				println!(
@@ -188,31 +171,39 @@ async fn handle_ldk_events(
 				io::stdout().flush().unwrap();
 			}
 		}
-		Event::PaymentReceived { payment_hash, purpose, amt, .. } => {
-			let mut payments = inbound_payments.lock().unwrap();
+		Event::PaymentReceived { payment_hash, purpose, amount_msat } => {
+			println!(
+				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
+				hex_utils::hex_str(&payment_hash.0),
+				amount_msat,
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
+			let payment_preimage = match purpose {
+				PaymentPurpose::InvoicePayment { payment_preimage, .. } => *payment_preimage,
+				PaymentPurpose::SpontaneousPayment(preimage) => Some(*preimage),
+			};
+			channel_manager.claim_funds(payment_preimage.unwrap());
+		}
+		Event::PaymentClaimed { payment_hash, purpose, amount_msat } => {
+			println!(
+				"\nEVENT: claimed payment from payment hash {} of {} millisatoshis",
+				hex_utils::hex_str(&payment_hash.0),
+				amount_msat,
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
 			let (payment_preimage, payment_secret) = match purpose {
 				PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
 					(*payment_preimage, Some(*payment_secret))
 				}
 				PaymentPurpose::SpontaneousPayment(preimage) => (Some(*preimage), None),
 			};
-			let status = match channel_manager.claim_funds(payment_preimage.unwrap()) {
-				true => {
-					println!(
-						"\nEVENT: received payment from payment hash {} of {} millisatoshis",
-						hex_utils::hex_str(&payment_hash.0),
-						amt
-					);
-					print!("> ");
-					io::stdout().flush().unwrap();
-					HTLCStatus::Succeeded
-				}
-				_ => HTLCStatus::Failed,
-			};
+			let mut payments = inbound_payments.lock().unwrap();
 			match payments.entry(*payment_hash) {
 				Entry::Occupied(mut e) => {
 					let payment = e.get_mut();
-					payment.status = status;
+					payment.status = HTLCStatus::Succeeded;
 					payment.preimage = payment_preimage;
 					payment.secret = payment_secret;
 				}
@@ -220,8 +211,8 @@ async fn handle_ldk_events(
 					e.insert(PaymentInfo {
 						preimage: payment_preimage,
 						secret: payment_secret,
-						status,
-						amt_msat: MillisatAmount(Some(*amt)),
+						status: HTLCStatus::Succeeded,
+						amt_msat: MillisatAmount(Some(*amount_msat)),
 					});
 				}
 			}
@@ -268,7 +259,18 @@ async fn handle_ldk_events(
 				payment.status = HTLCStatus::Failed;
 			}
 		}
-		Event::PaymentForwarded { fee_earned_msat, claim_from_onchain_tx } => {
+		Event::PaymentForwarded {
+			prev_channel_id,
+			next_channel_id,
+			fee_earned_msat,
+			claim_from_onchain_tx,
+		} => {
+			let from_channel_str = prev_channel_id
+				.map(|channel_id| format!(" from channel {}", log_bytes!(channel_id)))
+				.unwrap_or_default();
+			let to_channel_str = next_channel_id
+				.map(|channel_id| format!(" to channel {}", log_bytes!(channel_id)))
+				.unwrap_or_default();
 			let from_onchain_str = if *claim_from_onchain_tx {
 				"from onchain downstream claim"
 			} else {
@@ -276,11 +278,14 @@ async fn handle_ldk_events(
 			};
 			if let Some(fee_earned) = fee_earned_msat {
 				println!(
-					"\nEVENT: Forwarded payment, earning {} msat {}",
-					fee_earned, from_onchain_str
+					"\nEVENT: Forwarded payment{}{}, earning {} msat {}",
+					from_channel_str, to_channel_str, fee_earned, from_onchain_str
 				);
 			} else {
-				println!("\nEVENT: Forwarded payment, claiming onchain {}", from_onchain_str);
+				println!(
+					"\nEVENT: Forwarded payment{}{}, claiming onchain {}",
+					from_channel_str, to_channel_str, from_onchain_str
+				);
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -512,11 +517,12 @@ async fn start_ldk() {
 		chain_monitor.watch_channel(funding_outpoint, channel_monitor).unwrap();
 	}
 
-	// Step 11: Optional: Initialize the NetGraphMsgHandler
+	// Step 11: Optional: Initialize the P2PGossipSync
 	let genesis = genesis_block(args.network).header.block_hash();
 	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
-	let network_graph = Arc::new(disk::read_network(Path::new(&network_graph_path), genesis));
-	let network_gossip = Arc::new(NetGraphMsgHandler::new(
+	let network_graph =
+		Arc::new(disk::read_network(Path::new(&network_graph_path), genesis, logger.clone()));
+	let gossip_sync = Arc::new(P2PGossipSync::new(
 		Arc::clone(&network_graph),
 		None::<Arc<dyn chain::Access + Send + Sync>>,
 		logger.clone(),
@@ -528,7 +534,7 @@ async fn start_ldk() {
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
 	let lightning_msg_handler = MessageHandler {
 		chan_handler: channel_manager.clone(),
-		route_handler: network_gossip.clone(),
+		route_handler: gossip_sync.clone(),
 	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
@@ -610,25 +616,12 @@ async fn start_ldk() {
 	};
 
 	// Step 16: Initialize routing ProbabilisticScorer
-	let scorer_path = format!("{}/prob_scorer", ldk_data_dir.clone());
+	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
 	let scorer = Arc::new(Mutex::new(disk::read_scorer(
 		Path::new(&scorer_path),
 		Arc::clone(&network_graph),
+		Arc::clone(&logger),
 	)));
-	let scorer_persist = Arc::clone(&scorer);
-	tokio::spawn(async move {
-		let mut interval = tokio::time::interval(Duration::from_secs(600));
-		loop {
-			interval.tick().await;
-			if disk::persist_scorer(Path::new(&scorer_path), &scorer_persist.lock().unwrap())
-				.is_err()
-			{
-				// Persistence errors here are non-fatal as channels will be re-scored as payments
-				// fail, but they may indicate a disk error which could be fatal elsewhere.
-				eprintln!("Warning: Failed to persist scorer, check your disk and permissions");
-			}
-		}
-	});
 
 	// Step 17: Create InvoicePayer
 	let router = DefaultRouter::new(
@@ -642,11 +635,11 @@ async fn start_ldk() {
 		scorer.clone(),
 		logger.clone(),
 		event_handler,
-		payment::RetryAttempts(5),
+		payment::Retry::Attempts(5),
 	));
 
 	// Step 18: Persist ChannelManager and NetworkGraph
-	let persister = DataPersister { data_dir: ldk_data_dir.clone() };
+	let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
 
 	// Step 19: Background Processing
 	let background_processor = BackgroundProcessor::start(
@@ -654,9 +647,10 @@ async fn start_ldk() {
 		invoice_payer.clone(),
 		chain_monitor.clone(),
 		channel_manager.clone(),
-		Some(network_gossip.clone()),
+		GossipSync::P2P(gossip_sync.clone()),
 		peer_manager.clone(),
 		logger.clone(),
+		Some(scorer.clone()),
 	);
 
 	// Regularly reconnect to channel peers.
