@@ -1,7 +1,7 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, PaymentInfo,
+	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, NodeAlias, PaymentInfo,
 	PaymentInfoStorage, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -457,19 +457,6 @@ fn list_peers(peer_manager: Arc<PeerManager>) {
 	println!("\t}},");
 }
 
-/// Takes some untrusted bytes and returns a sanitized string that is safe to print
-fn sanitize_string(bytes: &[u8]) -> String {
-	let mut ret = String::with_capacity(bytes.len());
-	// We should really support some sane subset of UTF-8 here, but limiting to printable ASCII
-	// instead makes this trivial.
-	for b in bytes {
-		if *b >= 0x20 && *b <= 0x7e {
-			ret.push(*b as char);
-		}
-	}
-	ret
-}
-
 fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<NetworkGraph>) {
 	print!("[");
 	for chan_info in channel_manager.list_channels() {
@@ -490,7 +477,7 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 			.get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
 		{
 			if let Some(announcement) = &node_info.announcement_info {
-				println!("\t\tpeer_alias: {}", sanitize_string(&announcement.alias));
+				println!("\t\tpeer_alias: {}", NodeAlias(&announcement.alias));
 			}
 		}
 

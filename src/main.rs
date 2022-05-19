@@ -24,9 +24,8 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::log_bytes;
 use lightning::routing::gossip;
-use lightning::routing::gossip::P2PGossipSync;
+use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
@@ -117,10 +116,26 @@ type GossipSync<P, G, A, L> =
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
+struct NodeAlias<'a>(&'a [u8; 32]);
+
+impl fmt::Display for NodeAlias<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let alias = self
+			.0
+			.iter()
+			.map(|b| *b as char)
+			.take_while(|c| *c != '\0')
+			.filter(|c| c.is_ascii_graphic() || *c == ' ')
+			.collect::<String>();
+		write!(f, "{}", alias)
+	}
+}
+
 async fn handle_ldk_events(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
-	keys_manager: Arc<KeysManager>, inbound_payments: PaymentInfoStorage,
-	outbound_payments: PaymentInfoStorage, network: Network, event: &Event,
+	network_graph: Arc<NetworkGraph>, keys_manager: Arc<KeysManager>,
+	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage, network: Network,
+	event: &Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -265,12 +280,37 @@ async fn handle_ldk_events(
 			fee_earned_msat,
 			claim_from_onchain_tx,
 		} => {
-			let from_channel_str = prev_channel_id
-				.map(|channel_id| format!(" from channel {}", log_bytes!(channel_id)))
-				.unwrap_or_default();
-			let to_channel_str = next_channel_id
-				.map(|channel_id| format!(" to channel {}", log_bytes!(channel_id)))
-				.unwrap_or_default();
+			let read_only_network_graph = network_graph.read_only();
+			let nodes = read_only_network_graph.nodes();
+			let channels = channel_manager.list_channels();
+
+			let node_str = |channel_id: &Option<[u8; 32]>| match channel_id {
+				None => String::new(),
+				Some(channel_id) => match channels.iter().find(|c| c.channel_id == *channel_id) {
+					None => String::new(),
+					Some(channel) => {
+						match nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id)) {
+							None => " from private node".to_string(),
+							Some(node) => match &node.announcement_info {
+								None => " from unnamed node".to_string(),
+								Some(announcement) => {
+									format!(" from node {}", NodeAlias(&announcement.alias))
+								}
+							},
+						}
+					}
+				},
+			};
+			let channel_str = |channel_id: &Option<[u8; 32]>| {
+				channel_id
+					.map(|channel_id| format!(" with channel {}", hex_utils::hex_str(&channel_id)))
+					.unwrap_or_default()
+			};
+			let from_prev_str =
+				format!("{}{}", node_str(prev_channel_id), channel_str(prev_channel_id));
+			let to_next_str =
+				format!("{}{}", node_str(next_channel_id), channel_str(next_channel_id));
+
 			let from_onchain_str = if *claim_from_onchain_tx {
 				"from onchain downstream claim"
 			} else {
@@ -279,12 +319,12 @@ async fn handle_ldk_events(
 			if let Some(fee_earned) = fee_earned_msat {
 				println!(
 					"\nEVENT: Forwarded payment{}{}, earning {} msat {}",
-					from_channel_str, to_channel_str, fee_earned, from_onchain_str
+					from_prev_str, to_next_str, fee_earned, from_onchain_str
 				);
 			} else {
 				println!(
 					"\nEVENT: Forwarded payment{}{}, claiming onchain {}",
-					from_channel_str, to_channel_str, from_onchain_str
+					from_prev_str, to_next_str, from_onchain_str
 				);
 			}
 			print!("> ");
@@ -602,11 +642,13 @@ async fn start_ldk() {
 	let outbound_pmts_for_events = outbound_payments.clone();
 	let network = args.network;
 	let bitcoind_rpc = bitcoind_client.clone();
+	let network_graph_events = network_graph.clone();
 	let handle = tokio::runtime::Handle::current();
 	let event_handler = move |event: &Event| {
 		handle.block_on(handle_ldk_events(
 			channel_manager_event_listener.clone(),
 			bitcoind_rpc.clone(),
+			network_graph_events.clone(),
 			keys_manager_listener.clone(),
 			inbound_pmts_for_events.clone(),
 			outbound_pmts_for_events.clone(),
