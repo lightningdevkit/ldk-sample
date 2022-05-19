@@ -132,10 +132,10 @@ impl fmt::Display for NodeAlias<'_> {
 }
 
 async fn handle_ldk_events(
-	channel_manager: Arc<ChannelManager>, bitcoind_client: Arc<BitcoindClient>,
-	network_graph: Arc<NetworkGraph>, keys_manager: Arc<KeysManager>,
-	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage, network: Network,
-	event: &Event,
+	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
+	network_graph: &NetworkGraph, keys_manager: &KeysManager,
+	inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage,
+	network: Network, event: &Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -646,12 +646,12 @@ async fn start_ldk() {
 	let handle = tokio::runtime::Handle::current();
 	let event_handler = move |event: &Event| {
 		handle.block_on(handle_ldk_events(
-			channel_manager_event_listener.clone(),
-			bitcoind_rpc.clone(),
-			network_graph_events.clone(),
-			keys_manager_listener.clone(),
-			inbound_pmts_for_events.clone(),
-			outbound_pmts_for_events.clone(),
+			&channel_manager_event_listener,
+			&bitcoind_rpc,
+			&network_graph_events,
+			&keys_manager_listener,
+			&inbound_pmts_for_events,
+			&outbound_pmts_for_events,
 			network,
 			event,
 		));
