@@ -677,7 +677,7 @@ async fn start_ldk() {
 		scorer.clone(),
 		logger.clone(),
 		event_handler,
-		payment::Retry::Attempts(5),
+		payment::Retry::Timeout(Duration::from_secs(10)),
 	));
 
 	// Step 18: Persist ChannelManager and NetworkGraph
