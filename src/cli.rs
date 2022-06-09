@@ -1,17 +1,17 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, PaymentInfo, PaymentInfoStorage,
-	PeerManager,
+	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, NodeAlias, PaymentInfo,
+	PaymentInfoStorage, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
-use bitcoin::secp256k1::key::PublicKey;
+use bitcoin::secp256k1::PublicKey;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
-use lightning::routing::network_graph::{NetworkGraph, NodeId};
+use lightning::routing::gossip::NodeId;
 use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
 use lightning_invoice::payment::PaymentError;
@@ -281,12 +281,26 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						println!("ERROR: getinvoice provided payment amount was not a number");
 						continue;
 					}
+
+					let expiry_secs_str = words.next();
+					if expiry_secs_str.is_none() {
+						println!("ERROR: getinvoice requires an expiry in seconds");
+						continue;
+					}
+
+					let expiry_secs: Result<u32, _> = expiry_secs_str.unwrap().parse();
+					if expiry_secs.is_err() {
+						println!("ERROR: getinvoice provided expiry was not a number");
+						continue;
+					}
+
 					get_invoice(
 						amt_msat.unwrap(),
 						inbound_payments.clone(),
 						channel_manager.clone(),
 						keys_manager.clone(),
 						network,
+						expiry_secs.unwrap(),
 					);
 				}
 				"connectpeer" => {
@@ -317,7 +331,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 				"closechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
-						println!("ERROR: closechannel requires a channel ID: `closechannel <channel_id>`");
+						println!("ERROR: closechannel requires a channel ID: `closechannel <channel_id> <peer_pubkey>`");
 						continue;
 					}
 					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
@@ -327,12 +341,33 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					}
 					let mut channel_id = [0; 32];
 					channel_id.copy_from_slice(&channel_id_vec.unwrap());
-					close_channel(channel_id, channel_manager.clone());
+
+					let peer_pubkey_str = words.next();
+					if peer_pubkey_str.is_none() {
+						println!("ERROR: closechannel requires a peer pubkey: `closechannel <channel_id> <peer_pubkey>`");
+						continue;
+					}
+					let peer_pubkey_vec = match hex_utils::to_vec(peer_pubkey_str.unwrap()) {
+						Some(peer_pubkey_vec) => peer_pubkey_vec,
+						None => {
+							println!("ERROR: couldn't parse peer_pubkey");
+							continue;
+						}
+					};
+					let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
+						Ok(peer_pubkey) => peer_pubkey,
+						Err(_) => {
+							println!("ERROR: couldn't parse peer_pubkey");
+							continue;
+						}
+					};
+
+					close_channel(channel_id, peer_pubkey, channel_manager.clone());
 				}
 				"forceclosechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
-						println!("ERROR: forceclosechannel requires a channel ID: `forceclosechannel <channel_id>`");
+						println!("ERROR: forceclosechannel requires a channel ID: `forceclosechannel <channel_id> <peer_pubkey>`");
 						continue;
 					}
 					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
@@ -342,7 +377,28 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					}
 					let mut channel_id = [0; 32];
 					channel_id.copy_from_slice(&channel_id_vec.unwrap());
-					force_close_channel(channel_id, channel_manager.clone());
+
+					let peer_pubkey_str = words.next();
+					if peer_pubkey_str.is_none() {
+						println!("ERROR: forceclosechannel requires a peer pubkey: `forceclosechannel <channel_id> <peer_pubkey>`");
+						continue;
+					}
+					let peer_pubkey_vec = match hex_utils::to_vec(peer_pubkey_str.unwrap()) {
+						Some(peer_pubkey_vec) => peer_pubkey_vec,
+						None => {
+							println!("ERROR: couldn't parse peer_pubkey");
+							continue;
+						}
+					};
+					let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
+						Ok(peer_pubkey) => peer_pubkey,
+						Err(_) => {
+							println!("ERROR: couldn't parse peer_pubkey");
+							continue;
+						}
+					};
+
+					force_close_channel(channel_id, peer_pubkey, channel_manager.clone());
 				}
 				"nodeinfo" => node_info(&channel_manager, &peer_manager),
 				"listpeers" => list_peers(peer_manager.clone()),
@@ -369,13 +425,13 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 fn help() {
 	println!("openchannel pubkey@host:port <amt_satoshis>");
 	println!("sendpayment <invoice>");
-	println!("keysend <dest_pubkey> <amt_msat>");
-	println!("getinvoice <amt_millisatoshis>");
+	println!("keysend <dest_pubkey> <amt_msats>");
+	println!("getinvoice <amt_msats> <expiry_secs>");
 	println!("connectpeer pubkey@host:port");
 	println!("listchannels");
 	println!("listpayments");
-	println!("closechannel <channel_id>");
-	println!("forceclosechannel <channel_id>");
+	println!("closechannel <channel_id> <peer_pubkey>");
+	println!("forceclosechannel <channel_id> <peer_pubkey>");
 	println!("nodeinfo");
 	println!("listpeers");
 	println!("signmessage <message>");
@@ -401,19 +457,6 @@ fn list_peers(peer_manager: Arc<PeerManager>) {
 	println!("\t}},");
 }
 
-/// Takes some untrusted bytes and returns a sanitized string that is safe to print
-fn sanitize_string(bytes: &[u8]) -> String {
-	let mut ret = String::with_capacity(bytes.len());
-	// We should really support some sane subset of UTF-8 here, but limiting to printable ASCII
-	// instead makes this trivial.
-	for b in bytes {
-		if *b >= 0x20 && *b <= 0x7e {
-			ret.push(*b as char);
-		}
-	}
-	ret
-}
-
 fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<NetworkGraph>) {
 	print!("[");
 	for chan_info in channel_manager.list_channels() {
@@ -434,14 +477,14 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 			.get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
 		{
 			if let Some(announcement) = &node_info.announcement_info {
-				println!("\t\tpeer_alias: {}", sanitize_string(&announcement.alias));
+				println!("\t\tpeer_alias: {}", NodeAlias(&announcement.alias));
 			}
 		}
 
 		if let Some(id) = chan_info.short_channel_id {
 			println!("\t\tshort_channel_id: {},", id);
 		}
-		println!("\t\tis_confirmed_onchain: {},", chan_info.is_funding_locked);
+		println!("\t\tis_channel_ready: {},", chan_info.is_channel_ready);
 		println!("\t\tchannel_value_satoshis: {},", chan_info.channel_value_satoshis);
 		println!("\t\tlocal_balance_msat: {},", chan_info.balance_msat);
 		if chan_info.is_usable {
@@ -653,7 +696,7 @@ fn keysend<E: EventHandler, K: KeysInterface>(
 
 fn get_invoice(
 	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: Arc<ChannelManager>,
-	keys_manager: Arc<KeysManager>, network: Network,
+	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32,
 ) {
 	let mut payments = payment_storage.lock().unwrap();
 	let currency = match network {
@@ -668,6 +711,7 @@ fn get_invoice(
 		currency,
 		Some(amt_msat),
 		"ldk-tutorial-node".to_string(),
+		expiry_secs,
 	) {
 		Ok(inv) => {
 			println!("SUCCESS: generated invoice: {}", inv);
@@ -691,15 +735,19 @@ fn get_invoice(
 	);
 }
 
-fn close_channel(channel_id: [u8; 32], channel_manager: Arc<ChannelManager>) {
-	match channel_manager.close_channel(&channel_id) {
+fn close_channel(
+	channel_id: [u8; 32], counterparty_node_id: PublicKey, channel_manager: Arc<ChannelManager>,
+) {
+	match channel_manager.close_channel(&channel_id, &counterparty_node_id) {
 		Ok(()) => println!("EVENT: initiating channel close"),
 		Err(e) => println!("ERROR: failed to close channel: {:?}", e),
 	}
 }
 
-fn force_close_channel(channel_id: [u8; 32], channel_manager: Arc<ChannelManager>) {
-	match channel_manager.force_close_channel(&channel_id) {
+fn force_close_channel(
+	channel_id: [u8; 32], counterparty_node_id: PublicKey, channel_manager: Arc<ChannelManager>,
+) {
+	match channel_manager.force_close_channel(&channel_id, &counterparty_node_id) {
 		Ok(()) => println!("EVENT: initiating channel force-close"),
 		Err(e) => println!("ERROR: failed to force-close channel: {:?}", e),
 	}

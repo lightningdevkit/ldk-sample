@@ -1,15 +1,14 @@
-use crate::cli;
-use bitcoin::secp256k1::key::PublicKey;
+use crate::{cli, NetworkGraph};
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::BlockHash;
 use chrono::Utc;
-use lightning::routing::network_graph::NetworkGraph;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::logger::{Logger, Record};
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{ReadableArgs, Writer};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter};
+use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,40 +72,26 @@ pub(crate) fn read_channel_peer_data(
 	Ok(peer_data)
 }
 
-pub(crate) fn read_network(path: &Path, genesis_hash: BlockHash) -> NetworkGraph {
+pub(crate) fn read_network(
+	path: &Path, genesis_hash: BlockHash, logger: Arc<FilesystemLogger>,
+) -> NetworkGraph {
 	if let Ok(file) = File::open(path) {
-		if let Ok(graph) = NetworkGraph::read(&mut BufReader::new(file)) {
+		if let Ok(graph) = NetworkGraph::read(&mut BufReader::new(file), logger.clone()) {
 			return graph;
 		}
 	}
-	NetworkGraph::new(genesis_hash)
-}
-
-pub(crate) fn persist_scorer(
-	path: &Path, scorer: &ProbabilisticScorer<Arc<NetworkGraph>>,
-) -> std::io::Result<()> {
-	let mut tmp_path = path.to_path_buf().into_os_string();
-	tmp_path.push(".tmp");
-	let file = fs::OpenOptions::new().write(true).create(true).open(&tmp_path)?;
-	let write_res = scorer.write(&mut BufWriter::new(file));
-	if let Err(e) = write_res.and_then(|_| fs::rename(&tmp_path, path)) {
-		let _ = fs::remove_file(&tmp_path);
-		Err(e)
-	} else {
-		Ok(())
-	}
+	NetworkGraph::new(genesis_hash, logger)
 }
 
 pub(crate) fn read_scorer(
-	path: &Path, graph: Arc<NetworkGraph>,
-) -> ProbabilisticScorer<Arc<NetworkGraph>> {
+	path: &Path, graph: Arc<NetworkGraph>, logger: Arc<FilesystemLogger>,
+) -> ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>> {
 	let params = ProbabilisticScoringParameters::default();
 	if let Ok(file) = File::open(path) {
-		if let Ok(scorer) =
-			ProbabilisticScorer::read(&mut BufReader::new(file), (params, Arc::clone(&graph)))
-		{
+		let args = (params, Arc::clone(&graph), Arc::clone(&logger));
+		if let Ok(scorer) = ProbabilisticScorer::read(&mut BufReader::new(file), args) {
 			return scorer;
 		}
 	}
-	ProbabilisticScorer::new(params, graph)
+	ProbabilisticScorer::new(params, graph, logger)
 }

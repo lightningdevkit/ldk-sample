@@ -22,9 +22,9 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bitcoin"
-version = "0.27.1"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a41df6ad9642c5c15ae312dd3d074de38fd3eb7cc87ad4ce10f90292a83fe4d"
+checksum = "05bba324e6baf655b882df672453dbbc527bc938cadd27750ae510aaccc3a66a"
 dependencies = [
  "bech32",
  "bitcoin_hashes",
@@ -216,6 +216,7 @@ dependencies = [
  "lightning-invoice",
  "lightning-net-tokio",
  "lightning-persister",
+ "lightning-rapid-gossip-sync",
  "rand",
  "serde_json",
  "tokio",
@@ -229,33 +230,33 @@ checksum = "1bf2e165bb3457c8e098ea76f3e3bc9db55f87aa90d52d0e6be741470916aaa4"
 
 [[package]]
 name = "lightning"
-version = "0.0.106"
+version = "0.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "580647f97f8e6d138ad724027c8ca9b890b1001b05374c270bbee4c10309b641"
+checksum = "c9d26c0da268a793c9c9a37365c4f6c496bfdbcbe8e17f74f226ce04cca3d721"
 dependencies = [
  "bitcoin",
- "secp256k1",
 ]
 
 [[package]]
 name = "lightning-background-processor"
-version = "0.0.106"
+version = "0.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a9c8c4c6e4b9652287d8ce2fc3a168861fdb40eb68793567be5ed77ecce6eb"
+checksum = "d7ab2cb885578117635c9389dbc30ab74c4532e2dddc530215bc7aae5fb6d5f6"
 dependencies = [
  "bitcoin",
  "lightning",
- "lightning-persister",
+ "lightning-rapid-gossip-sync",
 ]
 
 [[package]]
 name = "lightning-block-sync"
-version = "0.0.106"
+version = "0.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8731c4f20bd4e0d588db6e849ac2114674a112cdfda65354cf9b4cf6018878a"
+checksum = "a90da35aa25b605224c7b99d4d2232183545253570d1edce5ddf007ef4cdb485"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
+ "futures",
  "lightning",
  "serde",
  "serde_json",
@@ -263,9 +264,9 @@ dependencies = [
 
 [[package]]
 name = "lightning-invoice"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f069b6eb46d7639d07977d14dc7d9a40d9d8bc5ac2b47f1924318fec13edd5c0"
+checksum = "40813315a166d0bc053c396b6d2d99b26adcb6db937e073755ca13460eb71630"
 dependencies = [
  "bech32",
  "bitcoin_hashes",
@@ -276,9 +277,9 @@ dependencies = [
 
 [[package]]
 name = "lightning-net-tokio"
-version = "0.0.106"
+version = "0.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85119f898ac097d46c17a0ad7dda0f6ef6b923e5bcb4d1a5e39d33c3c68aa7bc"
+checksum = "3e1007cef0f7121a2ca68bcf6aadaab4618e2e63570e84dbcb26e17902c1f943"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -287,14 +288,24 @@ dependencies = [
 
 [[package]]
 name = "lightning-persister"
-version = "0.0.106"
+version = "0.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f8aac01a61b302f3928adf235660c38aa5c246113fc7d19cc4cb60b5f53b7ae"
+checksum = "513d513afce4c720423828ccac550ca12d00432368b4e5d751790257eb72c078"
 dependencies = [
  "bitcoin",
  "libc",
  "lightning",
  "winapi",
+]
+
+[[package]]
+name = "lightning-rapid-gossip-sync"
+version = "0.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f80f7131856f0ae61c22665edf953b11890c53a10e83f6d8f2dc01a5026be3d4"
+dependencies = [
+ "bitcoin",
+ "lightning",
 ]
 
 [[package]]
@@ -447,18 +458,18 @@ checksum = "73b4b750c782965c211b42f022f59af1fbceabdd026623714f104152f1ec149f"
 
 [[package]]
 name = "secp256k1"
-version = "0.20.3"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97d03ceae636d0fed5bae6a7f4f664354c5f4fcedf6eef053fef17e49f837d0a"
+checksum = "26947345339603ae8395f68e2f3d85a6b0a8ddfe6315818e80b8504415099db0"
 dependencies = [
  "secp256k1-sys",
 ]
 
 [[package]]
 name = "secp256k1-sys"
-version = "0.4.2"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "957da2573cde917463ece3570eab4a0b3f19de6f1646cde62e6fd3868f566036"
+checksum = "152e20a0fd0519390fc43ab404663af8a0b794273d2a91d60ad4a39f13ffe110"
 dependencies = [
  "cc",
 ]
