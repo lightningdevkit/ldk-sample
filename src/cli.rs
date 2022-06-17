@@ -161,6 +161,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 		if let Some(word) = words.next() {
 			match word {
 				"help" => help(),
+				"exit" => exit(),
 				"openchannel" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
@@ -379,6 +380,7 @@ fn help() {
 	println!("nodeinfo");
 	println!("listpeers");
 	println!("signmessage <message>");
+	println!("exit");
 }
 
 fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
@@ -735,4 +737,9 @@ pub(crate) fn parse_peer_info(
 	}
 
 	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
+}
+
+fn exit()
+{
+	std::process::exit(0);
 }
