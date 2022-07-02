@@ -741,5 +741,6 @@ pub(crate) fn parse_peer_info(
 
 fn exit()
 {
+	println!("Exiting LDK-Sample Node");
 	std::process::exit(0);
 }
