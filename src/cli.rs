@@ -1,7 +1,7 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, NodeAlias, PaymentInfo,
+	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, PaymentInfo,
 	PaymentInfoStorage, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -12,7 +12,7 @@ use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeId;
-use lightning::util::config::{ChannelConfig, ChannelHandshakeLimits, UserConfig};
+use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
 use lightning_invoice::payment::PaymentError;
 use lightning_invoice::{utils, Currency, Invoice};
@@ -477,7 +477,7 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 			.get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
 		{
 			if let Some(announcement) = &node_info.announcement_info {
-				println!("\t\tpeer_alias: {}", NodeAlias(&announcement.alias));
+				println!("\t\tpeer_alias: {}", announcement.alias);
 			}
 		}
 
@@ -585,12 +585,15 @@ fn open_channel(
 	channel_manager: Arc<ChannelManager>,
 ) -> Result<(), ()> {
 	let config = UserConfig {
-		peer_channel_config_limits: ChannelHandshakeLimits {
+		channel_handshake_limits: ChannelHandshakeLimits {
 			// lnd's max to_self_delay is 2016, so we want to be compatible.
 			their_to_self_delay: 2016,
 			..Default::default()
 		},
-		channel_options: ChannelConfig { announced_channel, ..Default::default() },
+		channel_handshake_config: ChannelHandshakeConfig {
+			announced_channel,
+			..Default::default()
+		},
 		..Default::default()
 	};
 
@@ -747,7 +750,7 @@ fn close_channel(
 fn force_close_channel(
 	channel_id: [u8; 32], counterparty_node_id: PublicKey, channel_manager: Arc<ChannelManager>,
 ) {
-	match channel_manager.force_close_channel(&channel_id, &counterparty_node_id) {
+	match channel_manager.force_close_broadcasting_latest_txn(&channel_id, &counterparty_node_id) {
 		Ok(()) => println!("EVENT: initiating channel force-close"),
 		Err(e) => println!("ERROR: failed to force-close channel: {:?}", e),
 	}

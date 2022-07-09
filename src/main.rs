@@ -116,21 +116,6 @@ type GossipSync<P, G, A, L> =
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-struct NodeAlias<'a>(&'a [u8; 32]);
-
-impl fmt::Display for NodeAlias<'_> {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		let alias = self
-			.0
-			.iter()
-			.map(|b| *b as char)
-			.take_while(|c| *c != '\0')
-			.filter(|c| c.is_ascii_graphic() || *c == ' ')
-			.collect::<String>();
-		write!(f, "{}", alias)
-	}
-}
-
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
@@ -294,7 +279,7 @@ async fn handle_ldk_events(
 							Some(node) => match &node.announcement_info {
 								None => " from unnamed node".to_string(),
 								Some(announcement) => {
-									format!(" from node {}", NodeAlias(&announcement.alias))
+									format!(" from node {}", announcement.alias)
 								}
 							},
 						}
@@ -474,7 +459,7 @@ async fn start_ldk() {
 
 	// Step 8: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
-	user_config.peer_channel_config_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
