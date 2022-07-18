@@ -275,11 +275,11 @@ async fn handle_ldk_events(
 					None => String::new(),
 					Some(channel) => {
 						match nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id)) {
-							None => " from private node".to_string(),
+							None => "private node".to_string(),
 							Some(node) => match &node.announcement_info {
-								None => " from unnamed node".to_string(),
+								None => "unnamed node".to_string(),
 								Some(announcement) => {
-									format!(" from node {}", announcement.alias)
+									format!("node {}", announcement.alias)
 								}
 							},
 						}
@@ -292,9 +292,9 @@ async fn handle_ldk_events(
 					.unwrap_or_default()
 			};
 			let from_prev_str =
-				format!("{}{}", node_str(prev_channel_id), channel_str(prev_channel_id));
+				format!(" from {}{}", node_str(prev_channel_id), channel_str(prev_channel_id));
 			let to_next_str =
-				format!("{}{}", node_str(next_channel_id), channel_str(next_channel_id));
+				format!(" to {}{}", node_str(next_channel_id), channel_str(next_channel_id));
 
 			let from_onchain_str = if *claim_from_onchain_tx {
 				"from onchain downstream claim"
