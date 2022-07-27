@@ -30,7 +30,7 @@ use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
-use lightning_background_processor::BackgroundProcessor;
+use lightning_background_processor::{BackgroundProcessor, GossipSync};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
@@ -39,7 +39,6 @@ use lightning_invoice::payment;
 use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
-use lightning_rapid_gossip_sync::RapidGossipSync;
 use rand::{thread_rng, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -110,9 +109,6 @@ pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 >;
 
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
-
-type GossipSync<P, G, A, L> =
-	lightning_background_processor::GossipSync<P, Arc<RapidGossipSync<G, L>>, G, A, L>;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
@@ -245,6 +241,8 @@ async fn handle_ldk_events(
 		}
 		Event::PaymentPathSuccessful { .. } => {}
 		Event::PaymentPathFailed { .. } => {}
+		Event::ProbeSuccessful { .. } => {}
+		Event::ProbeFailed { .. } => {}
 		Event::PaymentFailed { payment_hash, .. } => {
 			print!(
 				"\nEVENT: Failed to send payment to payment hash {:?}: exhausted payment retry attempts",
@@ -315,6 +313,7 @@ async fn handle_ldk_events(
 			print!("> ");
 			io::stdout().flush().unwrap();
 		}
+		Event::HTLCHandlingFailed { .. } => {}
 		Event::PendingHTLCsForwardable { time_forwardable } => {
 			let forwarding_channel_manager = channel_manager.clone();
 			let min = time_forwardable.as_millis() as u64;
@@ -674,7 +673,7 @@ async fn start_ldk() {
 		invoice_payer.clone(),
 		chain_monitor.clone(),
 		channel_manager.clone(),
-		GossipSync::P2P(gossip_sync.clone()),
+		GossipSync::p2p(gossip_sync.clone()),
 		peer_manager.clone(),
 		logger.clone(),
 		Some(scorer.clone()),
