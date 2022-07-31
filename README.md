@@ -9,7 +9,7 @@ git clone https://github.com/lightningdevkit/ldk-sample
 ## Usage
 ```
 cd ldk-sample
-cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> <ldk_storage_directory_path> [<ldk-peer-listening-port>] [bitcoin-network] [announced-listen-addr announced-node-name]
+cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> <ldk_storage_directory_path> [<ldk-peer-listening-port>] [<bitcoin-network>] [<announced-node-name>] [<announced-listen-addr>]
 ```
 `bitcoind`'s RPC username and password likely can be found through `cat ~/.bitcoin/.cookie`.
 
