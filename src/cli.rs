@@ -2,7 +2,7 @@ use crate::disk;
 use crate::hex_utils;
 use crate::{
 	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, NodeAlias, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	PaymentInfoStorage, PeerManager, MyKeysManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -141,7 +141,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
-	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
+	channel_manager: Arc<ChannelManager>, keys_manager: Arc<MyKeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: PaymentInfoStorage,
 	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
 ) {
@@ -161,7 +161,43 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 		if let Some(word) = words.next() {
 			match word {
 				"help" => help(),
-				"exit" => exit(),
+				"exit" => exit(),				
+				"openchannel_test" => {
+					let peer_pubkey = words.next();
+					let channel_value_sat = words.next();
+					if peer_pubkey.is_none() || channel_value_sat.is_none() {
+						println!("ERROR: openchannel_test has 2 required arguments: `openchannel_test pubkey channel_amt_satoshis` [--public]");
+						continue;
+					}
+					let peer_pubkey = peer_pubkey.unwrap();
+					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
+					if chan_amt_sat.is_err() {
+						println!("ERROR: channel amount must be a number");
+						continue;
+					}
+
+					let announce_channel = match words.next() {
+						Some("--public") | Some("--public=true") => true,
+						Some("--public=false") => false,
+						Some(_) => {
+							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
+							continue;
+						}
+						None => false,
+					};
+					let pubkey = peer_pubkey;
+					let pubkey = hex_utils::to_compressed_pubkey(pubkey);
+					if open_channel(
+						pubkey.unwrap(),
+						chan_amt_sat.unwrap(),
+						announce_channel,
+						channel_manager.clone(),
+					)
+					.is_ok()
+					{
+						//fix
+					}
+				},
 				"openchannel" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
@@ -425,6 +461,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 
 fn help() {
 	println!("openchannel pubkey@host:port <amt_satoshis>");
+	println!("openchannel_test pubkey <amt_satoshis>");
 	println!("sendpayment <invoice>");
 	println!("keysend <dest_pubkey> <amt_msats>");
 	println!("getinvoice <amt_msats> <expiry_secs>");
@@ -698,7 +735,7 @@ fn keysend<E: EventHandler, K: KeysInterface>(
 
 fn get_invoice(
 	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: Arc<ChannelManager>,
-	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32,
+	keys_manager: Arc<MyKeysManager>, network: Network, expiry_secs: u32,
 ) {
 	let mut payments = payment_storage.lock().unwrap();
 	let currency = match network {
