@@ -762,7 +762,7 @@ pub(crate) fn parse_peer_info(
 	let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split("@");
 	let pubkey = pubkey_and_addr.next();
 	let peer_addr_str = pubkey_and_addr.next();
-	if peer_addr_str.is_none() || peer_addr_str.is_none() {
+	if peer_addr_str.is_none() {
 		return Err(std::io::Error::new(
 			std::io::ErrorKind::Other,
 			"ERROR: incorrectly formatted peer info. Should be formatted as: `pubkey@host:port`",
