@@ -24,6 +24,7 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::onion_message::SimpleArcOnionMessenger;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::scoring::ProbabilisticScorer;
@@ -111,6 +112,8 @@ pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
+
+type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
@@ -554,18 +557,23 @@ async fn start_ldk() {
 
 	// Step 12: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
+	let onion_messenger: Arc<OnionMessenger> =
+		Arc::new(OnionMessenger::new(keys_manager.clone(), logger.clone()));
 	let mut ephemeral_bytes = [0; 32];
+	let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
 	let lightning_msg_handler = MessageHandler {
 		chan_handler: channel_manager.clone(),
 		route_handler: gossip_sync.clone(),
+		onion_message_handler: onion_messenger.clone(),
 	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		keys_manager.get_node_secret(Recipient::Node).unwrap(),
+		current_time,
 		&ephemeral_bytes,
 		logger.clone(),
-		Arc::new(IgnoringMessageHandler {}),
+		IgnoringMessageHandler {},
 	));
 
 	// ## Running LDK
@@ -721,14 +729,14 @@ async fn start_ldk() {
 	// some public channels, and is only useful if we have public listen address(es) to announce.
 	// In a production environment, this should occur only after the announcement of new channels
 	// to avoid churn in the global network graph.
-	let chan_manager = Arc::clone(&channel_manager);
+	let peer_man = Arc::clone(&peer_manager);
 	let network = args.network;
 	if !args.ldk_announced_listen_addr.is_empty() {
 		tokio::spawn(async move {
 			let mut interval = tokio::time::interval(Duration::from_secs(60));
 			loop {
 				interval.tick().await;
-				chan_manager.broadcast_node_announcement(
+				peer_man.broadcast_node_announcement(
 					[0; 3],
 					args.ldk_announced_node_name,
 					args.ldk_announced_listen_addr.clone(),
@@ -744,6 +752,7 @@ async fn start_ldk() {
 		Arc::clone(&channel_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&network_graph),
+		Arc::clone(&onion_messenger),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
