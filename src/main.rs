@@ -509,8 +509,10 @@ async fn start_ldk() {
 	let mut cache = UnboundedCache::new();
 	let mut chain_tip: Option<poll::ValidatedBlockHeader> = None;
 	if restarting_node {
-		let mut chain_listeners =
-			vec![(channel_manager_blockhash, &channel_manager as &dyn chain::Listen)];
+		let mut chain_listeners = vec![(
+			channel_manager_blockhash,
+			&channel_manager as &(dyn chain::Listen + Send + Sync),
+		)];
 
 		for (blockhash, channel_monitor) in channelmonitors.drain(..) {
 			let outpoint = channel_monitor.get_funding_txo().0;
@@ -522,8 +524,10 @@ async fn start_ldk() {
 		}
 
 		for monitor_listener_info in chain_listener_channel_monitors.iter_mut() {
-			chain_listeners
-				.push((monitor_listener_info.0, &monitor_listener_info.1 as &dyn chain::Listen));
+			chain_listeners.push((
+				monitor_listener_info.0,
+				&monitor_listener_info.1 as &(dyn chain::Listen + Send + Sync),
+			));
 		}
 		chain_tip = Some(
 			init::synchronize_listeners(
