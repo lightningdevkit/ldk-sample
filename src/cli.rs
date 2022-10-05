@@ -19,7 +19,7 @@ use lightning_invoice::payment::PaymentError;
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
@@ -150,15 +150,14 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	println!("LDK startup successful. To view available commands: \"help\".");
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
-	let stdin = io::stdin();
-	let mut line_reader = stdin.lock().lines();
 	loop {
 		print!("> ");
 		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
-		let line = match line_reader.next() {
-			Some(l) => l.unwrap(),
-			None => break,
-		};
+		let mut line = String::new();
+		if let Err(e) = io::stdin().read_line(&mut line) {
+			break println!("ERROR: {e:#}");
+		}
+
 		let mut words = line.split_whitespace();
 		if let Some(word) = words.next() {
 			match word {
