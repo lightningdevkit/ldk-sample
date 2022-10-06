@@ -466,19 +466,19 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 }
 
 fn help() {
-	println!("openchannel pubkey@host:port <amt_satoshis> [--public]");
-	println!("sendpayment <invoice>");
-	println!("keysend <dest_pubkey> <amt_msats>");
-	println!("getinvoice <amt_msats> <expiry_secs>");
+	println!("closechannel <channel_id> <peer_pubkey>");
 	println!("connectpeer pubkey@host:port");
+	println!("forceclosechannel <channel_id> <peer_pubkey>");
+	println!("getinvoice <amt_msats> <expiry_secs>");
+	println!("keysend <dest_pubkey> <amt_msats>");
 	println!("listchannels");
 	println!("listpayments");
-	println!("closechannel <channel_id> <peer_pubkey>");
-	println!("forceclosechannel <channel_id> <peer_pubkey>");
-	println!("nodeinfo");
 	println!("listpeers");
-	println!("signmessage <message>");
+	println!("nodeinfo");
+	println!("openchannel pubkey@host:port <amt_satoshis> [--public]");
 	println!("sendonionmessage <node_id_1,node_id_2,..,destination_node_id>");
+	println!("sendpayment <invoice>");
+	println!("signmessage <message>");
 }
 
 fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
