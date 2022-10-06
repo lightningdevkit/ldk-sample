@@ -466,19 +466,32 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 }
 
 fn help() {
-	println!("openchannel pubkey@host:port <amt_satoshis> [--public]");
-	println!("sendpayment <invoice>");
-	println!("keysend <dest_pubkey> <amt_msats>");
-	println!("getinvoice <amt_msats> <expiry_secs>");
-	println!("connectpeer pubkey@host:port");
-	println!("listchannels");
-	println!("listpayments");
-	println!("closechannel <channel_id> <peer_pubkey>");
-	println!("forceclosechannel <channel_id> <peer_pubkey>");
-	println!("nodeinfo");
-	println!("listpeers");
-	println!("signmessage <message>");
-	println!("sendonionmessage <node_id_1,node_id_2,..,destination_node_id>");
+	let package_version = env!("CARGO_PKG_VERSION");
+	let package_name = env!("CARGO_PKG_NAME");
+	println!("\nVERSION:");
+	println!("  {} v{}", package_name, package_version);
+	println!("\nUSAGE:");
+	println!("  Command [arguments]");
+	println!("\nCOMMANDS:");
+	println!("  help\tShows a list of commands.");
+	println!("\n  Channels:");
+	println!("      openchannel pubkey@host:port <amt_satoshis> [--public]");
+	println!("      closechannel <channel_id> <peer_pubkey>");
+	println!("      forceclosechannel <channel_id> <peer_pubkey>");
+	println!("      listchannels");
+	println!("\n  Peers:");
+	println!("      connectpeer pubkey@host:port");
+	println!("      listpeers");
+	println!("\n  Payments:");
+	println!("      sendpayment <invoice>");
+	println!("      keysend <dest_pubkey> <amt_msats>");
+	println!("      listpayments");
+	println!("\n  Invoices:");
+	println!("      getinvoice <amt_msats> <expiry_secs>");
+	println!("\n  Other:");
+	println!("      signmessage <message>");
+	println!("      sendonionmessage <node_id_1,node_id_2,..,destination_node_id>");
+	println!("      nodeinfo");
 }
 
 fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
