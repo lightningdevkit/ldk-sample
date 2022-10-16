@@ -21,6 +21,7 @@ bitcoin = "0.29.0"
 bitcoin-bech32 = "0.12"
 bech32 = "0.8"
 hex = "0.3"
+libc = "0.2"
 
 futures = "0.3"
 chrono = "0.4"
