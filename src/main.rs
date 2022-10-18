@@ -48,7 +48,6 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
-use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -531,7 +530,7 @@ async fn start_ldk() {
 		}
 		chain_tip = Some(
 			init::synchronize_listeners(
-				&mut bitcoind_client.deref(),
+				bitcoind_client.as_ref(),
 				args.network,
 				&mut cache,
 				chain_listeners,
@@ -609,16 +608,14 @@ async fn start_ldk() {
 
 	// Step 14: Connect and Disconnect Blocks
 	if chain_tip.is_none() {
-		chain_tip =
-			Some(init::validate_best_block_header(&mut bitcoind_client.deref()).await.unwrap());
+		chain_tip = Some(init::validate_best_block_header(bitcoind_client.as_ref()).await.unwrap());
 	}
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
 	let network = args.network;
 	tokio::spawn(async move {
-		let mut derefed = bitcoind_block_source.deref();
-		let chain_poller = poll::ChainPoller::new(&mut derefed, network);
+		let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
 		let chain_listener = (chain_monitor_listener, channel_manager_listener);
 		let mut spv_client =
 			SpvClient::new(chain_tip.unwrap(), chain_poller, &mut cache, &chain_listener);
