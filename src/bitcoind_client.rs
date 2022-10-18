@@ -33,7 +33,7 @@ pub enum Target {
 	HighPriority,
 }
 
-impl BlockSource for &BitcoindClient {
+impl BlockSource for BitcoindClient {
 	fn get_header<'a>(
 		&'a self, header_hash: &'a BlockHash, height_hint: Option<u32>,
 	) -> AsyncBlockSourceResult<'a, BlockHeaderData> {
