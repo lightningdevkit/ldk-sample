@@ -1,6 +1,6 @@
 use crate::walletcore_iface::*;
 
-pub fn test_wallet() {
+pub fn test_wallet_core() {
 	println!("=== Calling wallet-core from Rust");
 
     let mnemonic = "confirm bleak useless tail chalk destroy horn step bulb genuine attract split";

@@ -1,0 +1,2 @@
+TESTNET=true
+LDK_DATA_DIR=./ldk-data
