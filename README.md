@@ -11,14 +11,18 @@ Sample node implementation using LDK.
 static WALLET_CORE_PROJECT_DIR: &str = "../../../wallet-core"
 ```
 
+### For running
+
+- Settings are stored in `.env`, see `env_sample`
+- Wallet private key is stored in `.pk_secret`, can be imported using `importwallet` option
+- LDK state is stored in LDK data dir (as in original sample app)
+
 ### TODO
 
-- Store wallet pk
-- importwallet option, take mnemonic, derive pk, save it
-- Generate wallet address from pk
-- Check with Btc node that wallet address is loaded
+- Check with Btc node that wallet address is loaded (listunspent or getaddressinfo/ismine)
+- Testnet/derivation support in AnyAddress (walletcore)
 - Move wallet-core proj dir from build.rs to env
-- check in rust interfacing Rust module in wallet core, use it from there
+- checkin rust interfacing Rust module in wallet core, use it from there
 
 
 

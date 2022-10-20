@@ -21,6 +21,7 @@ extern "C" {
     fn TWDataBytes(data: *const u8) -> *const u8;
 
     fn TWPrivateKeyData(private_key: *const u8) -> *const u8;
+    fn TWPrivateKeyCreateWithData(data: *const u8) -> *const u8;
     fn TWPrivateKeyGetPublicKeySecp256k1(private_key: *const u8, compressed: bool) -> *const u8;
 
     fn TWPublicKeyData(private_key: *const u8) -> *const u8;
@@ -28,6 +29,9 @@ extern "C" {
     fn TWHDWalletCreateWithMnemonic(mnemonic: *const u8, passphrase: *const u8) -> *const u8;
     fn TWHDWalletGetAddressForCoin(wallet: *const u8, coin: u32) -> *const u8;
     fn TWHDWalletGetKeyForCoin(wallet: *const u8, coin: u32) -> *const u8;
+
+    fn TWAnyAddressCreateWithPublicKey(public_key: *const u8, coin: u8) -> *const u8;
+    fn TWAnyAddressDescription(address: *const u8) -> *const u8;
 
     fn TWAnySignerSign(input: *const u8, coin: u32) -> *const u8;
 
@@ -114,6 +118,11 @@ pub fn private_key_data(private_key: &PrivateKey) -> TWData {
     TWData { wrapped: ptr }
 }
 
+pub fn private_key_create_with_data(data: &TWData) -> PrivateKey {
+    let ptr = unsafe { TWPrivateKeyCreateWithData(data.wrapped) };
+    PrivateKey { wrapped: ptr }
+}
+
 pub fn private_key_get_public_key_secp256k1(private_key: &PrivateKey, compressed: bool) -> PublicKey {
     let ptr = unsafe { TWPrivateKeyGetPublicKeySecp256k1(private_key.wrapped, compressed) };
     PublicKey { wrapped: ptr }
@@ -148,6 +157,21 @@ pub fn hd_wallet_get_address_for_coin(wallet: &HDWallet, coin: u32) -> TWString 
 pub fn hd_wallet_get_key_for_coin(wallet: &HDWallet, coin: u32) -> PrivateKey {
     let ptr = unsafe { TWHDWalletGetKeyForCoin(wallet.wrapped, coin) };
     PrivateKey { wrapped: ptr }
+}
+
+pub struct AnyAddress {
+    wrapped: *const u8
+    // TODO delete when destructing
+}
+
+pub fn any_address_create_with_public_key(public_key: &PublicKey, coin: u8) -> AnyAddress {
+    let ptr = unsafe { TWAnyAddressCreateWithPublicKey(public_key.wrapped, coin) };
+    return AnyAddress { wrapped: ptr };
+}
+
+pub fn any_address_description(address: &AnyAddress) -> TWString {
+    let ptr = unsafe { TWAnyAddressDescription(address.wrapped) };
+    return TWString { wrapped: ptr };
 }
 
 pub fn any_signer_sign(input: &TWData, coin: u32) -> TWData {

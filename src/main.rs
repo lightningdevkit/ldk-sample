@@ -368,7 +368,23 @@ async fn start_ldk() {
 	let env = env_init();
 	env.print();
 
-	test_wallet_core();
+	if cli::handle_import_wallet() {
+		println!("Bye");
+		return;
+	}
+
+	// read pk
+	match private_key() {
+		None => {
+			println!("Private key not found, try using 'importwallet' option");
+			return;
+		},
+		Some(private_key) => {
+			let address = derive_address_from_pk(&private_key);
+			println!("Wallet address: {}", address);
+		}
+	};
+
 
 	let args = match cli::parse_startup_args() {
 		Ok(user_args) => user_args,

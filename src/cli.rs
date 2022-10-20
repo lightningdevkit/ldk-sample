@@ -26,6 +26,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::walletcore::*;
+use crate::env::*;
+
 pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_username: String,
 	pub(crate) bitcoind_rpc_password: String,
@@ -36,6 +39,56 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_listen_addr: Vec<NetAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
+}
+
+// Handle importwallet option. Return true if this otion was detected (regardless of the outcome)
+pub(crate) fn handle_import_wallet() -> bool {
+	let mut is_import = false;
+	if env::args().len() < 2 {
+		return is_import;
+	}
+	if env::args().skip(1).next().unwrap() != "importwallet" {
+		return is_import;
+	}
+	is_import = true;
+
+	// ask for mnemonic interactively
+	print!("Enter mnemonic (12-24 words): ");
+	io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
+	let stdin = io::stdin();
+	let mut line_reader = stdin.lock().lines();
+	let mnemonic = match line_reader.next() {
+		Some(l) => l.unwrap(),
+		None => return is_import,
+	};
+	
+	if !is_mnemonic_valid(mnemonic.as_str()) {
+		println!("Mnemonic is invalid! {}", mnemonic);
+		return is_import;
+	}
+	println!("Mnemonic is valid");
+	let priv_key = match priv_key_from_mnemonic(mnemonic.as_str()) {
+		None => {
+			println!("Could not derive private key");
+			return is_import
+		},
+		Some(pk) => pk
+	};
+	println!("Private key derived ({} bytes)", priv_key.len());
+	if !set_private_key(&priv_key) {
+		println!("Could not save private key");
+		return is_import
+	}
+	// check back
+	match private_key() {
+		None => {
+			println!("Could not read back saved private key");
+			return is_import
+		},
+		Some(_priv_key_read_back) => println!("Private key saved"),
+	}
+
+	return is_import
 }
 
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
