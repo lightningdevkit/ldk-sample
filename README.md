@@ -1,6 +1,30 @@
 # ldk-sample
 Sample node implementation using LDK.
 
+## Trust Wallet Specific
+
+### For building
+
+- Add wallet-core project folder with built binaries to `src/build.rs`
+
+```
+static WALLET_CORE_PROJECT_DIR: &str = "../../../wallet-core"
+```
+
+### TODO
+
+- Store wallet pk
+- importwallet option, take mnemonic, derive pk, save it
+- Generate wallet address from pk
+- Check with Btc node that wallet address is loaded
+- Move wallet-core proj dir from build.rs to env
+- check in rust interfacing Rust module in wallet core, use it from there
+
+
+
+
+
+
 ## Installation
 ```
 git clone https://github.com/lightningdevkit/ldk-sample
