@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Valentine Wallace <vwallace@protonmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2018"
+build = "src/build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,13 +21,22 @@ base64 = "0.13.0"
 bitcoin = "0.28.1"
 bitcoin-bech32 = "0.12"
 bech32 = "0.8"
-hex = "0.3"
+hex = "0.4.3"
 
 futures = "0.3"
 chrono = "0.4"
 rand = "0.4"
 serde_json = { version = "1.0" }
 tokio = { version = "1", features = [ "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
+
+libc = "0.2.135"
+protobuf = "3.2.0"
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+pkg-config = "0.3"
+protobuf = "3.2.0"
+protobuf-codegen = "3.2.0"
 
 [profile.release]
 panic = "abort"

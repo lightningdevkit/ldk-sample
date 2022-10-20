@@ -1,4 +1,9 @@
 pub mod bitcoind_client;
+
+// [walletcore]
+pub mod walletcore_iface;
+pub mod walletcore;
+
 mod cli;
 mod convert;
 mod disk;
@@ -52,6 +57,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+use crate::walletcore::*;
 
 pub(crate) enum HTLCStatus {
 	Pending,
@@ -356,6 +363,8 @@ async fn handle_ldk_events(
 }
 
 async fn start_ldk() {
+	test_wallet();
+
 	let args = match cli::parse_startup_args() {
 		Ok(user_args) => user_args,
 		Err(()) => return,
