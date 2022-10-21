@@ -174,8 +174,8 @@ impl BitcoindClient {
 			.unwrap()
 	}
 
-	pub async fn list_unspent(&self, min_confirm: u32, address: String) {
-		self.bitcoind_rpc_client
+	pub async fn list_unspent(&self, min_confirm: u32, address: &str) -> Unspents {
+		let res = self.bitcoind_rpc_client
 			.call_method::<Unspents>(
 				"listunspent",
 				&vec![
@@ -186,6 +186,7 @@ impl BitcoindClient {
 			)
 			.await
 			.unwrap();
+		res
 	}
 
 	pub async fn fund_raw_transaction(&self, raw_tx: RawTx) -> FundedTx {

@@ -2,7 +2,7 @@ pub mod bitcoind_client;
 
 // [walletcore]
 pub mod walletcore_iface;
-pub mod walletcore;
+pub mod wallet;
 pub mod env;
 
 mod cli;
@@ -59,8 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use crate::walletcore::*;
-//use crate::env;
+use crate::wallet::*;
 
 pub(crate) enum HTLCStatus {
 	Pending,
@@ -373,23 +372,16 @@ async fn start_ldk() {
 		return;
 	}
 
-	let mut wallet_address: String;
 	// read pk
-	match env::private_key() {
+	let private_key = match env::private_key() {
 		None => {
 			println!("Private key not found, try using 'importwallet' option");
 			return;
 		},
-		Some(private_key) => {
-			wallet_address = derive_address_from_pk(&private_key);
-			//////////////
-			if env::network() == "testnet" {
-				wallet_address = "tb1qwj4ezzdhcnk687utkhns8xens5832f8sthluw5".to_string(); //"tb1qp265zr4w7c9s3nmd0mv3x357f6y8mdphn9qw92".to_string();
-			}
-			//////////////
-			println!("Wallet address: {}", wallet_address);
-		}
+		Some(private_key) => private_key,
 	};
+	let mut wallet: Wallet = Wallet::derive_address_from_pk(&private_key);
+	println!("Wallet address: {}", wallet.address);
 
 
 
@@ -439,7 +431,12 @@ async fn start_ldk() {
 
 
 
-	bitcoind_client.list_unspent(0, wallet_address).await;
+	wallet.retrieve_and_store_unspent(&bitcoind_client).await;
+	println!("Balance:  {}   utxos: {}", wallet.balance, wallet.utxos.utxos.len());
+	if wallet.balance <= 0.0 {
+		println!("Wallet balance is 0!");
+		return;
+	}
 
 	
 
