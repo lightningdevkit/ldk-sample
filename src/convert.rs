@@ -91,3 +91,35 @@ impl TryInto<BlockchainInfo> for JsonResponse {
 		})
 	}
 }
+
+pub struct UTXO {
+	pub tx_id: String,
+	pub vout: u32,
+	pub address: String,
+	pub amount: f64,
+	pub confirmations: u32,
+}
+
+pub struct Unspents {
+	pub utxos: Vec<UTXO>,
+}
+
+impl TryInto<Unspents> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> std::io::Result<Unspents> {
+		if !self.0.is_array() {
+			return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "expected array"));
+		}
+		let mut arr: Vec<UTXO> = Vec::new();
+		for e in self.0.as_array().unwrap() {
+			arr.push(UTXO {
+				tx_id: e["txid"].as_str().unwrap().to_string(),
+				vout: e["vout"].as_u64().unwrap() as u32,
+				address: e["address"].as_str().unwrap().to_string(),
+				amount: e["amount"].as_f64().unwrap(),
+				confirmations: e["confirmations"].as_u64().unwrap() as u32,
+			});
+		}
+		Ok(Unspents { utxos: arr })
+	}
+}

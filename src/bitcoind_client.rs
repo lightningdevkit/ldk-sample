@@ -1,4 +1,4 @@
-use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx};
+use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx, Unspents};
 use base64;
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::transaction::Transaction;
@@ -172,6 +172,20 @@ impl BitcoindClient {
 			)
 			.await
 			.unwrap()
+	}
+
+	pub async fn list_unspent(&self, min_confirm: u32, address: String) {
+		self.bitcoind_rpc_client
+			.call_method::<Unspents>(
+				"listunspent",
+				&vec![
+					serde_json::json!(min_confirm),
+					serde_json::json!(9999999),
+					serde_json::json!([serde_json::json!(address)]),
+				],
+			)
+			.await
+			.unwrap();
 	}
 
 	pub async fn fund_raw_transaction(&self, raw_tx: RawTx) -> FundedTx {

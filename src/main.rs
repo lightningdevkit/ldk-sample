@@ -60,7 +60,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::walletcore::*;
-use crate::env::*;
+//use crate::env;
 
 pub(crate) enum HTLCStatus {
 	Pending,
@@ -365,7 +365,7 @@ async fn handle_ldk_events(
 }
 
 async fn start_ldk() {
-	let env = env_init();
+	let env = env::env_init();
 	env.print();
 
 	if cli::handle_import_wallet() {
@@ -373,17 +373,25 @@ async fn start_ldk() {
 		return;
 	}
 
+	let mut wallet_address: String;
 	// read pk
-	match private_key() {
+	match env::private_key() {
 		None => {
 			println!("Private key not found, try using 'importwallet' option");
 			return;
 		},
 		Some(private_key) => {
-			let address = derive_address_from_pk(&private_key);
-			println!("Wallet address: {}", address);
+			wallet_address = derive_address_from_pk(&private_key);
+			//////////////
+			if env::network() == "testnet" {
+				wallet_address = "tb1qwj4ezzdhcnk687utkhns8xens5832f8sthluw5".to_string(); //"tb1qp265zr4w7c9s3nmd0mv3x357f6y8mdphn9qw92".to_string();
+			}
+			//////////////
+			println!("Wallet address: {}", wallet_address);
 		}
 	};
+
+
 
 
 	let args = match cli::parse_startup_args() {
@@ -414,6 +422,7 @@ async fn start_ldk() {
 
 	// Check that the bitcoind we've connected to is running the network we expect
 	let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
+	println!("{}", bitcoind_chain);
 	if bitcoind_chain
 		!= match args.network {
 			bitcoin::Network::Bitcoin => "main",
@@ -427,6 +436,12 @@ async fn start_ldk() {
 		);
 		return;
 	}
+
+
+
+	bitcoind_client.list_unspent(0, wallet_address).await;
+
+	
 
 	// ## Setup
 	// Step 1: Initialize the FeeEstimator
