@@ -9,7 +9,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
-use lightning::ln::msgs::NetAddress;
+//use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NodeId;
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
@@ -19,7 +19,7 @@ use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
 use std::io::{BufRead, Write};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs}; // IpAddr
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
@@ -29,6 +29,7 @@ use std::time::Duration;
 use crate::wallet::*;
 use crate::env::*;
 
+/*
 pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_username: String,
 	pub(crate) bitcoind_rpc_password: String,
@@ -40,6 +41,7 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
 }
+*/
 
 // Handle importwallet option. Return true if this otion was detected (regardless of the outcome)
 pub(crate) fn handle_import_wallet() -> bool {
@@ -91,6 +93,7 @@ pub(crate) fn handle_import_wallet() -> bool {
 	return is_import
 }
 
+/*
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	if env::args().len() < 3 {
 		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*]`");
@@ -191,6 +194,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		network,
 	})
 }
+*/
 
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,

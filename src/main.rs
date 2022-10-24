@@ -380,27 +380,28 @@ async fn start_ldk() {
 		},
 		Some(private_key) => private_key,
 	};
-	let mut wallet: Wallet = Wallet::derive_address_from_pk(&private_key, env.network.as_str());
+	let mut wallet: Wallet = Wallet::derive_address_from_pk(&private_key, env.network);
 	println!("Wallet address: {}", wallet.address);
 
 
 
-
+	/*
 	let args = match cli::parse_startup_args() {
 		Ok(user_args) => user_args,
 		Err(()) => return,
 	};
+	*/
 
 	// Initialize the LDK data directory if necessary.
-	let ldk_data_dir = format!("{}/.ldk", args.ldk_storage_dir_path);
+	let ldk_data_dir = format!("{}/.ldk", env.ldk_data_dir);
 	fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
 	// Initialize our bitcoind client.
 	let bitcoind_client = match BitcoindClient::new(
-		args.bitcoind_rpc_host.clone(),
-		args.bitcoind_rpc_port,
-		args.bitcoind_rpc_username.clone(),
-		args.bitcoind_rpc_password.clone(),
+		env.bitcoind_rpc_host.clone(),
+		env.bitcoind_rpc_port,
+		env.bitcoind_rpc_username.clone(),
+		env.bitcoind_rpc_password.clone(),
 		tokio::runtime::Handle::current(),
 	)
 	.await
@@ -414,9 +415,9 @@ async fn start_ldk() {
 
 	// Check that the bitcoind we've connected to is running the network we expect
 	let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
-	println!("{}", bitcoind_chain);
+	println!("Bitcoind reported network: {}", bitcoind_chain);
 	if bitcoind_chain
-		!= match args.network {
+		!= match env.network {
 			bitcoin::Network::Bitcoin => "main",
 			bitcoin::Network::Testnet => "test",
 			bitcoin::Network::Regtest => "regtest",
@@ -424,7 +425,7 @@ async fn start_ldk() {
 		} {
 		println!(
 			"Chain argument ({}) didn't match bitcoind chain ({})",
-			args.network, bitcoind_chain
+			env.network, bitcoind_chain
 		);
 		return;
 	}
@@ -524,7 +525,7 @@ async fn start_ldk() {
 			let getinfo_resp = bitcoind_client.get_blockchain_info().await;
 
 			let chain_params = ChainParameters {
-				network: args.network,
+				network: env.network,
 				best_block: BestBlock::new(
 					getinfo_resp.latest_blockhash,
 					getinfo_resp.latest_height as u32,
@@ -567,7 +568,7 @@ async fn start_ldk() {
 		chain_tip = Some(
 			init::synchronize_listeners(
 				&mut bitcoind_client.deref(),
-				args.network,
+				env.network,
 				&mut cache,
 				chain_listeners,
 			)
@@ -584,7 +585,7 @@ async fn start_ldk() {
 	}
 
 	// Step 11: Optional: Initialize the P2PGossipSync
-	let genesis = genesis_block(args.network).header.block_hash();
+	let genesis = genesis_block(env.network).header.block_hash();
 	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
 	let network_graph =
 		Arc::new(disk::read_network(Path::new(&network_graph_path), genesis, logger.clone()));
@@ -614,7 +615,7 @@ async fn start_ldk() {
 	// Step 13: Initialize networking
 
 	let peer_manager_connection_handler = peer_manager.clone();
-	let listening_port = args.ldk_peer_listening_port;
+	let listening_port = env.ldk_peer_listening_port;
 	let stop_listen_connect = Arc::new(AtomicBool::new(false));
 	let stop_listen = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
@@ -645,7 +646,7 @@ async fn start_ldk() {
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
-	let network = args.network;
+	let network = env.network;
 	tokio::spawn(async move {
 		let mut derefed = bitcoind_block_source.deref();
 		let chain_poller = poll::ChainPoller::new(&mut derefed, network);
@@ -666,7 +667,7 @@ async fn start_ldk() {
 	let outbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
 	let inbound_pmts_for_events = inbound_payments.clone();
 	let outbound_pmts_for_events = outbound_payments.clone();
-	let network = args.network;
+	let network = env.network;
 	let bitcoind_rpc = bitcoind_client.clone();
 	let network_graph_events = network_graph.clone();
 	let handle = tokio::runtime::Handle::current();
@@ -764,16 +765,16 @@ async fn start_ldk() {
 	// In a production environment, this should occur only after the announcement of new channels
 	// to avoid churn in the global network graph.
 	let chan_manager = Arc::clone(&channel_manager);
-	let network = args.network;
-	if !args.ldk_announced_listen_addr.is_empty() {
+	let network = env.network;
+	if !env.ldk_announced_listen_addr.is_empty() {
 		tokio::spawn(async move {
 			let mut interval = tokio::time::interval(Duration::from_secs(60));
 			loop {
 				interval.tick().await;
 				chan_manager.broadcast_node_announcement(
 					[0; 3],
-					args.ldk_announced_node_name,
-					args.ldk_announced_listen_addr.clone(),
+					env.ldk_announced_node_name,
+					env.ldk_announced_listen_addr.clone(),
 				);
 			}
 		});

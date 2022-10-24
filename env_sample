@@ -1,10 +1,16 @@
 # Bitcoin network: main, test, regtest, signet
 NETWORK=test
 # Bitcoin node RPC user
-RPC_USER=rpcuser
+RPC_USERNAME=rpcuser
 # Bitcoin node RPC password
 RPC_PASSWORD=need_to_put_here_secret_password
 # Bitcoin node RPC host, <host>:<port> form
 RPC_HOST=localhost:18332
 # Folder for LN state (LDK)
 LDK_DATA_DIR=./ldk-data
+# Optional LDK listening port
+#LDK_PEER_LISTENING_PORT=9735
+# Optional announced listening address(es), separated by '|'
+#LDK_ANNOUNCED_LISTEN_ADDR=127.0.0.1
+# Optional announced node name
+#LDK_ANNOUNCED_NODE_NAME=mynode
