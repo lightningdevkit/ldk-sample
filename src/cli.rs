@@ -147,7 +147,9 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
 	ldk_data_dir: String, network: Network,
 ) {
-	println!("LDK startup successful. To view available commands: \"help\".");
+	println!(
+		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
+	);
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
 	loop {
@@ -156,6 +158,11 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 		let mut line = String::new();
 		if let Err(e) = io::stdin().read_line(&mut line) {
 			break println!("ERROR: {e:#}");
+		}
+
+		if line.len() == 0 {
+			// We hit EOF / Ctrl-D
+			break;
 		}
 
 		let mut words = line.split_whitespace();
@@ -459,6 +466,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Err(e) => println!("ERROR: failed to send onion message: {:?}", e),
 					}
 				}
+				"quit" | "exit" => break,
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
 		}
@@ -479,6 +487,7 @@ fn help() {
 	println!("listpeers");
 	println!("signmessage <message>");
 	println!("sendonionmessage <node_id_1,node_id_2,..,destination_node_id>");
+	println!("quit")
 }
 
 fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
