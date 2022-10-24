@@ -1,2 +1,10 @@
-TESTNET=true
+# Bitcoin network: main, test, regtest, signet
+NETWORK=test
+# Bitcoin node RPC user
+RPC_USER=rpcuser
+# Bitcoin node RPC password
+RPC_PASSWORD=need_to_put_here_secret_password
+# Bitcoin node RPC host, <host>:<port> form
+RPC_HOST=localhost:18332
+# Folder for LN state (LDK)
 LDK_DATA_DIR=./ldk-data

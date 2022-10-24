@@ -380,7 +380,7 @@ async fn start_ldk() {
 		},
 		Some(private_key) => private_key,
 	};
-	let mut wallet: Wallet = Wallet::derive_address_from_pk(&private_key);
+	let mut wallet: Wallet = Wallet::derive_address_from_pk(&private_key, env.network.as_str());
 	println!("Wallet address: {}", wallet.address);
 
 

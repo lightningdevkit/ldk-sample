@@ -1,5 +1,4 @@
 use crate::walletcore_iface::*;
-use crate::env;
 use crate::convert::Unspents;
 use crate::bitcoind_client::BitcoindClient;
 
@@ -19,13 +18,13 @@ pub fn priv_key_from_mnemonic(mnemonic: &str) -> Option<Vec<u8>> {
     Some(private_key_data(&key).to_vec())
 }
 
-pub fn derive_address_from_pk(priv_key: &Vec<u8>) -> String {
+pub fn derive_address_from_pk(priv_key: &Vec<u8>, network: &str) -> String {
     let priv_key_obj = private_key_create_with_data(&TWData::from_vec(&priv_key));
     let pub_key = private_key_get_public_key_secp256k1(&priv_key_obj, true);
     let any_addr = any_address_create_with_public_key(&pub_key, 0);
     let addr_twstring = any_address_description(&any_addr);
     ////////////// TODO hardcoded testnet address
-    if env::network() == "testnet" {
+    if network == "test" {
         "tb1qwj4ezzdhcnk687utkhns8xens5832f8sthluw5".to_string() //"tb1qp265zr4w7c9s3nmd0mv3x357f6y8mdphn9qw92".to_string();
     } else {
         addr_twstring.to_string()
@@ -33,9 +32,9 @@ pub fn derive_address_from_pk(priv_key: &Vec<u8>) -> String {
 }
 
 impl Wallet {
-    pub fn derive_address_from_pk(priv_key: &Vec<u8>) -> Wallet {
+    pub fn derive_address_from_pk(priv_key: &Vec<u8>, network: &str) -> Wallet {
         Wallet {
-            address: derive_address_from_pk(priv_key),
+            address: derive_address_from_pk(priv_key, network),
             utxos: Unspents { utxos: Vec::new() },
             balance: 0.0,
         }
