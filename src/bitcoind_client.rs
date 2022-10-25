@@ -1,4 +1,5 @@
-use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx, Unspents};
+//use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx Unspents};
+use crate::convert::{BlockchainInfo, FeeResponse, NewAddress, Unspents};
 use base64;
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::transaction::Transaction;
@@ -163,6 +164,8 @@ impl BitcoindClient {
 		RpcClient::new(&rpc_credentials, http_endpoint)
 	}
 
+	/*
+	// Removed, tx building (for funging tx) no longer needed from Btc Core
 	pub async fn create_raw_transaction(&self, outputs: Vec<HashMap<String, f64>>) -> RawTx {
 		let outputs_json = serde_json::json!(outputs);
 		self.bitcoind_rpc_client
@@ -173,6 +176,7 @@ impl BitcoindClient {
 			.await
 			.unwrap()
 	}
+	*/
 
 	pub async fn list_unspent(&self, min_confirm: u32, address: &str) -> Unspents {
 		let res = self.bitcoind_rpc_client
@@ -189,6 +193,8 @@ impl BitcoindClient {
 		res
 	}
 
+	/*
+	// Removed, tx building (for funging tx) no longer needed from Btc Core
 	pub async fn fund_raw_transaction(&self, raw_tx: RawTx) -> FundedTx {
 		let raw_tx_json = serde_json::json!(raw_tx.0);
 		let options = serde_json::json!({
@@ -217,6 +223,7 @@ impl BitcoindClient {
 			.unwrap();
 	}
 
+	// Removed, tx building (for funging tx) no longer needed from Btc Core
 	pub async fn sign_raw_transaction_with_wallet(&self, tx_hex: String) -> SignedTx {
 		let tx_hex_json = serde_json::json!(tx_hex);
 		self.bitcoind_rpc_client
@@ -224,6 +231,7 @@ impl BitcoindClient {
 			.await
 			.unwrap()
 	}
+	*/
 
 	pub async fn get_new_address(&self) -> Address {
 		let addr_args = vec![serde_json::json!("LDK output address")];

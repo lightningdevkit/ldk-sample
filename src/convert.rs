@@ -3,6 +3,8 @@ use bitcoin::BlockHash;
 use lightning_block_sync::http::JsonResponse;
 use std::convert::TryInto;
 
+/*
+// Removed, tx building (for funging tx) no longer needed from Btc Core
 pub struct FundedTx {
 	pub changepos: i64,
 	pub hex: String,
@@ -41,6 +43,7 @@ impl TryInto<SignedTx> for JsonResponse {
 		})
 	}
 }
+*/
 
 pub struct NewAddress(pub String);
 impl TryInto<NewAddress> for JsonResponse {

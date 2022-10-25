@@ -154,6 +154,8 @@ async fn handle_ldk_events(
 			let out_amnt = *channel_value_satoshis as f64 / 100_000_000.0;
 			println!("Debug out_amnt {} {}", out_amnt, *channel_value_satoshis);
 
+			/*
+			// Removed, tx building (for funging tx) no longer needed from Btc Core
 			let mut outputs = vec![HashMap::with_capacity(1)];
 			outputs[0].insert(addr.clone(), out_amnt);
 			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
@@ -170,14 +172,12 @@ async fn handle_ldk_events(
 			assert_eq!(signed_tx.complete, true);
 			let final_tx: Transaction =
 				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
+			*/
 
-
+			
 			// Create transaction using wallet-core
 			let wc_tx = wallet.create_send_tx(addr.as_str(), *channel_value_satoshis);
-			let _final_wc_tx: Transaction = encode::deserialize(&wc_tx).unwrap();
-
-
-			//panic!("PREMATURE STOP to stop actual usage of the tx");
+			let final_wc_tx: Transaction = encode::deserialize(&wc_tx).unwrap();
 
 
 			// Give the funding transaction back to LDK for opening the channel.
@@ -185,9 +185,9 @@ async fn handle_ldk_events(
 				.funding_transaction_generated(
 					&temporary_channel_id,
 					counterparty_node_id,
-					final_tx,
-					// TODO !!!!!!!!!!!!! give wc tx
-					// final_wc_tx,
+					// Use tx from wallet-core
+					// final_tx,
+					final_wc_tx,
 				)
 				.is_err()
 			{
@@ -409,6 +409,7 @@ async fn start_ldk() {
 
 
 	/*
+	// Removed, moved to `env`
 	let args = match cli::parse_startup_args() {
 		Ok(user_args) => user_args,
 		Err(()) => return,
