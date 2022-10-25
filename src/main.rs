@@ -2,6 +2,7 @@ pub mod bitcoind_client;
 
 // [walletcore]
 pub mod walletcore_iface;
+pub mod walletcore_extra;
 pub mod wc_proto;
 pub mod wallet;
 pub mod env;

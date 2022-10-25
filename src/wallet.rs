@@ -1,5 +1,6 @@
 use crate::wc_proto::Bitcoin;
 use crate::walletcore_iface::*;
+use crate::walletcore_extra::*;
 use crate::convert::Unspents;
 use crate::bitcoind_client::BitcoindClient;
 use protobuf::Message;
