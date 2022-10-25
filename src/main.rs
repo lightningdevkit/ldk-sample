@@ -174,7 +174,7 @@ async fn handle_ldk_events(
 				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
 			*/
 
-			
+
 			// Create transaction using wallet-core
 			let wc_tx = wallet.create_send_tx(addr.as_str(), *channel_value_satoshis);
 			let final_wc_tx: Transaction = encode::deserialize(&wc_tx).unwrap();
@@ -397,7 +397,7 @@ async fn start_ldk() {
 	// read pk
 	let private_key = match env::private_key() {
 		None => {
-			println!("Private key not found, try using 'importwallet' option");
+			println!("Private key not found, try using 'importwallet' argument");
 			return;
 		},
 		Some(private_key) => private_key,

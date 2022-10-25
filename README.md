@@ -1,30 +1,58 @@
-# ldk-sample
-Sample node implementation using LDK.
+# TW Lightning Proto, Wallet-core/LDK
+Based on ldk-sample
+https://github.com/lightningdevkit/ldk-sample
 
-## Trust Wallet Specific
+
+### Details
+
+- Proto is based on `ldk-sample`, https://github.com/lightningdevkit/ldk-sample
+- It uses:
+  - wallet-core (link with it), for address derivation and funding transaction preparation/signing, and
+  - a Btc Core node (bitcoind), external, for obtaining UTXOs and as a block source
+- It simulates a rudimentary wallet: imported from mnemonic, single address used, private key stored.
+- At channel open, funding tx is created, from wallet address, using wallet-core
+- LDK state is stored in LDK data dir (as in original sample app)
+
 
 ### For building
 
-- Add wallet-core project folder with built binaries to `src/build.rs`
+- Prerequisite: `wallet-core` project folder, with sources and built binaries
+- Prerequisite: Rust (`rustc`, `cargo`)
+- Set wallet-core project folder in `src/build.rs`
 
 ```
-static WALLET_CORE_PROJECT_DIR: &str = "../../../wallet-core"
+static WALLET_CORE_PROJECT_DIR: &str = "../../../../wallet-core";
+```
+
+- Build:
+
+```
+cargo build
 ```
 
 ### For running
 
-- Settings are stored in `.env`, see `env_sample`
-- Wallet private key is stored in `.pk_secret`, can be imported using `importwallet` option
-- LDK state is stored in LDK data dir (as in original sample app)
+- Settings are stored in `.env`, set it up, see `env_sample`
+- First wallet has to be imported, by mnemonic, use `importwallet` argument.  Private key is stored in `.pk_secret` unencrypted. Wallet should have funds.
+```
+cargo run importwallet
+```
+
+- Used Bitcoin Core node has to have the wallet address loaded.
+- Run app
+- Open channel to another node, command `openchannel`.
+- Pay an invoice, command `sendpayment`.
+- Close channel (`closechannel`).
+
 
 ### TODO
 
-- Check with Btc node that wallet address is loaded (listunspent or getaddressinfo/ismine)
-- Testnet/derivation support in AnyAddress (walletcore)
-- Move wallet-core proj dir from build.rs to env
-- checkin rust interfacing Rust module in wallet core, use it from there
-
-
+- Get rid of `get_new_address` from Btc Core, use wallet address to pay out when closing channel.
+- Get rid of Btc Core for UTXOs, use Blockbook
+- Get rid of Btc Core for block source, use Blockbook
+- Testnet/derivation support in AnyAddress (walletcore), use it. Also for HDWallet private key derivation.
+- Move wallet-core proj dir setting from build.rs to env
+- check in rust interfacing Rust module in wallet core, use it from there
 
 
 
