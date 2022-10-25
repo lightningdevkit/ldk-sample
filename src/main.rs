@@ -2,6 +2,7 @@ pub mod bitcoind_client;
 
 // [walletcore]
 pub mod walletcore_iface;
+pub mod wc_proto;
 pub mod wallet;
 pub mod env;
 
@@ -121,7 +122,9 @@ type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
 async fn handle_ldk_events(
-	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
+	channel_manager: &Arc<ChannelManager>,
+	wallet: &Wallet,
+	bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
 	inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage,
 	network: Network, event: &Event,
@@ -147,25 +150,44 @@ async fn handle_ldk_events(
 			)
 			.expect("Lightning funding tx should always be to a SegWit output")
 			.to_address();
+			println!("Debug Created channel address:  {}", addr);
+			let out_amnt = *channel_value_satoshis as f64 / 100_000_000.0;
+			println!("Debug out_amnt {} {}", out_amnt, *channel_value_satoshis);
+
 			let mut outputs = vec![HashMap::with_capacity(1)];
-			outputs[0].insert(addr, *channel_value_satoshis as f64 / 100_000_000.0);
+			outputs[0].insert(addr.clone(), out_amnt);
 			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
+			//println!("raw_tx {}", raw_tx.0);
 
 			// Have your wallet put the inputs into the transaction such that the output is
 			// satisfied.
 			let funded_tx = bitcoind_client.fund_raw_transaction(raw_tx).await;
+			//println!("funded_tx {}", funded_tx.hex);
 
 			// Sign the final funding transaction and broadcast it.
 			let signed_tx = bitcoind_client.sign_raw_transaction_with_wallet(funded_tx.hex).await;
+			//println!("signed_tx {}", signed_tx.hex);
 			assert_eq!(signed_tx.complete, true);
 			let final_tx: Transaction =
 				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
+
+
+			// Create transaction using wallet-core
+			let wc_tx = wallet.create_send_tx(addr.as_str(), *channel_value_satoshis);
+			let _final_wc_tx: Transaction = encode::deserialize(&wc_tx).unwrap();
+
+
+			//panic!("PREMATURE STOP to stop actual usage of the tx");
+
+
 			// Give the funding transaction back to LDK for opening the channel.
 			if channel_manager
 				.funding_transaction_generated(
 					&temporary_channel_id,
 					counterparty_node_id,
 					final_tx,
+					// TODO !!!!!!!!!!!!! give wc tx
+					// final_wc_tx,
 				)
 				.is_err()
 			{
@@ -433,11 +455,11 @@ async fn start_ldk() {
 
 
 
+	// Retrieve wallet UTXOs, check balance
 	wallet.retrieve_and_store_unspent(&bitcoind_client).await;
 	println!("Balance:  {}   utxos: {}", wallet.balance, wallet.utxos.utxos.len());
 	if wallet.balance <= 0.0 {
-		println!("Wallet balance is 0!");
-		return;
+		println!("WARNING: Wallet has empty balance! Send some funds to the wallet ({})", wallet.address);
 	}
 
 
@@ -675,6 +697,7 @@ async fn start_ldk() {
 	let event_handler = move |event: &Event| {
 		handle.block_on(handle_ldk_events(
 			&channel_manager_event_listener,
+			&wallet,
 			&bitcoind_rpc,
 			&network_graph_events,
 			&keys_manager_listener,

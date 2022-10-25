@@ -160,8 +160,8 @@ pub fn hd_wallet_get_key_for_coin(wallet: &HDWallet, coin: u32) -> PrivateKey {
     PrivateKey { wrapped: ptr }
 }
 
-pub fn hd_wallet_get_key(wallet: &HDWallet, coin: u32, derivationPath: &TWString) -> PrivateKey {
-    let ptr = unsafe { TWHDWalletGetKey(wallet.wrapped, coin, derivationPath.wrapped) };
+pub fn hd_wallet_get_key(wallet: &HDWallet, coin: u32, derivation_path: &TWString) -> PrivateKey {
+    let ptr = unsafe { TWHDWalletGetKey(wallet.wrapped, coin, derivation_path.wrapped) };
     PrivateKey { wrapped: ptr }
 }
 

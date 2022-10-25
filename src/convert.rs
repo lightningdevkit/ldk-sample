@@ -98,6 +98,9 @@ pub struct Utxo {
 	pub address: String,
 	pub amount: f64,
 	pub confirmations: u32,
+	pub script_pub_key: String,  // the script key
+	pub redeem_script: String,  // The redeemScript if scriptPubKey is P2SH (hex)
+	pub witness_script: String,  // witnessScript if the scriptPubKey is P2WSH or P2SH-P2WSH
 }
 
 pub struct Unspents {
@@ -118,6 +121,9 @@ impl TryInto<Unspents> for JsonResponse {
 				address: e["address"].as_str().unwrap().to_string(),
 				amount: e["amount"].as_f64().unwrap(),
 				confirmations: e["confirmations"].as_u64().unwrap() as u32,
+				script_pub_key: e["scriptPubKey"].as_str().unwrap().to_string(),
+				redeem_script: match e["redeemScript"].as_str() { None => "".to_string(), Some(s) => s.to_string(), },
+				witness_script: match e["witnessScript"].as_str() { None => "".to_string(), Some(s) => s.to_string(), },
 			});
 		}
 		Ok(Unspents { utxos: arr })

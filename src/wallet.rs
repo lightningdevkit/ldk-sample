@@ -1,3 +1,4 @@
+use crate::wc_proto::Bitcoin;
 use crate::walletcore_iface::*;
 use crate::convert::Unspents;
 use crate::bitcoind_client::BitcoindClient;
@@ -71,5 +72,53 @@ impl Wallet {
         for u in &self.utxos.utxos {
             self.balance += u.amount;
         }
+    }
+
+    pub fn create_send_tx(&self, to_address: &str, output_amount: u64) -> Vec<u8> {
+        let mut signing_input = Bitcoin::SigningInput::new();
+        signing_input.hash_type = 1; // hashTypeAll
+        signing_input.amount = output_amount as i64;
+        signing_input.use_max_amount = false;
+        signing_input.byte_fee = 1; // TODO
+        signing_input.to_address = to_address.to_string();
+        signing_input.change_address = self.address.clone();
+        signing_input.coin_type = 0;
+        signing_input.private_key.push(self.private_key.clone());
+
+        for u in &self.utxos.utxos {
+            if u.address != self.address {
+                println!("discarding utxo, not own-address {} {}", u.address, self.address);
+            } else {
+                let mut utxo = Bitcoin::UnspentTransaction::new();
+                let mut outpoint = Bitcoin::OutPoint::new();
+                let mut hash = hex::decode(u.tx_id.clone()).unwrap();
+                hash.reverse();
+                outpoint.hash = hash;
+                outpoint.index = u.vout;
+                outpoint.sequence = u32::MAX - 1;
+                utxo.out_point = ::protobuf::MessageField::some(outpoint);
+                utxo.script = hex::decode(&u.script_pub_key).unwrap();
+                utxo.amount = (u.amount * 100_000_000.0) as i64;
+                println!("input utxo  '{}' '{}' '{}' {}", u.address, u.script_pub_key, u.witness_script, utxo.amount);
+                signing_input.utxo.push(utxo);
+            }
+        }
+        if signing_input.utxo.len() == 0 {
+            println!("Error: 0 utxos to consider");
+            return Vec::new();
+        }
+
+        let input_ser = signing_input.write_to_bytes().unwrap();
+        let input_ser_data = TWData::from_vec(&input_ser);
+
+        let output_ser_data = any_signer_sign(&input_ser_data, 0);
+
+        let outputp: Bitcoin::SigningOutput = protobuf::Message::parse_from_bytes(&output_ser_data.to_vec()).unwrap();
+
+        println!("tx encoded: {}", hex::encode(outputp.encoded.clone()));
+        println!("tx tx_id:   {}", outputp.transaction_id);
+        println!("tx error:   {} {}", outputp.error.unwrap() as u16, outputp.error_message);
+
+        outputp.encoded
     }
 }
