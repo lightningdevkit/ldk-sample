@@ -44,7 +44,7 @@ pub(crate) struct LdkUserInfo {
 */
 
 // Handle importwallet option. Return true if this otion was detected (regardless of the outcome)
-pub(crate) fn handle_import_wallet() -> bool {
+pub(crate) fn handle_import_wallet(network: Network) -> bool {
 	let mut is_import = false;
 	if env::args().len() < 2 {
 		return is_import;
@@ -69,7 +69,7 @@ pub(crate) fn handle_import_wallet() -> bool {
 		return is_import;
 	}
 	println!("Mnemonic is valid");
-	let priv_key = match priv_key_from_mnemonic(mnemonic.as_str()) {
+	let priv_key = match priv_key_from_mnemonic(mnemonic.as_str(), network) {
 		None => {
 			println!("Could not derive private key");
 			return is_import
@@ -89,6 +89,10 @@ pub(crate) fn handle_import_wallet() -> bool {
 		},
 		Some(_priv_key_read_back) => println!("Private key saved"),
 	}
+
+	// also derive address, for display
+	let address = derive_address_from_pk(&priv_key, network);
+	println!("Main wallet address: {}", address);
 
 	return is_import
 }

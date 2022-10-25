@@ -367,7 +367,7 @@ async fn start_ldk() {
 	let env = env::env_init();
 	env.print();
 
-	if cli::handle_import_wallet() {
+	if cli::handle_import_wallet(env.network) {
 		println!("Bye");
 		return;
 	}
@@ -380,8 +380,9 @@ async fn start_ldk() {
 		},
 		Some(private_key) => private_key,
 	};
-	let mut wallet: Wallet = Wallet::derive_address_from_pk(&private_key, env.network);
+	let mut wallet: Wallet = Wallet::from_pk(&private_key, env.network);
 	println!("Wallet address: {}", wallet.address);
+	println!("Wallet pubkey:  {}", hex::encode(wallet.public_key.clone()));
 
 
 
@@ -439,7 +440,7 @@ async fn start_ldk() {
 		return;
 	}
 
-	
+
 
 	// ## Setup
 	// Step 1: Initialize the FeeEstimator

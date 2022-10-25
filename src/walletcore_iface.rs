@@ -29,6 +29,7 @@ extern "C" {
     fn TWHDWalletCreateWithMnemonic(mnemonic: *const u8, passphrase: *const u8) -> *const u8;
     fn TWHDWalletGetAddressForCoin(wallet: *const u8, coin: u32) -> *const u8;
     fn TWHDWalletGetKeyForCoin(wallet: *const u8, coin: u32) -> *const u8;
+    fn TWHDWalletGetKey(wallet: *const u8, coin: u32, derivation: *const u8) -> *const u8;
 
     fn TWAnyAddressCreateWithPublicKey(public_key: *const u8, coin: u8) -> *const u8;
     fn TWAnyAddressDescription(address: *const u8) -> *const u8;
@@ -156,6 +157,11 @@ pub fn hd_wallet_get_address_for_coin(wallet: &HDWallet, coin: u32) -> TWString 
 
 pub fn hd_wallet_get_key_for_coin(wallet: &HDWallet, coin: u32) -> PrivateKey {
     let ptr = unsafe { TWHDWalletGetKeyForCoin(wallet.wrapped, coin) };
+    PrivateKey { wrapped: ptr }
+}
+
+pub fn hd_wallet_get_key(wallet: &HDWallet, coin: u32, derivationPath: &TWString) -> PrivateKey {
+    let ptr = unsafe { TWHDWalletGetKey(wallet.wrapped, coin, derivationPath.wrapped) };
     PrivateKey { wrapped: ptr }
 }
 
