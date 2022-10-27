@@ -47,7 +47,6 @@ cargo run importwallet
 
 ### TODO
 
-- Get rid of `get_new_address` from Btc Core, use wallet address to pay out when closing channel.
 - Put default 'first hop node' address into settings
 - Auto channel open on send
 - Get rid of Btc Core for UTXOs, use Blockbook

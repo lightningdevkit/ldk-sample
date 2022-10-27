@@ -20,11 +20,13 @@ use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::BlockHash;
+use bitcoin::util::address::Address;
 use bitcoin_bech32::WitnessProgram;
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
+use lightning::chain::keysinterface::SpendableOutputDescriptor::*;
 use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::chain::channelmonitor::Balance;
 use lightning::ln::channelmanager;
@@ -58,6 +60,7 @@ use std::io;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -356,8 +359,24 @@ async fn handle_ldk_events(
 			});
 		}
 		Event::SpendableOutputs { outputs } => {
-			let destination_address = bitcoind_client.get_new_address().await;
+			//let destination_address = bitcoind_client.get_new_address().await;
+			// Using main wallet address to return any returned outputs
+			let destination_address = Address::from_str(wallet.address.as_str()).unwrap();
+
 			let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
+
+			print!("\nEVENT: {} output(s) became spendable:   ", output_descriptors.len());
+			for o in output_descriptors {
+				let output = match o {
+					StaticOutput { outpoint: _, output } => output,
+					DelayedPaymentOutput(delayed) => &delayed.output,
+					StaticPaymentOutput(static_o) => &static_o.output,
+				};
+				print!("{} ", output.value);
+			}
+			println!("");
+			println!("Transferring to L1 wallet ({})", destination_address);
+
 			let tx_feerate =
 				bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
 			let spending_tx = keys_manager
@@ -436,8 +455,7 @@ async fn start_ldk() {
 		Some(private_key) => private_key,
 	};
 	let mut wallet: Wallet = Wallet::from_pk(&private_key, env.network);
-	println!("L1 wallet address: {}", wallet.address);
-	println!("L1 wallet pubkey:  {}", hex::encode(wallet.public_key.clone()));
+	println!("L1 wallet address: {}    pubkey:  {}", wallet.address, hex::encode(wallet.public_key.clone()));
 
 
 

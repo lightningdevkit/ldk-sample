@@ -1,18 +1,18 @@
 //use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx Unspents};
-use crate::convert::{BlockchainInfo, FeeResponse, NewAddress, Unspents};
+use crate::convert::{BlockchainInfo, FeeResponse, Unspents};
 use base64;
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::hash_types::{BlockHash, Txid};
-use bitcoin::util::address::Address;
+//use bitcoin::util::address::Address;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
 use lightning_block_sync::{AsyncBlockSourceResult, BlockHeaderData, BlockSource};
 use serde_json;
 use std::collections::HashMap;
-use std::str::FromStr;
+//use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,7 +231,6 @@ impl BitcoindClient {
 			.await
 			.unwrap()
 	}
-	*/
 
 	pub async fn get_new_address(&self) -> Address {
 		let addr_args = vec![serde_json::json!("LDK output address")];
@@ -242,6 +241,7 @@ impl BitcoindClient {
 			.unwrap();
 		Address::from_str(addr.0.as_str()).unwrap()
 	}
+	*/
 
 	pub async fn get_blockchain_info(&self) -> BlockchainInfo {
 		self.bitcoind_rpc_client

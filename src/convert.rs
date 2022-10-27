@@ -43,7 +43,6 @@ impl TryInto<SignedTx> for JsonResponse {
 		})
 	}
 }
-*/
 
 pub struct NewAddress(pub String);
 impl TryInto<NewAddress> for JsonResponse {
@@ -52,6 +51,7 @@ impl TryInto<NewAddress> for JsonResponse {
 		Ok(NewAddress(self.0.as_str().unwrap().to_string()))
 	}
 }
+*/
 
 pub struct FeeResponse {
 	pub feerate_sat_per_kw: Option<u32>,
