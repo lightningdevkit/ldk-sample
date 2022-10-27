@@ -26,6 +26,7 @@ use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget,
 use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
 use lightning::chain::{BestBlock, Filter, Watch};
+use lightning::chain::channelmonitor::Balance;
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
@@ -386,6 +387,37 @@ async fn handle_ldk_events(
 	}
 }
 
+fn print_balances(name: &str, balances: &Vec<Balance>) {
+	print!("Balances in {}: ({})   ", name, balances.len());
+	for b in balances {
+		let bal = match b {
+			Balance::ClaimableOnChannelClose{ claimable_amount_satoshis } => claimable_amount_satoshis,
+			Balance::ClaimableAwaitingConfirmations { claimable_amount_satoshis, confirmation_height: _ } => claimable_amount_satoshis,
+			Balance::ContentiousClaimable { claimable_amount_satoshis, timeout_height: _ } => claimable_amount_satoshis,
+			Balance::MaybeClaimableHTLCAwaitingTimeout { claimable_amount_satoshis, claimable_height: _ } => claimable_amount_satoshis,
+		};
+		print!("{} ", bal);
+	}
+	println!("");
+}
+
+fn list_channels(channel_manager: &ChannelManager) {
+	let channels = &channel_manager.list_channels();
+	if channels.len() == 0 {
+		println!("No open channels");
+		return;
+	}
+	for c in channels {
+		println!("{} open channels", channels.len());
+		print!("  val {}  bal {}  ", c.channel_value_satoshis, c.balance_msat);
+		match c.short_channel_id {
+			Some(id) => { print!("{} ", id); },
+			None => {},
+		};
+		println!("");
+	}
+}
+
 async fn start_ldk() {
 	let env = env::env_init();
 	env.print();
@@ -404,8 +436,8 @@ async fn start_ldk() {
 		Some(private_key) => private_key,
 	};
 	let mut wallet: Wallet = Wallet::from_pk(&private_key, env.network);
-	println!("Wallet address: {}", wallet.address);
-	println!("Wallet pubkey:  {}", hex::encode(wallet.public_key.clone()));
+	println!("L1 wallet address: {}", wallet.address);
+	println!("L1 wallet pubkey:  {}", hex::encode(wallet.public_key.clone()));
 
 
 
@@ -459,7 +491,7 @@ async fn start_ldk() {
 
 	// Retrieve wallet UTXOs, check balance
 	wallet.retrieve_and_store_unspent(&bitcoind_client).await;
-	println!("Balance:  {}   utxos: {}", wallet.balance, wallet.utxos.utxos.len());
+	println!("L1 balance:  {}   utxos: {}", wallet.balance, wallet.utxos.utxos.len());
 	if wallet.balance <= 0.0 {
 		println!("WARNING: Wallet has empty balance! Send some funds to the wallet ({})", wallet.address);
 	}
@@ -608,6 +640,16 @@ async fn start_ldk() {
 		let funding_outpoint = item.2;
 		chain_monitor.watch_channel(funding_outpoint, channel_monitor).unwrap();
 	}
+
+
+	list_channels(&channel_manager);
+	let balances = chain_monitor.get_claimable_balances(&[]);
+	print_balances("chain_monitor", &balances);
+	for (_, channel_monitor) in channelmonitors.iter_mut() {
+		let balances = channel_monitor.get_claimable_balances();
+		print_balances("channel", &balances);
+	}
+
 
 	// Step 11: Optional: Initialize the P2PGossipSync
 	let genesis = genesis_block(env.network).header.block_hash();
