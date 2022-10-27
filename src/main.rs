@@ -853,14 +853,16 @@ async fn start_ldk() {
 	let chan_manager = Arc::clone(&channel_manager);
 	let network = env.network;
 	if !env.ldk_announced_listen_addr.is_empty() {
+		let announced_node_name = env.ldk_announced_node_name;
+		let announced_listen_addrs = env.ldk_announced_listen_addr.clone();
 		tokio::spawn(async move {
 			let mut interval = tokio::time::interval(Duration::from_secs(60));
 			loop {
 				interval.tick().await;
 				chan_manager.broadcast_node_announcement(
 					[0; 3],
-					env.ldk_announced_node_name,
-					env.ldk_announced_listen_addr.clone(),
+					announced_node_name,
+					announced_listen_addrs.clone(),
 				);
 			}
 		});
@@ -877,6 +879,7 @@ async fn start_ldk() {
 		outbound_payments,
 		ldk_data_dir.clone(),
 		network,
+		&env,
 	)
 	.await;
 

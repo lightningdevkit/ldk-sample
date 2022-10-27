@@ -202,11 +202,52 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 }
 */
 
+async fn perform_open_channel(peer_manager: &Arc<PeerManager>, channel_manager: &Arc<ChannelManager>, ldk_data_dir: &str,
+	peer_pubkey_and_ip_addr: &str, channel_value_sat: &str, announce_channel: bool) {
+	let (pubkey, peer_addr) =
+		match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
+			Ok(info) => info,
+			Err(e) => {
+				println!("{:?}", e.into_inner().unwrap());
+				return;
+			}
+		};
+
+	let chan_amt_sat: Result<u64, _> = channel_value_sat.parse();
+	if chan_amt_sat.is_err() {
+		println!("ERROR: channel amount must be a number");
+		return;
+	}
+
+	if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+		.await
+		.is_err()
+	{
+		return;
+	};
+
+	println!("Opening channel (cap {} sats)...", chan_amt_sat.as_ref().unwrap());
+	if open_channel(
+		pubkey,
+		chan_amt_sat.unwrap(),
+		announce_channel,
+		channel_manager.clone(),
+	)
+	.is_ok()
+	{
+		let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+		let _ = disk::persist_channel_peer(
+			Path::new(&peer_data_path),
+			peer_pubkey_and_ip_addr,
+		);
+	}
+}
+
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
 	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: PaymentInfoStorage,
-	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
+	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network, env: &Env
 ) {
 	println!("LDK startup successful. To view available commands: \"help\".");
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
@@ -227,33 +268,6 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 				"openchannel" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
-					if peer_pubkey_and_ip_addr.is_none() || channel_value_sat.is_none() {
-						println!("ERROR: openchannel has 2 required arguments: `openchannel pubkey@host:port channel_amt_satoshis` [--public]");
-						continue;
-					}
-					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
-					let (pubkey, peer_addr) =
-						match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
-							Ok(info) => info,
-							Err(e) => {
-								println!("{:?}", e.into_inner().unwrap());
-								continue;
-							}
-						};
-
-					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
-					if chan_amt_sat.is_err() {
-						println!("ERROR: channel amount must be a number");
-						continue;
-					}
-
-					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
-						.await
-						.is_err()
-					{
-						continue;
-					};
-
 					let announce_channel = match words.next() {
 						Some("--public") | Some("--public=true") => true,
 						Some("--public=false") => false,
@@ -264,21 +278,34 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						None => false,
 					};
 
-					if open_channel(
-						pubkey,
-						chan_amt_sat.unwrap(),
-						announce_channel,
-						channel_manager.clone(),
-					)
-					.is_ok()
-					{
-						let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
-						let _ = disk::persist_channel_peer(
-							Path::new(&peer_data_path),
-							peer_pubkey_and_ip_addr,
-						);
+					if peer_pubkey_and_ip_addr.is_none() || channel_value_sat.is_none() {
+						println!("ERROR: openchannel has 2 required arguments: `openchannel pubkey@host:port channel_amt_satoshis` [--public]");
+						continue;
 					}
+					//let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
+
+					perform_open_channel(&peer_manager, &channel_manager, ldk_data_dir.as_str(), &peer_pubkey_and_ip_addr.unwrap(), channel_value_sat.unwrap(), announce_channel).await;
+					continue;
 				}
+
+				"opendc" => {
+					let peer_pubkey_and_ip_addr = env.default_peer.as_str();
+					if peer_pubkey_and_ip_addr == "" {
+						println!("ERROR: default peer is unset (see .env)");
+						continue;
+					}
+					let channel_value_sat = words.next();
+					let announce_channel = true; // public TODO
+					if channel_value_sat.is_none() {
+						println!("ERROR: opendc has 1 required argument: `opendc channel_amt_satoshis`");
+						continue;
+					}
+					//let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
+
+					perform_open_channel(&peer_manager, &channel_manager, ldk_data_dir.as_str(), &peer_pubkey_and_ip_addr, channel_value_sat.unwrap(), announce_channel).await;
+					continue;
+				}
+
 				"sendpayment" => {
 					let invoice_str = words.next();
 					if invoice_str.is_none() {
@@ -486,6 +513,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 }
 
 fn help() {
+	println!("opendc <amt_satoshis>               // open default channel");
 	println!("openchannel pubkey@host:port <amt_satoshis> [--public]");
 	println!("sendpayment <invoice>");
 	println!("keysend <dest_pubkey> <amt_msats>");

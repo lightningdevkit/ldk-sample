@@ -6,6 +6,8 @@ RPC_USERNAME=rpcuser
 RPC_PASSWORD=need_to_put_here_secret_password
 # Bitcoin node RPC host, <host>:<port> form
 RPC_HOST=localhost:18332
+# Default FirstHop/Routing node, pubkey@host:port format
+DEFAULT_PEER=031a...d705@localhost:9735
 # Folder for LN state (LDK)
 LDK_DATA_DIR=./ldk-data
 # Optional LDK listening port

@@ -11,6 +11,7 @@ static PK_FILENAME: &str = ".pk_secret";
 pub struct Env {
     pub network: Network,
     pub is_testnet: bool,
+    pub default_peer: String,
     pub ldk_data_dir: String,
     pub bitcoind_rpc_username: String,
     pub bitcoind_rpc_password: String,
@@ -84,6 +85,7 @@ pub fn env_init() -> Env {
     return Env{
         network: network,
         is_testnet: is_testnet,
+        default_peer: env_with_no_default("DEFAULT_PEER"),
         ldk_data_dir: match env::var("LDK_DATA_DIR") {
             Ok(path) => path,
             Err(_e) => ".ldk-data".to_string() // default
@@ -126,13 +128,14 @@ pub fn set_private_key(key: &Vec<u8>) -> bool {
 impl Env {
     pub fn print(&self) {
         println!("Env:");
-        println!("  network:     {}", self.network.to_string());
-        println!("  RPC node:    {}:*****@{}:{}", self.bitcoind_rpc_username, self.bitcoind_rpc_host, self.bitcoind_rpc_port);
-        println!("  data path:   {}", self.ldk_data_dir);
+        println!("  network:      {}", self.network.to_string());
+        println!("  default peer: {}", self.default_peer);
+        println!("  RPC node:     {}:*****@{}:{}", self.bitcoind_rpc_username, self.bitcoind_rpc_host, self.bitcoind_rpc_port);
+        println!("  data path:    {}", self.ldk_data_dir);
         let pk = private_key();
         match pk {
-            Some(key) => println!("  private key: ******** ({})", key.len()),
-            None => println!("  private key: not set!"),
+            Some(key) => println!("  private key:  ******** ({})", key.len()),
+            None => println!("  private key:  not set!"),
         }
     }
 }
