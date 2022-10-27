@@ -16,7 +16,7 @@ https://github.com/lightningdevkit/ldk-sample
 
 ### For building
 
-- Prerequisite: `wallet-core` project folder, with sources and built binaries
+- Prerequisite: `wallet-core` project folder, with sources and built binaries, min `3.0.9`.
 - Prerequisite: Rust (`rustc`, `cargo`)
 - Set wallet-core project folder in `src/build.rs`
 
@@ -48,12 +48,12 @@ cargo run importwallet
 ### TODO
 
 - Get rid of `get_new_address` from Btc Core, use wallet address to pay out when closing channel.
+- Put default 'first hop node' address into settings
 - Auto channel open on send
 - Get rid of Btc Core for UTXOs, use Blockbook
 - Get rid of Btc Core for block source, use Blockbook
-- Testnet/derivation support in AnyAddress (walletcore), use it. Also for HDWallet private key derivation.
 - (Move wallet-core proj dir setting from build.rs to env)
-- check in rust interfacing Rust module in wallet core, use it from there
+- (check in rust interfacing Rust module in wallet core, use it from there)
 
 
 

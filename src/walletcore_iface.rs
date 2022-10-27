@@ -35,6 +35,7 @@ extern "C" {
     fn TWHDWalletGetKey(wallet: *const u8, coin: u32, derivation: *const u8) -> *const u8;
 
     fn TWAnyAddressCreateWithPublicKey(public_key: *const u8, coin: u8) -> *const u8;
+    fn TWAnyAddressCreateWithPublicKeyDerivation(public_key: *const u8, coin: u8, derivation: u8) -> *const u8;
     fn TWAnyAddressDescription(address: *const u8) -> *const u8;
     fn TWAnyAddressDelete(public_key: *const u8);
 
@@ -94,7 +95,6 @@ impl Drop for TWData {
 
 pub struct PrivateKey {
     wrapped: *const u8
-    // TODO delete when destructing
 }
 
 pub fn private_key_data(private_key: &PrivateKey) -> TWData {
@@ -121,7 +121,6 @@ impl Drop for PrivateKey {
 
 pub struct PublicKey {
     wrapped: *const u8
-    // TODO delete when destructing
 }
 
 pub fn public_key_data(public_key: &PublicKey) -> TWData {
@@ -138,7 +137,6 @@ impl Drop for PublicKey {
 
 pub struct HDWallet {
     wrapped: *const u8
-    // TODO delete when destructing
 }
 
 pub fn hd_wallet_create_with_mnemonic(mnemonic: &TWString, passphrase: &TWString) -> HDWallet {
@@ -170,11 +168,15 @@ impl Drop for HDWallet {
 
 pub struct AnyAddress {
     wrapped: *const u8
-    // TODO delete when destructing
 }
 
 pub fn any_address_create_with_public_key(public_key: &PublicKey, coin: u8) -> AnyAddress {
     let ptr = unsafe { TWAnyAddressCreateWithPublicKey(public_key.wrapped, coin) };
+    return AnyAddress { wrapped: ptr };
+}
+
+pub fn any_address_create_with_public_key_derivation(public_key: &PublicKey, coin: u8, derivation: u8) -> AnyAddress {
+    let ptr = unsafe { TWAnyAddressCreateWithPublicKeyDerivation(public_key.wrapped, coin, derivation) };
     return AnyAddress { wrapped: ptr };
 }
 

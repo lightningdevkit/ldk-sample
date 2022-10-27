@@ -408,7 +408,7 @@ fn list_channels(channel_manager: &ChannelManager) {
 		return;
 	}
 	for c in channels {
-		println!("{} open channels", channels.len());
+		println!("{} open channels:", channels.len());
 		print!("  val {}  bal {}  ", c.channel_value_satoshis, c.balance_msat);
 		match c.short_channel_id {
 			Some(id) => { print!("{} ", id); },

@@ -40,16 +40,14 @@ fn derive_pubkey_from_pk(priv_key: &Vec<u8>) -> Vec<u8> {
 
 pub fn derive_address_from_pk(priv_key: &Vec<u8>, network: Network) -> String {
     let pub_key = derive_pubkey_from_pk_intern(priv_key);
-    let any_addr = any_address_create_with_public_key(&pub_key, 0);
+    let derivation = match network {
+        Network::Testnet => 4, // DerivationBitcoinTestnet
+        Network::Bitcoin |
+        _ => 0, // DerivationDefault
+    };
+    let any_addr = any_address_create_with_public_key_derivation(&pub_key, 0, derivation);
     let addr_twstring = any_address_description(&any_addr);
-    ////////////// TODO hardcoded testnet address
-    if network == Network::Testnet {
-        //"tb1qp265zr4w7c9s3nmd0mv3x357f6y8mdphn9qw92".to_string()
-        "tb1q7t37kn0rm2ftlfw6uwghvy59hv7hhz76u9j00d".to_string()
-        //"tb1qwj4ezzdhcnk687utkhns8xens5832f8sthluw5".to_string()
-    } else {
-        addr_twstring.to_string()
-    }
+    addr_twstring.to_string()
 }
 
 impl Wallet {
