@@ -320,6 +320,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 							continue;
 						}
 					};
+					println!("Invoice with amount {} msats, paying ...", invoice.amount_milli_satoshis().unwrap());
 
 					send_payment(&*invoice_payer, &invoice, outbound_payments.clone());
 				}

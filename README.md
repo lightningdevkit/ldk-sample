@@ -47,7 +47,6 @@ cargo run importwallet
 
 ### TODO
 
-- Put default 'first hop node' address into settings
 - Auto channel open on send
 - Get rid of Btc Core for UTXOs, use Blockbook
 - Get rid of Btc Core for block source, use Blockbook
