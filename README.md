@@ -11,6 +11,9 @@ https://github.com/lightningdevkit/ldk-sample
   - a Btc Core node (bitcoind), external, for obtaining UTXOs and as a block source
 - It simulates a rudimentary wallet: imported from mnemonic, single address used, private key stored.
 - At channel open, funding tx is created, from wallet address, using wallet-core
+- When funds are no longer used by LDK, and become spendable, transfers them to L1 wallet (main address)
+- It has setting for default LN peer (first-hop or routing node)
+- It has `opendc` (open default connection) to connect to default peer
 - LDK state is stored in LDK data dir (as in original sample app)
 
 
@@ -50,6 +53,7 @@ cargo run importwallet
 - Auto channel open on send
 - Get rid of Btc Core for UTXOs, use Blockbook
 - Get rid of Btc Core for block source, use Blockbook
+- Get rid of Btc Core: get network info, fee, broadcast
 - (Move wallet-core proj dir setting from build.rs to env)
 - (check in rust interfacing Rust module in wallet core, use it from there)
 

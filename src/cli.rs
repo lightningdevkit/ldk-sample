@@ -64,38 +64,15 @@ pub(crate) fn handle_import_wallet(network: Network) -> bool {
 		Some(l) => l.unwrap(),
 		None => return is_import,
 	};
-	
-	if !is_mnemonic_valid(mnemonic.as_str()) {
-		println!("Mnemonic is invalid! {}", mnemonic);
-		return is_import;
-	}
-	println!("Mnemonic is valid");
-	let priv_key = match priv_key_from_mnemonic(mnemonic.as_str(), network) {
-		None => {
-			println!("Could not derive private key");
-			return is_import
-		},
-		Some(pk) => pk
+
+	let wallet = match import_wallet_mnemonic(&mnemonic, network) {
+		None => return is_import,
+		Some(wallet) => wallet,
 	};
-	println!("Private key derived ({} bytes)", priv_key.len());
-	if !set_private_key(&priv_key) {
-		println!("Could not save private key");
-		return is_import
-	}
-	// check back
-	match private_key() {
-		None => {
-			println!("Could not read back saved private key");
-			return is_import
-		},
-		Some(_priv_key_read_back) => println!("Private key saved"),
-	}
 
-	// also derive address, for display
-	let address = derive_address_from_pk(&priv_key, network);
-	println!("Main wallet address: {}", address);
+    wallet.print_address();
 
-	return is_import
+	is_import
 }
 
 /*

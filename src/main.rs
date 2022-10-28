@@ -446,16 +446,15 @@ async fn start_ldk() {
 		return;
 	}
 
-	// read pk
-	let private_key = match env::private_key() {
+	// load wallet
+	let mut wallet = match load_wallet(env.network) {
 		None => {
-			println!("Private key not found, try using 'importwallet' argument");
+			println!("Could not load wallet, try using 'importwallet' argument");
 			return;
 		},
-		Some(private_key) => private_key,
+		Some(wallet) => wallet,
 	};
-	let mut wallet: Wallet = Wallet::from_pk(&private_key, env.network);
-	println!("L1 wallet address: {}    pubkey:  {}", wallet.address, hex::encode(wallet.public_key.clone()));
+	wallet.print_address();
 
 
 
@@ -509,7 +508,7 @@ async fn start_ldk() {
 
 	// Retrieve wallet UTXOs, check balance
 	wallet.retrieve_and_store_unspent(&bitcoind_client).await;
-	println!("L1 balance:  {}   utxos: {}", wallet.balance, wallet.utxos.utxos.len());
+	wallet.print_balance();
 	if wallet.balance <= 0.0 {
 		println!("WARNING: Wallet has empty balance! Send some funds to the wallet ({})", wallet.address);
 	}

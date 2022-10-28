@@ -5,6 +5,9 @@ use crate::convert::Unspents;
 use crate::bitcoind_client::BitcoindClient;
 use protobuf::Message;
 use bitcoin::network::constants::Network;
+use std::fs;
+
+static PK_FILENAME: &str = ".pk_secret";
 
 pub struct Wallet {
     // own address
@@ -14,6 +17,72 @@ pub struct Wallet {
     pub public_key: Vec<u8>,
     pub utxos: Unspents,
     pub balance: f64,
+}
+
+pub fn import_wallet_mnemonic(mnemonic: &str, network: Network) -> Option<Wallet> {
+    if !is_mnemonic_valid(mnemonic) {
+		println!("Mnemonic is invalid! {}", mnemonic);
+		return None;
+	}
+	println!("Mnemonic is valid");
+	let priv_key = match priv_key_from_mnemonic(mnemonic, network) {
+		None => {
+			println!("Could not derive private key");
+			return None
+		},
+		Some(pk) => pk
+	};
+	println!("Private key derived ({} bytes)", priv_key.len());
+	if !save_private_key(&priv_key) {
+		println!("Could not save private key");
+		return None
+	}
+	// check back
+	match read_private_key() {
+		None => {
+			println!("Could not read back saved private key");
+			return None;
+		},
+		Some(_priv_key_read_back) => println!("Private key saved"),
+	}
+
+    Some(Wallet::from_pk(&priv_key, network))
+}
+
+pub fn load_wallet(network: Network) -> Option<Wallet> {
+    let pk = read_private_key();
+    match pk {
+        None => {
+		    println!("Could not read wallet (private key, {})", PK_FILENAME);
+            return None;
+        },
+        Some(key) => Some(Wallet::from_pk(&key, network)),
+    }
+}
+
+fn read_private_key() -> Option<Vec<u8>> {
+    let contents = fs::read_to_string(PK_FILENAME);
+    match contents {
+        Err(_e) => None,
+        Ok(s) => {
+            if s.len() < 64 {
+                return None;
+            }
+            let key_decode = hex::decode(s.trim());
+            match key_decode {
+                Err(_e) => None,
+                Ok(key) => Some(key)
+            }
+        }
+    }
+}
+
+fn save_private_key(key: &Vec<u8>) -> bool {
+    let hex_string = hex::encode(key);
+    match fs::write(PK_FILENAME, hex_string) {
+        Err(_) => return false,
+        Ok(_) => return true,
+    }
 }
 
 pub fn is_mnemonic_valid(mnemonic: &str) -> bool {
@@ -59,6 +128,19 @@ impl Wallet {
             utxos: Unspents { utxos: Vec::new() },
             balance: 0.0,
         }
+    }
+
+    pub fn print_address(&self) {
+        println!("L1 wallet address: {}    pubkey:  {}", self.address, hex::encode(self.public_key.clone()));
+    }
+
+    pub fn print_balance(&self) {
+        println!("L1 balance:  {}   utxos: {}", self.balance, self.utxos.utxos.len());
+    }
+
+    pub fn print(&self) {
+        self.print_address();
+        self.print_balance();
     }
 
     pub async fn retrieve_unspent(&self, bitcoind_client: &BitcoindClient) -> Unspents {

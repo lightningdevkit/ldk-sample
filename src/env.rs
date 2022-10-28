@@ -3,10 +3,7 @@ use lightning::ln::msgs::NetAddress;
 use std::net::IpAddr;
 use dotenv;
 use std::env;
-use std::fs;
 use std::str::FromStr;
-
-static PK_FILENAME: &str = ".pk_secret";
 
 pub struct Env {
     pub network: Network,
@@ -100,31 +97,6 @@ pub fn env_init() -> Env {
     };
 }
 
-pub fn private_key() -> Option<Vec<u8>> {
-    let contents = fs::read_to_string(PK_FILENAME);
-    match contents {
-        Err(_e) => None,
-        Ok(s) => {
-            if s.len() < 64 {
-                return None;
-            }
-            let key_decode = hex::decode(s.trim());
-            match key_decode {
-                Err(_e) => None,
-                Ok(key) => Some(key)
-            }
-        }
-    }
-}
-
-pub fn set_private_key(key: &Vec<u8>) -> bool {
-    let hex_string = hex::encode(key);
-    match fs::write(PK_FILENAME, hex_string) {
-        Err(_) => return false,
-        Ok(_) => return true,
-    }
-}
-
 impl Env {
     pub fn print(&self) {
         println!("Env:");
@@ -132,10 +104,5 @@ impl Env {
         println!("  default peer: {}", self.default_peer);
         println!("  RPC node:     {}:*****@{}:{}", self.bitcoind_rpc_username, self.bitcoind_rpc_host, self.bitcoind_rpc_port);
         println!("  data path:    {}", self.ldk_data_dir);
-        let pk = private_key();
-        match pk {
-            Some(key) => println!("  private key:  ******** ({})", key.len()),
-            None => println!("  private key:  not set!"),
-        }
     }
 }
