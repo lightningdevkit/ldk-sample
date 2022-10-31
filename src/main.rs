@@ -15,8 +15,8 @@ use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
+use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
@@ -43,6 +43,7 @@ use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::fmt;
 use std::fs;
 use std::fs::File;
@@ -100,15 +101,14 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 
-pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
-	Arc<ChannelManager>,
-	Router,
-	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>>>,
-	Arc<FilesystemLogger>,
-	E,
->;
+pub(crate) type InvoicePayer<E> =
+	payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<FilesystemLogger>, E>;
 
-type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
+type Router = DefaultRouter<
+	Arc<NetworkGraph>,
+	Arc<FilesystemLogger>,
+	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>>>,
+>;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
@@ -544,7 +544,10 @@ async fn start_ldk() {
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
 		let funding_outpoint = item.2;
-		chain_monitor.watch_channel(funding_outpoint, channel_monitor).unwrap();
+		assert_eq!(
+			chain_monitor.watch_channel(funding_outpoint, channel_monitor),
+			ChannelMonitorUpdateStatus::Completed
+		);
 	}
 
 	// Step 11: Optional: Initialize the P2PGossipSync
@@ -560,8 +563,11 @@ async fn start_ldk() {
 
 	// Step 12: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
-	let onion_messenger: Arc<OnionMessenger> =
-		Arc::new(OnionMessenger::new(keys_manager.clone(), logger.clone()));
+	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+		IgnoringMessageHandler {},
+	));
 	let mut ephemeral_bytes = [0; 32];
 	let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
@@ -573,7 +579,7 @@ async fn start_ldk() {
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		keys_manager.get_node_secret(Recipient::Node).unwrap(),
-		current_time,
+		current_time.try_into().unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
 		IgnoringMessageHandler {},
@@ -663,11 +669,11 @@ async fn start_ldk() {
 		network_graph.clone(),
 		logger.clone(),
 		keys_manager.get_secure_random_bytes(),
+		scorer.clone(),
 	);
 	let invoice_payer = Arc::new(InvoicePayer::new(
 		channel_manager.clone(),
 		router,
-		scorer.clone(),
 		logger.clone(),
 		event_handler,
 		payment::Retry::Timeout(Duration::from_secs(10)),
@@ -758,6 +764,7 @@ async fn start_ldk() {
 		outbound_payments,
 		ldk_data_dir.clone(),
 		network,
+		Arc::clone(&logger),
 	)
 	.await;
 
