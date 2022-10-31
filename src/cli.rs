@@ -181,7 +181,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
 		let mut line = String::new();
 		if let Err(e) = io::stdin().read_line(&mut line) {
-			break println!("ERROR: {e:#}");
+			break println!("ERROR: {}", e);
 		}
 
 		if line.len() == 0 {
