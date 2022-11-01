@@ -9,12 +9,13 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
-use lightning::ln::msgs::NetAddress;
+use lightning::ln::msgs::{DecodeError, NetAddress};
 use lightning::ln::{PaymentHash, PaymentPreimage};
-use lightning::onion_message::Destination;
+use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
+use lightning::util::ser::{MaybeReadableArgs, Writeable, Writer};
 use lightning_invoice::payment::PaymentError;
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
@@ -140,12 +141,35 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	})
 }
 
+struct UserOnionMessageContents {
+	tlv_type: u64,
+	data: Vec<u8>,
+}
+
+impl CustomOnionMessageContents for UserOnionMessageContents {
+	fn tlv_type(&self) -> u64 {
+		self.tlv_type
+	}
+}
+impl MaybeReadableArgs<u64> for UserOnionMessageContents {
+	fn read<R: std::io::Read>(_r: &mut R, _args: u64) -> Result<Option<Self>, DecodeError> {
+		// UserOnionMessageContents is only ever passed to `send_onion_message`, never to an
+		// `OnionMessageHandler`, thus it does not need to implement the read side here.
+		unreachable!();
+	}
+}
+impl Writeable for UserOnionMessageContents {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), std::io::Error> {
+		w.write_all(&self.data)
+	}
+}
+
 pub(crate) async fn poll_for_user_input<E: EventHandler>(
 	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
 	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>, onion_messenger: Arc<OnionMessenger>,
 	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	ldk_data_dir: String, network: Network,
+	ldk_data_dir: String, network: Network, logger: Arc<disk::FilesystemLogger>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -157,7 +181,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
 		let mut line = String::new();
 		if let Err(e) = io::stdin().read_line(&mut line) {
-			break println!("ERROR: {e:#}");
+			break println!("ERROR: {}", e);
 		}
 
 		if line.len() == 0 {
@@ -304,11 +328,12 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 
 					get_invoice(
 						amt_msat.unwrap(),
-						inbound_payments.clone(),
-						channel_manager.clone(),
-						keys_manager.clone(),
+						Arc::clone(&inbound_payments),
+						&*channel_manager,
+						Arc::clone(&keys_manager),
 						network,
 						expiry_secs.unwrap(),
+						Arc::clone(&logger),
 					);
 				}
 				"connectpeer" => {
@@ -456,10 +481,25 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					if errored {
 						continue;
 					}
+					let tlv_type = match words.next().map(|ty_str| ty_str.parse()) {
+						Some(Ok(ty)) if ty >= 64 => ty,
+						_ => {
+							println!("Need an integral message type above 64");
+							continue;
+						}
+					};
+					let data = match words.next().map(|s| hex_utils::to_vec(s)) {
+						Some(Some(data)) => data,
+						_ => {
+							println!("Need a hex data string");
+							continue;
+						}
+					};
 					let destination_pk = node_pks.pop().unwrap();
 					match onion_messenger.send_onion_message(
 						&node_pks,
 						Destination::Node(destination_pk),
+						OnionMessageContents::Custom(UserOnionMessageContents { tlv_type, data }),
 						None,
 					) {
 						Ok(()) => println!("SUCCESS: forwarded onion message to first hop"),
@@ -499,7 +539,9 @@ fn help() {
 	println!("      getinvoice <amt_msats> <expiry_secs>");
 	println!("\n  Other:");
 	println!("      signmessage <message>");
-	println!("      sendonionmessage <node_id_1,node_id_2,..,destination_node_id>");
+	println!(
+		"      sendonionmessage <node_id_1,node_id_2,..,destination_node_id> <type> <hex_bytes>"
+	);
 	println!("      nodeinfo");
 }
 
@@ -764,8 +806,9 @@ fn keysend<E: EventHandler, K: KeysInterface>(
 }
 
 fn get_invoice(
-	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: Arc<ChannelManager>,
+	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: &ChannelManager,
 	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32,
+	logger: Arc<disk::FilesystemLogger>,
 ) {
 	let mut payments = payment_storage.lock().unwrap();
 	let currency = match network {
@@ -775,8 +818,9 @@ fn get_invoice(
 		Network::Signet => Currency::Signet,
 	};
 	let invoice = match utils::create_invoice_from_channelmanager(
-		&channel_manager,
+		channel_manager,
 		keys_manager,
+		logger,
 		currency,
 		Some(amt_msat),
 		"ldk-tutorial-node".to_string(),

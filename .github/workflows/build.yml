@@ -7,10 +7,13 @@ jobs:
     strategy:
       matrix:
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
-        toolchain: [ stable, beta ]
+        toolchain: [ stable, 1.48.0 ]
         include:
           - toolchain: stable
             check-fmt: true
+        exclude:
+          - platform: macos-latest
+            toolchain: 1.48.0
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
