@@ -316,7 +316,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ldk-tutorial-node"
+name = "ldk-sample"
 version = "0.1.0"
 dependencies = [
  "base64",
