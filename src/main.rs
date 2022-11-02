@@ -507,8 +507,7 @@ async fn start_ldk() {
 	// Step 10: Sync ChannelMonitors and ChannelManager to chain tip
 	let mut chain_listener_channel_monitors = Vec::new();
 	let mut cache = UnboundedCache::new();
-	let mut chain_tip: Option<poll::ValidatedBlockHeader> = None;
-	if restarting_node {
+	let chain_tip = if restarting_node {
 		let mut chain_listeners = vec![(
 			channel_manager_blockhash,
 			&channel_manager as &(dyn chain::Listen + Send + Sync),
@@ -529,17 +528,18 @@ async fn start_ldk() {
 				&monitor_listener_info.1 as &(dyn chain::Listen + Send + Sync),
 			));
 		}
-		chain_tip = Some(
-			init::synchronize_listeners(
-				bitcoind_client.as_ref(),
-				args.network,
-				&mut cache,
-				chain_listeners,
-			)
-			.await
-			.unwrap(),
-		);
-	}
+
+		init::synchronize_listeners(
+			bitcoind_client.as_ref(),
+			args.network,
+			&mut cache,
+			chain_listeners,
+		)
+		.await
+		.unwrap()
+	} else {
+		polled_chain_tip
+	};
 
 	// Step 11: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
@@ -614,9 +614,6 @@ async fn start_ldk() {
 	});
 
 	// Step 15: Connect and Disconnect Blocks
-	if chain_tip.is_none() {
-		chain_tip = Some(polled_chain_tip);
-	}
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
@@ -624,8 +621,7 @@ async fn start_ldk() {
 	tokio::spawn(async move {
 		let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
 		let chain_listener = (chain_monitor_listener, channel_manager_listener);
-		let mut spv_client =
-			SpvClient::new(chain_tip.unwrap(), chain_poller, &mut cache, &chain_listener);
+		let mut spv_client = SpvClient::new(chain_tip, chain_poller, &mut cache, &chain_listener);
 		loop {
 			spv_client.poll_best_tip().await.unwrap();
 			tokio::time::sleep(Duration::from_secs(1)).await;
