@@ -21,7 +21,7 @@ use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
 use std::io::Write;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
@@ -38,107 +38,6 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_listen_addr: Vec<NetAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
-}
-
-pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
-	if env::args().len() < 3 {
-		println!("ldk-tutorial-node requires 3 arguments: `cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*]`");
-		return Err(());
-	}
-	let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
-	let bitcoind_rpc_info_parts: Vec<&str> = bitcoind_rpc_info.rsplitn(2, "@").collect();
-	if bitcoind_rpc_info_parts.len() != 2 {
-		println!("ERROR: bad bitcoind RPC URL provided");
-		return Err(());
-	}
-	let rpc_user_and_password: Vec<&str> = bitcoind_rpc_info_parts[1].split(":").collect();
-	if rpc_user_and_password.len() != 2 {
-		println!("ERROR: bad bitcoind RPC username/password combo provided");
-		return Err(());
-	}
-	let bitcoind_rpc_username = rpc_user_and_password[0].to_string();
-	let bitcoind_rpc_password = rpc_user_and_password[1].to_string();
-	let bitcoind_rpc_path: Vec<&str> = bitcoind_rpc_info_parts[0].split(":").collect();
-	if bitcoind_rpc_path.len() != 2 {
-		println!("ERROR: bad bitcoind RPC path provided");
-		return Err(());
-	}
-	let bitcoind_rpc_host = bitcoind_rpc_path[0].to_string();
-	let bitcoind_rpc_port = bitcoind_rpc_path[1].parse::<u16>().unwrap();
-
-	let ldk_storage_dir_path = env::args().skip(2).next().unwrap();
-
-	let mut ldk_peer_port_set = true;
-	let ldk_peer_listening_port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
-		Some(Ok(p)) => p,
-		Some(Err(_)) => {
-			ldk_peer_port_set = false;
-			9735
-		}
-		None => {
-			ldk_peer_port_set = false;
-			9735
-		}
-	};
-
-	let mut arg_idx = match ldk_peer_port_set {
-		true => 4,
-		false => 3,
-	};
-	let network: Network = match env::args().skip(arg_idx).next().as_ref().map(String::as_str) {
-		Some("testnet") => Network::Testnet,
-		Some("regtest") => Network::Regtest,
-		Some("signet") => Network::Signet,
-		Some(net) => {
-			panic!("Unsupported network provided. Options are: `regtest`, `testnet`, and `signet`. Got {}", net);
-		}
-		None => Network::Testnet,
-	};
-
-	let ldk_announced_node_name = match env::args().skip(arg_idx + 1).next().as_ref() {
-		Some(s) => {
-			if s.len() > 32 {
-				panic!("Node Alias can not be longer than 32 bytes");
-			}
-			arg_idx += 1;
-			let mut bytes = [0; 32];
-			bytes[..s.len()].copy_from_slice(s.as_bytes());
-			bytes
-		}
-		None => [0; 32],
-	};
-
-	let mut ldk_announced_listen_addr = Vec::new();
-	loop {
-		match env::args().skip(arg_idx + 1).next().as_ref() {
-			Some(s) => match IpAddr::from_str(s) {
-				Ok(IpAddr::V4(a)) => {
-					ldk_announced_listen_addr
-						.push(NetAddress::IPv4 { addr: a.octets(), port: ldk_peer_listening_port });
-					arg_idx += 1;
-				}
-				Ok(IpAddr::V6(a)) => {
-					ldk_announced_listen_addr
-						.push(NetAddress::IPv6 { addr: a.octets(), port: ldk_peer_listening_port });
-					arg_idx += 1;
-				}
-				Err(_) => panic!("Failed to parse announced-listen-addr into an IP address"),
-			},
-			None => break,
-		}
-	}
-
-	Ok(LdkUserInfo {
-		bitcoind_rpc_username,
-		bitcoind_rpc_password,
-		bitcoind_rpc_host,
-		bitcoind_rpc_port,
-		ldk_storage_dir_path,
-		ldk_peer_listening_port,
-		ldk_announced_listen_addr,
-		ldk_announced_node_name,
-		network,
-	})
 }
 
 struct UserOnionMessageContents {
