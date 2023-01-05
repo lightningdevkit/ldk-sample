@@ -55,9 +55,9 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	};
 
 	let (bitcoind_rpc_username, bitcoind_rpc_password) = if bitcoind_rpc_info_parts.len() == 1 {
-		get_rpc_auth_from_cookie(None, Some(network), None)
+		get_rpc_auth_from_env_vars()
 			.or(get_rpc_auth_from_env_file(None))
-			.or(get_rpc_auth_from_env_vars())
+			.or(get_rpc_auth_from_cookie(None, Some(network), None))
 			.or({
 				println!("ERROR: unable to get bitcoind RPC username and password");
 				print_rpc_auth_help();
