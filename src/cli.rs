@@ -256,6 +256,32 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						println!("SUCCESS: connected to peer {}", pubkey);
 					}
 				}
+				"disconnectpeer" => {
+					let peer_pubkey = words.next();
+					if peer_pubkey.is_none() {
+						println!("ERROR: disconnectpeer requires peer public key: `disconnectpeer <peer_pubkey>`");
+						continue;
+					}
+
+					let peer_pubkey =
+						match bitcoin::secp256k1::PublicKey::from_str(peer_pubkey.unwrap()) {
+							Ok(pubkey) => pubkey,
+							Err(e) => {
+								println!("ERROR: {}", e.to_string());
+								continue;
+							}
+						};
+
+					if do_disconnect_peer(
+						peer_pubkey,
+						peer_manager.clone(),
+						channel_manager.clone(),
+					)
+					.is_ok()
+					{
+						println!("SUCCESS: disconnected from peer {}", peer_pubkey);
+					}
+				}
 				"listchannels" => list_channels(&channel_manager, &network_graph),
 				"listpayments" => {
 					list_payments(inbound_payments.clone(), outbound_payments.clone())
@@ -429,6 +455,7 @@ fn help() {
 	println!("      listchannels");
 	println!("\n  Peers:");
 	println!("      connectpeer pubkey@host:port");
+	println!("      disconnectpeer <peer_pubkey>");
 	println!("      listpeers");
 	println!("\n  Payments:");
 	println!("      sendpayment <invoice>");
@@ -585,6 +612,29 @@ pub(crate) async fn do_connect_peer(
 		}
 		None => Err(()),
 	}
+}
+
+fn do_disconnect_peer(
+	pubkey: bitcoin::secp256k1::PublicKey, peer_manager: Arc<PeerManager>,
+	channel_manager: Arc<ChannelManager>,
+) -> Result<(), ()> {
+	//check for open channels with peer
+	for channel in channel_manager.list_channels() {
+		if channel.counterparty.node_id == pubkey {
+			println!("Error: Node has an active channel with this peer, close any channels first");
+			return Err(());
+		}
+	}
+
+	//check the pubkey matches a valid connected peer
+	let peers = peer_manager.get_peer_node_ids();
+	if !peers.contains(&pubkey) {
+		println!("Error: Could not find peer {}", pubkey);
+		return Err(());
+	}
+
+	peer_manager.disconnect_by_node_id(pubkey, false);
+	Ok(())
 }
 
 fn open_channel(
