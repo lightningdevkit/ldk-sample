@@ -175,7 +175,7 @@ fn get_cookie_path(
 	};
 
 	let data_dir_path_with_net = match network {
-		Some(Network::Testnet) => data_dir_path.join("testnet"),
+		Some(Network::Testnet) => data_dir_path.join("testnet3"),
 		Some(Network::Regtest) => data_dir_path.join("regtest"),
 		Some(Network::Signet) => data_dir_path.join("signet"),
 		_ => data_dir_path,
@@ -279,7 +279,7 @@ mod rpc_auth_tests {
 				Some((TEST_DATA_DIR, true)),
 				Some(Network::Testnet),
 				None,
-				env::home_dir().unwrap().join(TEST_DATA_DIR).join("testnet").join(".cookie"),
+				env::home_dir().unwrap().join(TEST_DATA_DIR).join("testnet3").join(".cookie"),
 			),
 			(
 				Some((TEST_DATA_DIR, false)),
