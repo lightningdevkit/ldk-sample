@@ -1,3 +1,4 @@
+mod args;
 pub mod bitcoind_client;
 mod cli;
 mod convert;
@@ -358,7 +359,7 @@ async fn handle_ldk_events(
 }
 
 async fn start_ldk() {
-	let args = match cli::parse_startup_args() {
+	let args = match args::parse_startup_args() {
 		Ok(user_args) => user_args,
 		Err(()) => return,
 	};
