@@ -4,15 +4,11 @@ use crate::{
 	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, OnionMessenger,
 	PaymentInfo, PaymentInfoStorage, PeerManager,
 };
-use bitcoin::bech32::Error;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
-use futures::stream::ForEach;
-use lightning::chain::chainmonitor;
 use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
-use lightning::ln::channelmanager::ChannelDetails;
 use lightning::ln::msgs::{DecodeError, NetAddress};
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
@@ -23,7 +19,6 @@ use lightning::util::events::EventHandler;
 use lightning::util::ser::{MaybeReadableArgs, Writeable, Writer};
 use lightning_invoice::payment::PaymentError;
 use lightning_invoice::{utils, Currency, Invoice};
-use serde_json::from_str;
 use std::env;
 use std::io;
 use std::io::Write;
@@ -31,7 +26,6 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
-use std::string;
 use std::sync::Arc;
 use std::time::Duration;
 use serde_json::{json};
@@ -154,6 +148,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 								Path::new(&peer_data_path),
 								peer_pubkey_and_ip_addr,
 							);
+							println!("Opening new channel:\n{}", serde_json::to_string_pretty(&channel).unwrap())
 						},
 						Err(message) => {
 							println!("Error: {}", message);
@@ -752,6 +747,7 @@ fn open_channel(
 			Ok(channel_json)
 		}
 		Err(e) => {
+			println!("Error: {:?}", e);
 			Err("Failed to open channel".to_string())
 		}
 	}
