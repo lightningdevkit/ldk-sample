@@ -304,7 +304,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Ok(channels) => {
 							println!("{}", serde_json::to_string_pretty(&channels).unwrap())
 						}
-						Err(_) => print!("ERROR: Could not fetch peer info"),
+						Err(_) => print!("ERROR: Could not fetch channel info"),
 					};
 				}
 				"listpayments" => {
@@ -707,7 +707,7 @@ fn do_disconnect_peer(
 	//check for open channels with peer
 	for channel in channel_manager.list_channels() {
 		if channel.counterparty.node_id == pubkey {
-			println!("Error: Node has an active channel with this peer, close any channels first");
+			println!("ERROR: Node has an active channel with this peer, close any channels first");
 			return Err(());
 		}
 	}
@@ -715,7 +715,7 @@ fn do_disconnect_peer(
 	//check the pubkey matches a valid connected peer
 	let peers = peer_manager.get_peer_node_ids();
 	if !peers.contains(&pubkey) {
-		println!("Error: Could not find peer {}", pubkey);
+		println!("ERROR: Could not find peer {}", pubkey);
 		return Err(());
 	}
 
@@ -742,7 +742,7 @@ fn open_channel(
 
 	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
 		Ok(_) => {
-			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
+			println!("EVENT: Initiated channel with peer {}. ", peer_pubkey);
 			let channel_json = json!({
 				"peer_pubkey": peer_pubkey.to_string(),
 				"amount": channel_amt_sat,
@@ -751,7 +751,7 @@ fn open_channel(
 			Ok(channel_json)
 		}
 		Err(e) => {
-			println!("Error: {:?}", e);
+			println!("ERROR: {:?}", e);
 			Err("Failed to open channel".to_string())
 		}
 	}
