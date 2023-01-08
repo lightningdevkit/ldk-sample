@@ -148,12 +148,12 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 								peer_pubkey_and_ip_addr,
 							);
 							println!(
-								"Opening new channel:\n{}",
+								"Channel details:\n{}",
 								serde_json::to_string_pretty(&channel).unwrap()
 							)
 						}
 						Err(message) => {
-							println!("Error: {}", message);
+							println!("ERROR: {}", message);
 						}
 					}
 				}
@@ -350,7 +350,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					};
 
 					match close_channel(channel_id, peer_pubkey, channel_manager.clone()) {
-						Ok(event) => println!("EVENT: {}", event),
+						Ok(msg) => println!("SUCCESS: {}", msg),
 						Err(e) => println!("ERROR: Could not close channel\n{:?}", e),
 					}
 				}
@@ -389,20 +389,20 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					};
 
 					match force_close_channel(channel_id, peer_pubkey, channel_manager.clone()) {
-						Ok(event) => println!("EVENT: {}", event),
+						Ok(msg) => println!("SUCCESS: {}", msg),
 						Err(e) => println!("ERROR: Could not force close channel\n{:?}", e),
 					}
 				}
 				"nodeinfo" => {
 					match node_info(&channel_manager, &peer_manager) {
 						Ok(info) => println!("{}", serde_json::to_string_pretty(&info).unwrap()),
-						Err(_) => print!("Error: Could not fetch node info"),
+						Err(_) => print!("ERROR: Could not fetch node info"),
 					};
 				}
 				"listpeers" => {
 					match list_peers(peer_manager.clone()) {
 						Ok(peers) => println!("{}", serde_json::to_string_pretty(&peers).unwrap()),
-						Err(_) => print!("Error: Could not fetch peer info"),
+						Err(_) => print!("ERROR: Could not fetch peer info"),
 					};
 				}
 				"signmessage" => {
@@ -745,7 +745,8 @@ fn open_channel(
 			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
 			let channel_json = json!({
 				"peer_pubkey": peer_pubkey.to_string(),
-				"amount": channel_amt_sat
+				"amount": channel_amt_sat,
+				"public": announced_channel
 			});
 			Ok(channel_json)
 		}
@@ -905,7 +906,7 @@ fn close_channel(
 	channel_id: [u8; 32], counterparty_node_id: PublicKey, channel_manager: Arc<ChannelManager>,
 ) -> Result<String, APIError> {
 	let result = match channel_manager.close_channel(&channel_id, &counterparty_node_id) {
-		Ok(()) => Ok("EVENT: initiating channel close".to_string()),
+		Ok(()) => Ok("Initiating channel close".to_string()),
 		Err(e) => Err(e),
 	};
 	result
@@ -917,7 +918,7 @@ fn force_close_channel(
 	let result = match channel_manager
 		.force_close_broadcasting_latest_txn(&channel_id, &counterparty_node_id)
 	{
-		Ok(()) => Ok("EVENT: initiating channel force-close".to_string()),
+		Ok(()) => Ok("Initiating channel force-close".to_string()),
 		Err(e) => Err(e),
 	};
 	result
