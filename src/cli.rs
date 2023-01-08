@@ -19,6 +19,7 @@ use lightning::util::events::EventHandler;
 use lightning::util::ser::{MaybeReadableArgs, Writeable, Writer};
 use lightning_invoice::payment::PaymentError;
 use lightning_invoice::{utils, Currency, Invoice};
+use serde_json::json;
 use std::env;
 use std::io;
 use std::io::Write;
@@ -28,7 +29,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::{json};
 
 pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_username: String,
@@ -134,22 +134,24 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						None => false,
 					};
 
-
 					match open_channel(
 						pubkey,
 						chan_amt_sat.unwrap(),
 						announce_channel,
 						channel_manager.clone(),
-					)
-					{
+					) {
 						Ok(channel) => {
-							let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+							let peer_data_path =
+								format!("{}/channel_peer_data", ldk_data_dir.clone());
 							let _ = disk::persist_channel_peer(
 								Path::new(&peer_data_path),
 								peer_pubkey_and_ip_addr,
 							);
-							println!("Opening new channel:\n{}", serde_json::to_string_pretty(&channel).unwrap())
-						},
+							println!(
+								"Opening new channel:\n{}",
+								serde_json::to_string_pretty(&channel).unwrap()
+							)
+						}
 						Err(message) => {
 							println!("Error: {}", message);
 						}
@@ -171,8 +173,8 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 					};
 
 					match send_payment(&*invoice_payer, &invoice, outbound_payments.clone()) {
-						Ok(payment) => println!("{}", serde_json::to_string_pretty(&payment).unwrap()),
-						Err(message) => print!("Error: {}", message),
+						Ok(_) => continue,
+						Err(message) => println!("ERROR: {}", message),
 					};
 				}
 				"keysend" => {
@@ -210,8 +212,8 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						&*keys_manager,
 						outbound_payments.clone(),
 					) {
-						Ok(payment) => println!("{}", serde_json::to_string_pretty(&payment).unwrap()),
-						Err(message) => print!("Error: {}", message),
+						Ok(_) => continue,
+						Err(message) => println!("ERROR: {}", message),
 					};
 				}
 				"getinvoice" => {
@@ -248,8 +250,8 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						expiry_secs.unwrap(),
 						Arc::clone(&logger),
 					) {
-						Ok(invoice) => println!("SUCCESS: Generated invoice {}", invoice),
-						Err(message) => println!("Error: {}", message)
+						Ok(invoice) => println!("SUCCESS: Generated invoice\n{}", invoice),
+						Err(message) => println!("ERROR: {}", message),
 					};
 				}
 				"connectpeer" => {
@@ -266,11 +268,9 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 								continue;
 							}
 						};
-					match connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
-						.await
-					{
+					match connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone()).await {
 						Ok(()) => println!("SUCCESS: connected to peer {}", pubkey),
-						Err(()) => println!("ERROR: Could not connect to peer")
+						Err(()) => println!("ERROR: Could not connect to peer"),
 					}
 				}
 				"disconnectpeer" => {
@@ -301,16 +301,20 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 				}
 				"listchannels" => {
 					match list_channels(&channel_manager, &network_graph) {
-						Ok(channels) => println!("{}", serde_json::to_string_pretty(&channels).unwrap()),
+						Ok(channels) => {
+							println!("{}", serde_json::to_string_pretty(&channels).unwrap())
+						}
 						Err(_) => print!("ERROR: Could not fetch peer info"),
 					};
-				},
+				}
 				"listpayments" => {
 					match list_payments(inbound_payments.clone(), outbound_payments.clone()) {
-						Ok(payments) => println!("{}", serde_json::to_string_pretty(&payments).unwrap()),
-						Err(_) => print!("ERROR: Could not fetch payments")
+						Ok(payments) => {
+							println!("{}", serde_json::to_string_pretty(&payments).unwrap())
+						}
+						Err(_) => print!("ERROR: Could not fetch payments"),
 					};
-				},
+				}
 				"closechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
@@ -347,7 +351,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 
 					match close_channel(channel_id, peer_pubkey, channel_manager.clone()) {
 						Ok(event) => println!("EVENT: {}", event),
-						Err(e) => println!("ERROR: Could not close channel\n{:?}", e)
+						Err(e) => println!("ERROR: Could not close channel\n{:?}", e),
 					}
 				}
 				"forceclosechannel" => {
@@ -386,7 +390,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 
 					match force_close_channel(channel_id, peer_pubkey, channel_manager.clone()) {
 						Ok(event) => println!("EVENT: {}", event),
-						Err(e) => println!("ERROR: Could not force close channel\n{:?}", e)
+						Err(e) => println!("ERROR: Could not force close channel\n{:?}", e),
 					}
 				}
 				"nodeinfo" => {
@@ -394,26 +398,26 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						Ok(info) => println!("{}", serde_json::to_string_pretty(&info).unwrap()),
 						Err(_) => print!("Error: Could not fetch node info"),
 					};
-				},
+				}
 				"listpeers" => {
 					match list_peers(peer_manager.clone()) {
 						Ok(peers) => println!("{}", serde_json::to_string_pretty(&peers).unwrap()),
 						Err(_) => print!("Error: Could not fetch peer info"),
 					};
-				},
+				}
 				"signmessage" => {
 					const MSG_STARTPOS: usize = "signmessage".len() + 1;
 					if line.as_bytes().len() <= MSG_STARTPOS {
 						println!("ERROR: signmsg requires a message");
 						continue;
 					}
-					println!(
-						"{:?}",
-						lightning::util::message_signing::sign(
-							&line.as_bytes()[MSG_STARTPOS..],
-							&keys_manager.get_node_secret(Recipient::Node).unwrap()
-						)
-					);
+					match lightning::util::message_signing::sign(
+						&line.as_bytes()[MSG_STARTPOS..],
+						&keys_manager.get_node_secret(Recipient::Node).unwrap(),
+					) {
+						Ok(sig) => println!("{:?}", sig),
+						Err(e) => println!("ERROR: Couldn't sign message {:?}", e),
+					}
 				}
 				"sendonionmessage" => {
 					let path_pks_str = words.next();
@@ -502,7 +506,6 @@ fn help() {
 	println!("      sendpayment <invoice>");
 	println!("      keysend <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
-	println!("      getbalance");
 	println!("\n  Invoices:");
 	println!("      getinvoice <amt_msats> <expiry_secs>");
 	println!("\n  Other:");
@@ -513,7 +516,9 @@ fn help() {
 	println!("      nodeinfo");
 }
 
-fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) -> Result<serde_json::value::Value, ()> {
+fn node_info(
+	channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>,
+) -> Result<serde_json::value::Value, ()> {
 	let chans = channel_manager.list_channels();
 	let node_pubkey = channel_manager.get_our_node_id();
 	let num_channels = chans.len();
@@ -528,7 +533,7 @@ fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManag
 		"local_balance_msat": local_balance_msat,
 		"num_peers": num_peers
 	});
-	
+
 	Ok(node_info)
 }
 
@@ -537,36 +542,35 @@ fn list_peers(peer_manager: Arc<PeerManager>) -> Result<serde_json::value::Value
 	for peer in peer_manager.get_peer_node_ids() {
 		peers.push(peer.to_string());
 	}
-	let list_peers = json!({
-		"peers": peers
-	});
+	let list_peers = json!({ "peers": peers });
 
 	Ok(list_peers)
 }
 
-fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<NetworkGraph>) -> Result<serde_json::value::Value, ()> {
+fn list_channels(
+	channel_manager: &Arc<ChannelManager>, network_graph: &Arc<NetworkGraph>,
+) -> Result<serde_json::value::Value, ()> {
 	let mut channels: Vec<serde_json::value::Value> = Vec::new();
 	for channel in channel_manager.list_channels() {
-
 		let channel_id: String = hex_utils::hex_str(&channel.channel_id[..]);
 		let funding_txid: String = match channel.funding_txo {
 			Some(funding_txo) => funding_txo.txid.to_string(),
 			None => "".to_string(),
 		};
 		let peer_pubkey: String = hex_utils::hex_str(&channel.counterparty.node_id.serialize());
-		let peer_alias = match 
-		network_graph
-		.read_only()
-		.nodes()
-		.get(&NodeId::from_pubkey(&channel.counterparty.node_id)) {
-			Some(node_info) =>
+		let peer_alias = match network_graph
+			.read_only()
+			.nodes()
+			.get(&NodeId::from_pubkey(&channel.counterparty.node_id))
+		{
+			Some(node_info) => {
 				if let Some(announcement) = &node_info.announcement_info {
 					announcement.alias.to_string()
-				}
-				else {
+				} else {
 					"".to_string()
-				},
-			None => "".to_string()
+				}
+			}
+			None => "".to_string(),
 		};
 
 		let short_channel_id: u64 = match channel.short_channel_id {
@@ -575,7 +579,7 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 		};
 		let (inbound_capacity_msat, outbound_capacity_msat) = match channel.is_usable {
 			true => (channel.inbound_capacity_msat, channel.outbound_capacity_msat),
-			false => (0,0)
+			false => (0, 0),
 		};
 		let channel_capacity_msat = json!({
 			"inbound": inbound_capacity_msat,
@@ -592,21 +596,21 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 			"can_make_payments": channel.is_usable,
 			"channel_value_satoshis": channel.channel_value_satoshis,
 			"balance_msat": channel.balance_msat,
-			"channel_capacity": channel_capacity_msat,
+			"channel_capacity_msat": channel_capacity_msat,
 			"public": channel.is_public
 		});
 
 		channels.push(channel_json);
 	}
 
-	let list_channels = json!({
-		"channels": channels
-	});
+	let list_channels = json!({ "channels": channels });
 
 	Ok(list_channels)
 }
 
-fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage) -> Result<serde_json::value::Value, ()> {
+fn list_payments(
+	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
+) -> Result<serde_json::value::Value, ()> {
 	let inbound = inbound_payments.lock().unwrap();
 	let outbound = outbound_payments.lock().unwrap();
 	let mut total_inbound_json: Vec<serde_json::value::Value> = Vec::new();
@@ -652,7 +656,6 @@ fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: Paymen
 	});
 
 	Ok(list_payments)
-
 }
 
 pub(crate) async fn connect_peer_if_necessary(
@@ -742,7 +745,7 @@ fn open_channel(
 			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
 			let channel_json = json!({
 				"peer_pubkey": peer_pubkey.to_string(),
-				"amount": channel_amt_sat 
+				"amount": channel_amt_sat
 			});
 			Ok(channel_json)
 		}
@@ -765,7 +768,7 @@ fn send_payment<E: EventHandler>(
 		}
 		Err(PaymentError::Invoice(e)) => {
 			return Err(e.to_string());
-		}	
+		}
 		Err(PaymentError::Routing(e)) => {
 			return Err(e.err);
 		}
@@ -776,7 +779,7 @@ fn send_payment<E: EventHandler>(
 	};
 	let payment_successful = match status {
 		HTLCStatus::Succeeded | HTLCStatus::Pending => true,
-		HTLCStatus::Failed => false
+		HTLCStatus::Failed => false,
 	};
 	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
 	let payment_secret = Some(invoice.payment_secret().clone());
@@ -796,11 +799,10 @@ fn send_payment<E: EventHandler>(
 		"amount_msat": invoice.amount_milli_satoshis().unwrap()
 	});
 
-	if !payment_successful {
-		return Err("Failed to send payment".to_string())	
+	match payment_successful {
+		true => Ok(payment_json),
+		false => Err("Failed to send payment".to_string()),
 	}
-
-	Ok(payment_json)
 }
 
 fn keysend<E: EventHandler, K: KeysInterface>(
@@ -833,7 +835,7 @@ fn keysend<E: EventHandler, K: KeysInterface>(
 	};
 	let payment_successful = match status {
 		HTLCStatus::Succeeded | HTLCStatus::Pending => true,
-		HTLCStatus::Failed => false
+		HTLCStatus::Failed => false,
 	};
 	let mut payments = payment_storage.lock().unwrap();
 	payments.insert(
@@ -851,7 +853,7 @@ fn keysend<E: EventHandler, K: KeysInterface>(
 	});
 
 	if !payment_successful {
-		return Err("Failed to send payment".to_string())	
+		return Err("Failed to send payment".to_string());
 	}
 
 	Ok(payment_json)
@@ -881,7 +883,7 @@ fn get_invoice(
 		Ok(inv) => inv,
 		Err(e) => {
 			println!("ERROR: failed to create invoice: {:?}", e);
-			return Err(e.to_string())
+			return Err(e.to_string());
 		}
 	};
 
@@ -912,7 +914,9 @@ fn close_channel(
 fn force_close_channel(
 	channel_id: [u8; 32], counterparty_node_id: PublicKey, channel_manager: Arc<ChannelManager>,
 ) -> Result<String, APIError> {
-	let result = match channel_manager.force_close_broadcasting_latest_txn(&channel_id, &counterparty_node_id) {
+	let result = match channel_manager
+		.force_close_broadcasting_latest_txn(&channel_id, &counterparty_node_id)
+	{
 		Ok(()) => Ok("EVENT: initiating channel force-close".to_string()),
 		Err(e) => Err(e),
 	};
