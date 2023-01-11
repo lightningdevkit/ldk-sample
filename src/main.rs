@@ -28,6 +28,7 @@ use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::onion_message::SimpleArcOnionMessenger;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
+use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
@@ -38,7 +39,6 @@ use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
 use lightning_invoice::payment;
-use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
@@ -170,7 +170,14 @@ async fn handle_ldk_events(
 				io::stdout().flush().unwrap();
 			}
 		}
-		Event::PaymentReceived { payment_hash, purpose, amount_msat } => {
+		Event::PaymentClaimable {
+			payment_hash,
+			purpose,
+			amount_msat,
+			receiver_node_id: _,
+			via_channel_id: _,
+			via_user_channel_id: _,
+		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
 				hex_utils::hex_str(&payment_hash.0),
@@ -184,7 +191,7 @@ async fn handle_ldk_events(
 			};
 			channel_manager.claim_funds(payment_preimage.unwrap());
 		}
-		Event::PaymentClaimed { payment_hash, purpose, amount_msat } => {
+		Event::PaymentClaimed { payment_hash, purpose, amount_msat, receiver_node_id: _ } => {
 			println!(
 				"\nEVENT: claimed payment from payment hash {} of {} millisatoshis",
 				hex_utils::hex_str(&payment_hash.0),
@@ -342,6 +349,20 @@ async fn handle_ldk_events(
 				.unwrap();
 			bitcoind_client.broadcast_transaction(&spending_tx);
 		}
+		Event::ChannelReady {
+			ref channel_id,
+			user_channel_id: _,
+			ref counterparty_node_id,
+			channel_type: _,
+		} => {
+			println!(
+				"\nEVENT: Channel {} with peer {} is ready to be used!",
+				hex_utils::hex_str(channel_id),
+				hex_utils::hex_str(&counterparty_node_id.serialize()),
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
+		}
 		Event::ChannelClosed { channel_id, reason, user_channel_id: _ } => {
 			println!(
 				"\nEVENT: Channel {} closed due to: {:?}",
@@ -355,6 +376,7 @@ async fn handle_ldk_events(
 			// A "real" node should probably "lock" the UTXOs spent in funding transactions until
 			// the funding transaction either confirms, or this event is generated.
 		}
+		Event::HTLCIntercepted { .. } => {}
 	}
 }
 
@@ -641,7 +663,7 @@ async fn start_ldk() {
 	let bitcoind_rpc = bitcoind_client.clone();
 	let network_graph_events = network_graph.clone();
 	let handle = tokio::runtime::Handle::current();
-	let event_handler = move |event: &Event| {
+	let event_handler = move |event: Event| {
 		handle.block_on(handle_ldk_events(
 			&channel_manager_event_listener,
 			&bitcoind_rpc,
@@ -650,7 +672,7 @@ async fn start_ldk() {
 			&inbound_pmts_for_events,
 			&outbound_pmts_for_events,
 			network,
-			event,
+			&event,
 		));
 	};
 

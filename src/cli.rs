@@ -15,7 +15,7 @@ use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMes
 use lightning::routing::gossip::NodeId;
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::events::EventHandler;
-use lightning::util::ser::{MaybeReadableArgs, Writeable, Writer};
+use lightning::util::ser::{Writeable, Writer};
 use lightning_invoice::payment::PaymentError;
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
@@ -50,13 +50,7 @@ impl CustomOnionMessageContents for UserOnionMessageContents {
 		self.tlv_type
 	}
 }
-impl MaybeReadableArgs<u64> for UserOnionMessageContents {
-	fn read<R: std::io::Read>(_r: &mut R, _args: u64) -> Result<Option<Self>, DecodeError> {
-		// UserOnionMessageContents is only ever passed to `send_onion_message`, never to an
-		// `OnionMessageHandler`, thus it does not need to implement the read side here.
-		unreachable!();
-	}
-}
+
 impl Writeable for UserOnionMessageContents {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), std::io::Error> {
 		w.write_all(&self.data)
