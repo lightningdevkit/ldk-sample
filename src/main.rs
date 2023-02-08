@@ -617,7 +617,7 @@ async fn start_ldk() {
 	let stop_listen_connect = Arc::new(AtomicBool::new(false));
 	let stop_listen = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
-		let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port))
+		let listener = tokio::net::TcpListener::bind(format!("[::]:{}", listening_port))
 			.await
 			.expect("Failed to bind to listen port - is something else already listening on it?");
 		loop {
