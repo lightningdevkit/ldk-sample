@@ -1,6 +1,6 @@
 use crate::{cli, NetworkGraph};
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::BlockHash;
+use bitcoin::Network;
 use chrono::Utc;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::logger::{Logger, Record};
@@ -73,14 +73,14 @@ pub(crate) fn read_channel_peer_data(
 }
 
 pub(crate) fn read_network(
-	path: &Path, genesis_hash: BlockHash, logger: Arc<FilesystemLogger>,
+	path: &Path, network: Network, logger: Arc<FilesystemLogger>,
 ) -> NetworkGraph {
 	if let Ok(file) = File::open(path) {
 		if let Ok(graph) = NetworkGraph::read(&mut BufReader::new(file), logger.clone()) {
 			return graph;
 		}
 	}
-	NetworkGraph::new(genesis_hash, logger)
+	NetworkGraph::new(network, logger)
 }
 
 pub(crate) fn read_scorer(

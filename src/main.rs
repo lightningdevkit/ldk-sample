@@ -7,7 +7,6 @@ mod hex_utils;
 
 use crate::bitcoind_client::BitcoindClient;
 use crate::disk::FilesystemLogger;
-use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
@@ -16,7 +15,7 @@ use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient};
+use lightning::chain::keysinterface::{EntropySource, InMemorySigner, KeysManager};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
 use lightning::ln::channelmanager;
@@ -29,7 +28,6 @@ use lightning::onion_message::SimpleArcOnionMessenger;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -38,7 +36,6 @@ use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
-use lightning_invoice::payment;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
@@ -95,21 +92,12 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	ChainMonitor,
 	BitcoindClient,
 	BitcoindClient,
-	dyn chain::Access + Send + Sync,
+	BitcoindClient,
 	FilesystemLogger,
 >;
 
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
-
-pub(crate) type InvoicePayer<E> =
-	payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<FilesystemLogger>, E>;
-
-type Router = DefaultRouter<
-	Arc<NetworkGraph>,
-	Arc<FilesystemLogger>,
-	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>>>,
->;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
@@ -479,14 +467,35 @@ async fn start_ldk() {
 	let keys_manager = Arc::new(KeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
 
 	// Step 7: Read ChannelMonitor state from disk
-	let mut channelmonitors = persister.read_channelmonitors(keys_manager.clone()).unwrap();
+	let mut channelmonitors =
+		persister.read_channelmonitors(keys_manager.clone(), keys_manager.clone()).unwrap();
 
 	// Step 8: Poll for the best chain tip, which may be used by the channel manager & spv client
 	let polled_chain_tip = init::validate_best_block_header(bitcoind_client.as_ref())
 		.await
 		.expect("Failed to fetch best block header and best block");
 
-	// Step 9: Initialize the ChannelManager
+	// Step 9: Initialize routing ProbabilisticScorer
+	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
+	let network_graph =
+		Arc::new(disk::read_network(Path::new(&network_graph_path), args.network, logger.clone()));
+
+	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
+	let scorer = Arc::new(Mutex::new(disk::read_scorer(
+		Path::new(&scorer_path),
+		Arc::clone(&network_graph),
+		Arc::clone(&logger),
+	)));
+
+	// Step 10: Create Router
+	let router = Arc::new(DefaultRouter::new(
+		network_graph.clone(),
+		logger.clone(),
+		keys_manager.get_secure_random_bytes(),
+		scorer.clone(),
+	));
+
+	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 	let mut restarting_node = true;
@@ -498,9 +507,12 @@ async fn start_ldk() {
 			}
 			let read_args = ChannelManagerReadArgs::new(
 				keys_manager.clone(),
+				keys_manager.clone(),
+				keys_manager.clone(),
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
+				router,
 				logger.clone(),
 				user_config,
 				channel_monitor_mut_references,
@@ -518,7 +530,10 @@ async fn start_ldk() {
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
+				router,
 				logger.clone(),
+				keys_manager.clone(),
+				keys_manager.clone(),
 				keys_manager.clone(),
 				user_config,
 				chain_params,
@@ -527,7 +542,7 @@ async fn start_ldk() {
 		}
 	};
 
-	// Step 10: Sync ChannelMonitors and ChannelManager to chain tip
+	// Step 12: Sync ChannelMonitors and ChannelManager to chain tip
 	let mut chain_listener_channel_monitors = Vec::new();
 	let mut cache = UnboundedCache::new();
 	let chain_tip = if restarting_node {
@@ -564,7 +579,7 @@ async fn start_ldk() {
 		polled_chain_tip
 	};
 
-	// Step 11: Give ChannelMonitors to ChainMonitor
+	// Step 13: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
 		let funding_outpoint = item.2;
@@ -574,20 +589,17 @@ async fn start_ldk() {
 		);
 	}
 
-	// Step 12: Optional: Initialize the P2PGossipSync
-	let genesis = genesis_block(args.network).header.block_hash();
-	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
-	let network_graph =
-		Arc::new(disk::read_network(Path::new(&network_graph_path), genesis, logger.clone()));
+	// Step 14: Optional: Initialize the P2PGossipSync
 	let gossip_sync = Arc::new(P2PGossipSync::new(
 		Arc::clone(&network_graph),
-		None::<Arc<dyn chain::Access + Send + Sync>>,
+		None::<Arc<BitcoindClient>>,
 		logger.clone(),
 	));
 
-	// Step 13: Initialize the PeerManager
+	// Step 15: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
+		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 		IgnoringMessageHandler {},
@@ -602,15 +614,15 @@ async fn start_ldk() {
 	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
-		keys_manager.get_node_secret(Recipient::Node).unwrap(),
 		current_time.try_into().unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
 		IgnoringMessageHandler {},
+		Arc::clone(&keys_manager),
 	));
 
 	// ## Running LDK
-	// Step 14: Initialize networking
+	// Step 16: Initialize networking
 
 	let peer_manager_connection_handler = peer_manager.clone();
 	let listening_port = args.ldk_peer_listening_port;
@@ -636,7 +648,7 @@ async fn start_ldk() {
 		}
 	});
 
-	// Step 15: Connect and Disconnect Blocks
+	// Step 17: Connect and Disconnect Blocks
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
@@ -651,7 +663,7 @@ async fn start_ldk() {
 		}
 	});
 
-	// Step 16: Handle LDK Events
+	// Step 18: Handle LDK Events
 	let channel_manager_event_listener = channel_manager.clone();
 	let keys_manager_listener = keys_manager.clone();
 	// TODO: persist payment info to disk
@@ -676,36 +688,13 @@ async fn start_ldk() {
 		));
 	};
 
-	// Step 17: Initialize routing ProbabilisticScorer
-	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
-	let scorer = Arc::new(Mutex::new(disk::read_scorer(
-		Path::new(&scorer_path),
-		Arc::clone(&network_graph),
-		Arc::clone(&logger),
-	)));
-
-	// Step 18: Create InvoicePayer
-	let router = DefaultRouter::new(
-		network_graph.clone(),
-		logger.clone(),
-		keys_manager.get_secure_random_bytes(),
-		scorer.clone(),
-	);
-	let invoice_payer = Arc::new(InvoicePayer::new(
-		channel_manager.clone(),
-		router,
-		logger.clone(),
-		event_handler,
-		payment::Retry::Timeout(Duration::from_secs(10)),
-	));
-
 	// Step 19: Persist ChannelManager and NetworkGraph
 	let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
 
 	// Step 20: Background Processing
 	let background_processor = BackgroundProcessor::start(
 		persister,
-		invoice_payer.clone(),
+		event_handler,
 		chain_monitor.clone(),
 		channel_manager.clone(),
 		GossipSync::p2p(gossip_sync.clone()),
@@ -730,7 +719,7 @@ async fn start_ldk() {
 						.list_channels()
 						.iter()
 						.map(|chan| chan.counterparty.node_id)
-						.filter(|id| !peers.contains(id))
+						.filter(|id| !peers.iter().any(|(pk, _)| id == pk))
 					{
 						if stop_connect.load(Ordering::Acquire) {
 							return;
@@ -774,7 +763,6 @@ async fn start_ldk() {
 
 	// Start the CLI.
 	cli::poll_for_user_input(
-		Arc::clone(&invoice_payer),
 		Arc::clone(&peer_manager),
 		Arc::clone(&channel_manager),
 		Arc::clone(&keys_manager),

@@ -1,22 +1,23 @@
 use crate::disk;
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, InvoicePayer, MillisatAmount, NetworkGraph, OnionMessenger,
-	PaymentInfo, PaymentInfoStorage, PeerManager,
+	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
+	PaymentInfoStorage, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
-use lightning::chain::keysinterface::{KeysInterface, KeysManager, Recipient};
-use lightning::ln::msgs::{DecodeError, NetAddress};
+use lightning::chain::keysinterface::{EntropySource, KeysManager};
+use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
+use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
-use lightning::util::events::EventHandler;
 use lightning::util::ser::{Writeable, Writer};
-use lightning_invoice::payment::PaymentError;
+use lightning_invoice::payment::pay_invoice;
 use lightning_invoice::{utils, Currency, Invoice};
 use std::env;
 use std::io;
@@ -57,12 +58,12 @@ impl Writeable for UserOnionMessageContents {
 	}
 }
 
-pub(crate) async fn poll_for_user_input<E: EventHandler>(
-	invoice_payer: Arc<InvoicePayer<E>>, peer_manager: Arc<PeerManager>,
-	channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-	network_graph: Arc<NetworkGraph>, onion_messenger: Arc<OnionMessenger>,
-	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
-	ldk_data_dir: String, network: Network, logger: Arc<disk::FilesystemLogger>,
+pub(crate) async fn poll_for_user_input(
+	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
+	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
+	onion_messenger: Arc<OnionMessenger>, inbound_payments: PaymentInfoStorage,
+	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
+	logger: Arc<disk::FilesystemLogger>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -156,7 +157,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						}
 					};
 
-					send_payment(&*invoice_payer, &invoice, outbound_payments.clone());
+					send_payment(&*channel_manager, &invoice, outbound_payments.clone());
 				}
 				"keysend" => {
 					let dest_pubkey = match words.next() {
@@ -187,7 +188,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						}
 					};
 					keysend(
-						&*invoice_payer,
+						&*channel_manager,
 						dest_pubkey,
 						amt_msat,
 						&*keys_manager,
@@ -364,7 +365,7 @@ pub(crate) async fn poll_for_user_input<E: EventHandler>(
 						"{:?}",
 						lightning::util::message_signing::sign(
 							&line.as_bytes()[MSG_STARTPOS..],
-							&keys_manager.get_node_secret(Recipient::Node).unwrap()
+							&keys_manager.get_node_secret_key()
 						)
 					);
 				}
@@ -479,7 +480,7 @@ fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManag
 
 fn list_peers(peer_manager: Arc<PeerManager>) {
 	println!("\t{{");
-	for pubkey in peer_manager.get_peer_node_ids() {
+	for (pubkey, _) in peer_manager.get_peer_node_ids() {
 		println!("\t\t pubkey: {}", pubkey);
 	}
 	println!("\t}},");
@@ -571,7 +572,7 @@ fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: Paymen
 pub(crate) async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 ) -> Result<(), ()> {
-	for node_pubkey in peer_manager.get_peer_node_ids() {
+	for (node_pubkey, _) in peer_manager.get_peer_node_ids() {
 		if node_pubkey == pubkey {
 			return Ok(());
 		}
@@ -598,7 +599,7 @@ pub(crate) async fn do_connect_peer(
 					std::task::Poll::Pending => {}
 				}
 				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.get_peer_node_ids().iter().find(|id| **id == pubkey) {
+				match peer_manager.get_peer_node_ids().iter().find(|(id, _)| *id == pubkey) {
 					Some(_) => return Ok(()),
 					None => tokio::time::sleep(Duration::from_millis(10)).await,
 				}
@@ -622,12 +623,12 @@ fn do_disconnect_peer(
 
 	//check the pubkey matches a valid connected peer
 	let peers = peer_manager.get_peer_node_ids();
-	if !peers.contains(&pubkey) {
+	if !peers.iter().any(|(pk, _)| &pubkey == pk) {
 		println!("Error: Could not find peer {}", pubkey);
 		return Err(());
 	}
 
-	peer_manager.disconnect_by_node_id(pubkey, false);
+	peer_manager.disconnect_by_node_id(pubkey);
 	Ok(())
 }
 
@@ -660,33 +661,24 @@ fn open_channel(
 	}
 }
 
-fn send_payment<E: EventHandler>(
-	invoice_payer: &InvoicePayer<E>, invoice: &Invoice, payment_storage: PaymentInfoStorage,
+fn send_payment(
+	channel_manager: &ChannelManager, invoice: &Invoice, payment_storage: PaymentInfoStorage,
 ) {
-	let status = match invoice_payer.pay_invoice(invoice) {
-		Ok(_payment_id) => {
-			let payee_pubkey = invoice.recover_payee_pub_key();
-			let amt_msat = invoice.amount_milli_satoshis().unwrap();
-			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-			print!("> ");
-			HTLCStatus::Pending
-		}
-		Err(PaymentError::Invoice(e)) => {
-			println!("ERROR: invalid invoice: {}", e);
-			print!("> ");
-			return;
-		}
-		Err(PaymentError::Routing(e)) => {
-			println!("ERROR: failed to find route: {}", e.err);
-			print!("> ");
-			return;
-		}
-		Err(PaymentError::Sending(e)) => {
-			println!("ERROR: failed to send payment: {:?}", e);
-			print!("> ");
-			HTLCStatus::Failed
-		}
-	};
+	let status =
+		match pay_invoice(invoice, Retry::Timeout(Duration::from_secs(10)), channel_manager) {
+			Ok(_payment_id) => {
+				let payee_pubkey = invoice.recover_payee_pub_key();
+				let amt_msat = invoice.amount_milli_satoshis().unwrap();
+				println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+				print!("> ");
+				HTLCStatus::Pending
+			}
+			Err(e) => {
+				println!("ERROR: failed to send payment: {:?}", e);
+				print!("> ");
+				HTLCStatus::Failed
+			}
+		};
 	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
 	let payment_secret = Some(invoice.payment_secret().clone());
 
@@ -702,34 +694,29 @@ fn send_payment<E: EventHandler>(
 	);
 }
 
-fn keysend<E: EventHandler, K: KeysInterface>(
-	invoice_payer: &InvoicePayer<E>, payee_pubkey: PublicKey, amt_msat: u64, keys: &K,
+fn keysend<E: EntropySource>(
+	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
 	payment_storage: PaymentInfoStorage,
 ) {
-	let payment_preimage = keys.get_secure_random_bytes();
+	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
+	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
 
-	let status = match invoice_payer.pay_pubkey(
-		payee_pubkey,
-		PaymentPreimage(payment_preimage),
-		amt_msat,
-		40,
+	let route_params = RouteParameters {
+		payment_params: PaymentParameters::for_keysend(payee_pubkey, 40),
+		final_value_msat: amt_msat,
+	};
+	let status = match channel_manager.send_spontaneous_payment_with_retry(
+		Some(payment_preimage),
+		PaymentId(payment_hash.0),
+		route_params,
+		Retry::Timeout(Duration::from_secs(10)),
 	) {
-		Ok(_payment_id) => {
+		Ok(_payment_hash) => {
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 			print!("> ");
 			HTLCStatus::Pending
 		}
-		Err(PaymentError::Invoice(e)) => {
-			println!("ERROR: invalid payee: {}", e);
-			print!("> ");
-			return;
-		}
-		Err(PaymentError::Routing(e)) => {
-			println!("ERROR: failed to find route: {}", e.err);
-			print!("> ");
-			return;
-		}
-		Err(PaymentError::Sending(e)) => {
+		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			HTLCStatus::Failed
@@ -738,7 +725,7 @@ fn keysend<E: EventHandler, K: KeysInterface>(
 
 	let mut payments = payment_storage.lock().unwrap();
 	payments.insert(
-		PaymentHash(Sha256::hash(&payment_preimage).into_inner()),
+		payment_hash,
 		PaymentInfo {
 			preimage: None,
 			secret: None,
@@ -768,6 +755,7 @@ fn get_invoice(
 		Some(amt_msat),
 		"ldk-tutorial-node".to_string(),
 		expiry_secs,
+		None,
 	) {
 		Ok(inv) => {
 			println!("SUCCESS: generated invoice: {}", inv);
