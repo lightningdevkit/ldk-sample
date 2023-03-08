@@ -1,3 +1,4 @@
+use crate::bitcoind_client::BitcoindClient;
 use crate::disk;
 use crate::hex_utils;
 use crate::{
@@ -61,9 +62,9 @@ impl Writeable for UserOnionMessageContents {
 pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
-	onion_messenger: Arc<OnionMessenger>, inbound_payments: PaymentInfoStorage,
-	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
-	logger: Arc<disk::FilesystemLogger>,
+	onion_messenger: Arc<OnionMessenger>, bitcoind_client: Arc<BitcoindClient>,
+	inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage,
+	ldk_data_dir: String, network: Network, logger: Arc<disk::FilesystemLogger>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -426,6 +427,9 @@ pub(crate) async fn poll_for_user_input(
 						Err(e) => println!("ERROR: failed to send onion message: {:?}", e),
 					}
 				}
+				"getnewaddress" => {
+					get_new_address(Arc::clone(&bitcoind_client)).await;
+				}
 				"quit" | "exit" => break,
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
@@ -458,6 +462,8 @@ fn help() {
 	println!("      listpayments");
 	println!("\n  Invoices:");
 	println!("      getinvoice <amt_msats> <expiry_secs>");
+	println!("\n  On-chain:");
+	println!("      getnewaddress");
 	println!("\n  Other:");
 	println!("      signmessage <message>");
 	println!(
@@ -827,4 +833,14 @@ pub(crate) fn parse_peer_info(
 	}
 
 	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
+}
+
+async fn get_new_address(bitcoind_client: Arc<BitcoindClient>) {
+	let address = bitcoind_client.get_new_address().await;
+	println!(
+		"{{\n\t\"type: \"{}\", \n\t\"network: \"{}\", \n\t\"address: \"{}\"\n}}",
+		address.address_type().unwrap(),
+		address.network,
+		address
+	);
 }
