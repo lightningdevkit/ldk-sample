@@ -768,6 +768,7 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&network_graph),
 		Arc::clone(&onion_messenger),
+		Arc::clone(&bitcoind_client),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
