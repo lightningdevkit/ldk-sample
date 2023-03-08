@@ -838,7 +838,7 @@ pub(crate) fn parse_peer_info(
 async fn get_new_address(bitcoind_client: Arc<BitcoindClient>) {
 	let address = bitcoind_client.get_new_address().await;
 	println!(
-		"{{\n\t\type: {}, \n\tnetwork: {}, \n\taddress: {}\n}}",
+		"{{\n\ttype: {}, \n\tnetwork: {}, \n\taddress: {}\n}}",
 		address.address_type().unwrap(),
 		address.network,
 		address
