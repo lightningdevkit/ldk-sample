@@ -1,11 +1,14 @@
 use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx};
+use crate::disk::FilesystemLogger;
 use base64;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::util::address::Address;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
+use lightning::log_error;
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
+use lightning::util::logger::Logger;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
 use lightning_block_sync::{AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource};
@@ -24,6 +27,7 @@ pub struct BitcoindClient {
 	rpc_password: String,
 	fees: Arc<HashMap<Target, AtomicU32>>,
 	handle: tokio::runtime::Handle,
+	logger: Arc<FilesystemLogger>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -55,9 +59,9 @@ impl BlockSource for BitcoindClient {
 const MIN_FEERATE: u32 = 253;
 
 impl BitcoindClient {
-	pub async fn new(
+	pub(crate) async fn new(
 		host: String, port: u16, rpc_user: String, rpc_password: String,
-		handle: tokio::runtime::Handle,
+		handle: tokio::runtime::Handle, logger: Arc<FilesystemLogger>,
 	) -> std::io::Result<Self> {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
 		let rpc_credentials =
@@ -82,6 +86,7 @@ impl BitcoindClient {
 			rpc_password,
 			fees: Arc::new(fees),
 			handle: handle.clone(),
+			logger,
 		};
 		BitcoindClient::poll_for_fee_estimates(
 			client.fees.clone(),
@@ -249,26 +254,24 @@ impl FeeEstimator for BitcoindClient {
 impl BroadcasterInterface for BitcoindClient {
 	fn broadcast_transaction(&self, tx: &Transaction) {
 		let bitcoind_rpc_client = self.bitcoind_rpc_client.clone();
-		let tx_serialized = serde_json::json!(encode::serialize_hex(tx));
+		let tx_serialized = encode::serialize_hex(tx);
+		let tx_json = serde_json::json!(tx_serialized);
+		let logger = Arc::clone(&self.logger);
 		self.handle.spawn(async move {
 			// This may error due to RL calling `broadcast_transaction` with the same transaction
 			// multiple times, but the error is safe to ignore.
 			match bitcoind_rpc_client
-				.call_method::<Txid>("sendrawtransaction", &vec![tx_serialized])
+				.call_method::<Txid>("sendrawtransaction", &vec![tx_json])
 				.await
 			{
 				Ok(_) => {}
 				Err(e) => {
 					let err_str = e.get_ref().unwrap().to_string();
-					if !err_str.contains("Transaction already in block chain")
-						&& !err_str.contains("Inputs missing or spent")
-						&& !err_str.contains("bad-txns-inputs-missingorspent")
-						&& !err_str.contains("txn-mempool-conflict")
-						&& !err_str.contains("non-BIP68-final")
-						&& !err_str.contains("insufficient fee, rejecting replacement ")
-					{
-						panic!("{}", e);
-					}
+					log_error!(logger,
+						"Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransaction: {}",
+						err_str,
+						tx_serialized);
+					print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
 				}
 			}
 		});

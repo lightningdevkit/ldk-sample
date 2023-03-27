@@ -378,6 +378,10 @@ async fn start_ldk() {
 	let ldk_data_dir = format!("{}/.ldk", args.ldk_storage_dir_path);
 	fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
+	// ## Setup
+	// Step 1: Initialize the Logger
+	let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
+
 	// Initialize our bitcoind client.
 	let bitcoind_client = match BitcoindClient::new(
 		args.bitcoind_rpc_host.clone(),
@@ -385,6 +389,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
 		tokio::runtime::Handle::current(),
+		Arc::clone(&logger),
 	)
 	.await
 	{
@@ -411,14 +416,10 @@ async fn start_ldk() {
 		return;
 	}
 
-	// ## Setup
-	// Step 1: Initialize the FeeEstimator
+	// Step 2: Initialize the FeeEstimator
 
 	// BitcoindClient implements the FeeEstimator trait, so it'll act as our fee estimator.
 	let fee_estimator = bitcoind_client.clone();
-
-	// Step 2: Initialize the Logger
-	let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
 
 	// Step 3: Initialize the BroadcasterInterface
 
