@@ -29,7 +29,7 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::util::config::UserConfig;
-use lightning::util::events::{Event, PaymentPurpose};
+use lightning::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
 use lightning_background_processor::{BackgroundProcessor, GossipSync};
 use lightning_block_sync::init;
@@ -165,6 +165,8 @@ async fn handle_ldk_events(
 			receiver_node_id: _,
 			via_channel_id: _,
 			via_user_channel_id: _,
+			claim_deadline: _,
+			onion_fields: _,
 		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
@@ -260,6 +262,7 @@ async fn handle_ldk_events(
 			next_channel_id,
 			fee_earned_msat,
 			claim_from_onchain_tx,
+			outbound_amount_forwarded_msat,
 		} => {
 			let read_only_network_graph = network_graph.read_only();
 			let nodes = read_only_network_graph.nodes();
@@ -297,15 +300,20 @@ async fn handle_ldk_events(
 			} else {
 				"from HTLC fulfill message"
 			};
+			let amt_args = if let Some(v) = outbound_amount_forwarded_msat {
+				format!("{}", v)
+			} else {
+				"?".to_string()
+			};
 			if let Some(fee_earned) = fee_earned_msat {
 				println!(
-					"\nEVENT: Forwarded payment{}{}, earning {} msat {}",
-					from_prev_str, to_next_str, fee_earned, from_onchain_str
+					"\nEVENT: Forwarded payment for {} msat{}{}, earning {} msat {}",
+					amt_args, from_prev_str, to_next_str, fee_earned, from_onchain_str
 				);
 			} else {
 				println!(
-					"\nEVENT: Forwarded payment{}{}, claiming onchain {}",
-					from_prev_str, to_next_str, from_onchain_str
+					"\nEVENT: Forwarded payment for {} msat{}{}, claiming onchain {}",
+					amt_args, from_prev_str, to_next_str, from_onchain_str
 				);
 			}
 			print!("> ");
@@ -337,6 +345,7 @@ async fn handle_ldk_events(
 				.unwrap();
 			bitcoind_client.broadcast_transaction(&spending_tx);
 		}
+		Event::ChannelPending { .. } => {}
 		Event::ChannelReady {
 			ref channel_id,
 			user_channel_id: _,

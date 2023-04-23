@@ -9,7 +9,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::keysinterface::{EntropySource, KeysManager};
-use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
@@ -703,6 +703,7 @@ fn keysend<E: EntropySource>(
 	};
 	let status = match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
+		RecipientOnionFields::spontaneous_empty(),
 		PaymentId(payment_hash.0),
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
