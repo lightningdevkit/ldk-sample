@@ -13,7 +13,7 @@ lightning-block-sync = { version = "0.0.115", features = [ "rpc-client" ] }
 lightning-invoice = { version = "0.23" }
 lightning-net-tokio = { version = "0.0.115" }
 lightning-persister = { version = "0.0.115" }
-lightning-background-processor = { version = "0.0.115" }
+lightning-background-processor = { version = "0.0.115", features = [ "futures" ] }
 lightning-rapid-gossip-sync = { version = "0.0.115" }
 
 base64 = "0.13.0"
