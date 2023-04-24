@@ -18,6 +18,7 @@ use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget,
 use lightning::chain::keysinterface::{EntropySource, InMemorySigner, KeysManager};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
+use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
@@ -29,7 +30,6 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::util::config::UserConfig;
-use lightning::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
@@ -243,10 +243,11 @@ async fn handle_ldk_events(
 		Event::PaymentPathFailed { .. } => {}
 		Event::ProbeSuccessful { .. } => {}
 		Event::ProbeFailed { .. } => {}
-		Event::PaymentFailed { payment_hash, .. } => {
+		Event::PaymentFailed { payment_hash, reason, .. } => {
 			print!(
-				"\nEVENT: Failed to send payment to payment hash {:?}: exhausted payment retry attempts",
-				hex_utils::hex_str(&payment_hash.0)
+				"\nEVENT: Failed to send payment to payment hash {:?}: {:?}",
+				hex_utils::hex_str(&payment_hash.0),
+				if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
