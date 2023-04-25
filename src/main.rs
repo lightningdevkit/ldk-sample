@@ -346,7 +346,15 @@ async fn handle_ldk_events(
 				.unwrap();
 			bitcoind_client.broadcast_transaction(&spending_tx);
 		}
-		Event::ChannelPending { .. } => {}
+		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
+			println!(
+				"\nEVENT: Channel {} with peer {} is pending awaiting funding lock-in!",
+				hex_utils::hex_str(&channel_id),
+				hex_utils::hex_str(&counterparty_node_id.serialize()),
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
+		}
 		Event::ChannelReady {
 			ref channel_id,
 			user_channel_id: _,
