@@ -14,6 +14,8 @@ jobs:
         exclude:
           - platform: macos-latest
             toolchain: 1.48.0
+          - platform: windows-latest
+            toolchain: stable
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
