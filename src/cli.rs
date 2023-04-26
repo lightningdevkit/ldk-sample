@@ -9,7 +9,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::keysinterface::{EntropySource, KeysManager};
-use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
@@ -592,16 +592,12 @@ pub(crate) async fn do_connect_peer(
 		Some(connection_closed_future) => {
 			let mut connection_closed_future = Box::pin(connection_closed_future);
 			loop {
-				match futures::poll!(&mut connection_closed_future) {
-					std::task::Poll::Ready(_) => {
-						return Err(());
-					}
-					std::task::Poll::Pending => {}
-				}
-				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.get_peer_node_ids().iter().find(|(id, _)| *id == pubkey) {
-					Some(_) => return Ok(()),
-					None => tokio::time::sleep(Duration::from_millis(10)).await,
+				tokio::select! {
+					_ = &mut connection_closed_future => return Err(()),
+					_ = tokio::time::sleep(Duration::from_millis(10)) => {},
+				};
+				if peer_manager.get_peer_node_ids().iter().find(|(id, _)| *id == pubkey).is_some() {
+					return Ok(());
 				}
 			}
 		}
@@ -707,6 +703,7 @@ fn keysend<E: EntropySource>(
 	};
 	let status = match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
+		RecipientOnionFields::spontaneous_empty(),
 		PaymentId(payment_hash.0),
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
