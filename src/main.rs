@@ -781,24 +781,29 @@ async fn start_ldk() {
 	});
 
 	// Regularly broadcast our node_announcement. This is only required (or possible) if we have
-	// some public channels, and is only useful if we have public listen address(es) to announce.
-	// In a production environment, this should occur only after the announcement of new channels
-	// to avoid churn in the global network graph.
+	// some public channels.
 	let peer_man = Arc::clone(&peer_manager);
+	let chan_man = Arc::clone(&channel_manager);
 	let network = args.network;
-	if !args.ldk_announced_listen_addr.is_empty() {
-		tokio::spawn(async move {
-			let mut interval = tokio::time::interval(Duration::from_secs(60));
-			loop {
-				interval.tick().await;
+	tokio::spawn(async move {
+		// First wait a minute until we have some peers and maybe have opened a channel.
+		tokio::time::sleep(Duration::from_secs(60)).await;
+		// Then, update our announcement once an hour to keep it fresh but avoid unnecessary churn
+		// in the global gossip network.
+		let mut interval = tokio::time::interval(Duration::from_secs(3600));
+		loop {
+			interval.tick().await;
+			// Don't bother trying to announce if we don't have any public channls, though our
+			// peers should drop such an announcement anyway.
+			if chan_man.list_channels().iter().any(|chan| chan.is_public) {
 				peer_man.broadcast_node_announcement(
 					[0; 3],
 					args.ldk_announced_node_name,
 					args.ldk_announced_listen_addr.clone(),
 				);
 			}
-		});
-	}
+		}
+	});
 
 	// Start the CLI.
 	cli::poll_for_user_input(
