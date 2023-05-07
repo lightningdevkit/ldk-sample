@@ -4,18 +4,19 @@ mod cli;
 mod convert;
 mod disk;
 mod hex_utils;
+mod sweep;
 
 use crate::bitcoind_client::BitcoindClient;
 use crate::disk::FilesystemLogger;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
-use bitcoin::secp256k1::Secp256k1;
 use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use lightning::chain;
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::chain::keysinterface::{EntropySource, InMemorySigner, KeysManager};
+use lightning::chain::keysinterface::{
+	EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor,
+};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
@@ -30,6 +31,7 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::util::config::UserConfig;
+use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::ReadableArgs;
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
@@ -51,6 +53,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
 
 pub(crate) enum HTLCStatus {
 	Pending,
@@ -107,7 +111,7 @@ async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
 	inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage,
-	network: Network, event: Event,
+	persister: &Arc<FilesystemPersister>, network: Network, event: Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -331,20 +335,23 @@ async fn handle_ldk_events(
 			});
 		}
 		Event::SpendableOutputs { outputs } => {
-			let destination_address = bitcoind_client.get_new_address().await;
-			let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
-			let tx_feerate =
-				bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
-			let spending_tx = keys_manager
-				.spend_spendable_outputs(
-					output_descriptors,
-					Vec::new(),
-					destination_address.script_pubkey(),
-					tx_feerate,
-					&Secp256k1::new(),
-				)
-				.unwrap();
-			bitcoind_client.broadcast_transaction(&spending_tx);
+			// SpendableOutputDescriptors, of which outputs is a vec of, are critical to keep track
+			// of! While a `StaticOutput` descriptor is just an output to a static, well-known key,
+			// other descriptors are not currently ever regenerated for you by LDK. Once we return
+			// from this method, the descriptor will be gone, and you may lose track of some funds.
+			//
+			// Here we simply persist them to disk, with a background task running which will try
+			// to spend them regularly (possibly duplicatively/RBF'ing them). These can just be
+			// treated as normal funds where possible - they are only spendable by us and there is
+			// no rush to claim them.
+			for output in outputs {
+				let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
+				// Note that if the type here changes our read code needs to change as well.
+				let output: SpendableOutputDescriptor = output;
+				persister
+					.persist(&format!("{}/{}", PENDING_SPENDABLE_OUTPUT_DIR, key), &output)
+					.unwrap();
+			}
 		}
 		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
 			println!(
@@ -693,6 +700,7 @@ async fn start_ldk() {
 	let keys_manager_event_listener = Arc::clone(&keys_manager);
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
 	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
+	let persister_event_listener = Arc::clone(&persister);
 	let network = args.network;
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
@@ -701,6 +709,7 @@ async fn start_ldk() {
 		let keys_manager_event_listener = Arc::clone(&keys_manager_event_listener);
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
+		let persister_event_listener = Arc::clone(&persister_event_listener);
 		async move {
 			handle_ldk_events(
 				&channel_manager_event_listener,
@@ -709,6 +718,7 @@ async fn start_ldk() {
 				&keys_manager_event_listener,
 				&inbound_payments_event_listener,
 				&outbound_payments_event_listener,
+				&persister_event_listener,
 				network,
 				event,
 			)
@@ -722,7 +732,7 @@ async fn start_ldk() {
 	// Step 20: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
 	let background_processor = tokio::spawn(process_events_async(
-		persister,
+		Arc::clone(&persister),
 		event_handler,
 		chain_monitor.clone(),
 		channel_manager.clone(),
@@ -794,7 +804,8 @@ async fn start_ldk() {
 		loop {
 			interval.tick().await;
 			// Don't bother trying to announce if we don't have any public channls, though our
-			// peers should drop such an announcement anyway.
+			// peers should drop such an announcement anyway. Note that announcement may not
+			// propagate until we have a channel with 6+ confirmations.
 			if chan_man.list_channels().iter().any(|chan| chan.is_public) {
 				peer_man.broadcast_node_announcement(
 					[0; 3],
@@ -805,6 +816,14 @@ async fn start_ldk() {
 		}
 	});
 
+	tokio::spawn(sweep::periodic_sweep(
+		ldk_data_dir.clone(),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+		Arc::clone(&persister),
+		Arc::clone(&bitcoind_client),
+	));
+
 	// Start the CLI.
 	cli::poll_for_user_input(
 		Arc::clone(&peer_manager),
@@ -814,7 +833,7 @@ async fn start_ldk() {
 		Arc::clone(&onion_messenger),
 		inbound_payments,
 		outbound_payments,
-		ldk_data_dir.clone(),
+		ldk_data_dir,
 		network,
 		Arc::clone(&logger),
 	)
