@@ -1,10 +1,10 @@
-use crate::{cli, NetworkGraph};
+use crate::{cli, NetworkGraph, PaymentInfoStorage};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use chrono::Utc;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
 use lightning::util::logger::{Logger, Record};
-use lightning::util::ser::{ReadableArgs, Writer};
+use lightning::util::ser::{Readable, ReadableArgs, Writer};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -12,6 +12,9 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+
+pub(crate) const INBOUND_PAYMENTS_FNAME: &str = "inbound_payments";
+pub(crate) const OUTBOUND_PAYMENTS_FNAME: &str = "outbound_payments";
 
 pub(crate) struct FilesystemLogger {
 	data_dir: String,
@@ -81,6 +84,15 @@ pub(crate) fn read_network(
 		}
 	}
 	NetworkGraph::new(network, logger)
+}
+
+pub(crate) fn read_payment_info(path: &Path) -> PaymentInfoStorage {
+	if let Ok(file) = File::open(path) {
+		if let Ok(info) = PaymentInfoStorage::read(&mut BufReader::new(file)) {
+			return info;
+		}
+	}
+	PaymentInfoStorage { payments: HashMap::new() }
 }
 
 pub(crate) fn read_scorer(
