@@ -16,13 +16,16 @@ use bitcoin_bech32::WitnessProgram;
 use lightning::chain;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::chain::chainmonitor;
-use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager, Recipient, KeyMaterial, SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor};
+use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, Recipient, KeyMaterial, SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor};
 use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::ln::channelmanager;
-use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
-};
-use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
+use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
+// use lightning::ln::channelmanager::{
+// 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+// };
+// use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
+// use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::ln::peer_handler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
@@ -54,7 +57,8 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+// use std::time::{Duration, SystemTime};
+use std::time::{Duration};
 
 
 use bitcoin::blockdata::transaction::{ TxOut, TxIn, EcdsaSighashType};
@@ -73,12 +77,15 @@ use bitcoin::secp256k1::{ PublicKey};
 use bitcoin::secp256k1::{ Signing};
 use bitcoin::secp256k1::ecdsa::RecoverableSignature;
 use bitcoin::{secp256k1, Witness};
+//
+use bitcoin::PublicKey as OtherPublicKey;
+//
 
 use bitcoin::consensus::Encodable;
 use bitcoin::consensus::encode::VarInt;
 
-use std::io_extras::sink;
-use lightning::ln::script::ShutdownScript;
+use std::io::sink;
+use lightning::ln::script::{ShutdownScript};
 
 
 use core::sync::atomic::{AtomicUsize};
@@ -122,7 +129,9 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<FilesystemLogger>,
 	Arc<FilesystemPersister>,
 >;
-
+//
+pub type SimpleArcPeerManager<SD, M, T, F, C, L> = peer_handler::PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<P2PGossipSync<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<C>, Arc<L>>>, Arc<L>, Arc<peer_handler::IgnoringMessageHandler>>;
+//
 pub(crate) type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
@@ -131,9 +140,10 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	dyn chain::Access + Send + Sync,
 	FilesystemLogger,
 >;
-
+pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<InMemorySigner, Arc<M>, Arc<T>, Arc<MyKeysManager>, Arc<F>, Arc<L>>;
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
+// pub type SimpleArcChannelManager<M, T, F, L> = ChannelManager<InMemorySigner, Arc<M>, Arc<T>, Arc<KeysManager>, Arc<F>, Arc<L>>;
 
 pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
 	Arc<ChannelManager>,
@@ -166,6 +176,20 @@ impl fmt::Display for NodeAlias<'_> {
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// 
+/// 
+/// 
+// use lightning::ln::script::ShutdownScript;
+// mod deeply {
+//    pub mod nested {
+//        pub fn function() {
+//            println!("called `deeply::nested::function()`");
+//        }
+//    }
+//}
+//
+
+
+
 macro_rules! hash_to_message {
 	($slice: expr) => {
 		{
@@ -297,7 +321,7 @@ impl MyKeysManager {
 		// Note that when we aren't serializing the key, network doesn't matter
 		match ExtendedPrivKey::new_master(Network::Testnet, seed) {
 			Ok(master_key) => {
-				let node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
+				// let node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
 				let destination_script = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap()) {
 					Ok(destination_key) => {
 						let wpubkey_hash = WPubkeyHash::hash(&ExtendedPubKey::from_priv(&secp_ctx, &destination_key).to_pub().to_bytes());
@@ -545,7 +569,9 @@ impl KeysInterface for MyKeysManager {
 
 
 	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
-		ShutdownScript::new_p2wpkh_from_pubkey(self.shutdown_pubkey.clone())
+		let other_publickey=OtherPublicKey::new(self.shutdown_pubkey.clone());
+		let other_wpubkeyhash=other_publickey.wpubkey_hash().unwrap();
+		ShutdownScript::new_p2wpkh(&other_wpubkeyhash)
 	}
 
 	fn get_channel_signer(&self, _inbound: bool, channel_value_satoshis: u64) -> Self::Signer {
@@ -919,9 +945,8 @@ async fn start_ldk() {
 		}
 		key
 	};
-	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+	// let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, 0, 0));
-	//let te= Arc::new(KeysManager::new(&keys_seed, 0, 0));
 	//let st= te.derive_channel_keys(100000,)
 	// Step 7: Read ChannelMonitor state from disk
 	let mut channelmonitors = persister.read_channelmonitors(keys_manager.clone()).unwrap();
@@ -1026,7 +1051,7 @@ async fn start_ldk() {
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 	let mut ephemeral_bytes = [0; 32];
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
-	let lightning_msg_handler = MessageHandler {
+	let lightning_msg_handler = peer_handler::MessageHandler {
 		chan_handler: channel_manager.clone(),
 		route_handler: gossip_sync.clone(),
 	};
@@ -1035,7 +1060,7 @@ async fn start_ldk() {
 		keys_manager.get_node_secret(Recipient::Node).unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
-		Arc::new(IgnoringMessageHandler {}),
+		Arc::new(peer_handler::IgnoringMessageHandler {}),
 	));
 
 	// ## Running LDK
