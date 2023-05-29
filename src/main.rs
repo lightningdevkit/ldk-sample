@@ -1,65 +1,75 @@
+mod args;
 pub mod bitcoind_client;
+mod chacha20;
 mod cli;
 mod convert;
 mod disk;
 mod hex_utils;
+mod sweep;
 
 use crate::bitcoind_client::BitcoindClient;
+use crate::chacha20::ChaCha20;
 use crate::disk::FilesystemLogger;
-use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
+
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
-use bitcoin::BlockHash;
+use bitcoin::{BlockHash, PackedLockTime,Sequence};
 use bitcoin_bech32::WitnessProgram;
+
+use core::ops::Deref;
+
 use lightning::chain;
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::chain::chainmonitor;
-use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, Recipient, KeyMaterial, SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor};
+use lightning::chain::keysinterface::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
+	SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor, SignerProvider, NodeSigner};
 use lightning::chain::{BestBlock, Filter, Watch};
+use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
+use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
+use lightning::ln::msgs::{UnsignedChannelAnnouncement, UnsignedGossipMessage};
 // use lightning::ln::channelmanager::{
 // 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
-// };
+//  };
 // use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
-// use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::peer_handler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::onion_message;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
+use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
-use lightning::util::events::{Event, PaymentPurpose};
-use lightning::util::ser::ReadableArgs;
-use lightning_background_processor::BackgroundProcessor;
+use lightning::util::persist::KVStorePersister;
+use lightning::util::ser::{ReadableArgs, Writeable};
+
+
+
+
+use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
-use lightning_invoice::payment;
-use lightning_invoice::utils::DefaultRouter;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::FilesystemPersister;
-use lightning_rapid_gossip_sync::RapidGossipSync;
 use rand::{thread_rng, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::convert::TryInto;
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
-use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-// use std::time::{Duration, SystemTime};
-use std::time::{Duration};
-
+use std::time::{Duration, SystemTime};
 
 use bitcoin::blockdata::transaction::{ TxOut, TxIn, EcdsaSighashType};
 use bitcoin::blockdata::script::{Script, Builder};
@@ -71,12 +81,16 @@ use bitcoin::bech32::u5;
 use bitcoin::hashes::{Hash, HashEngine};
 use bitcoin::hashes::sha256::HashEngine as Sha256State;
 use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::WPubkeyHash;
 
 use bitcoin::secp256k1::{ PublicKey};
 use bitcoin::secp256k1::{ Signing};
 use bitcoin::secp256k1::ecdsa::RecoverableSignature;
+use bitcoin::secp256k1::ecdh::SharedSecret;
+use bitcoin::secp256k1::Scalar;
 use bitcoin::{secp256k1, Witness};
+
 //
 use bitcoin::PublicKey as OtherPublicKey;
 //
@@ -95,6 +109,8 @@ use lightning::util::invoice::construct_invoice_preimage;
 use bitcoin::secp256k1::{Message, ecdsa::Signature};
 
 const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
+pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
+
 pub(crate) enum HTLCStatus {
 	Pending,
 	Succeeded,
@@ -130,50 +146,51 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<FilesystemPersister>,
 >;
 //
-pub type SimpleArcPeerManager<SD, M, T, F, C, L> = peer_handler::PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<P2PGossipSync<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<C>, Arc<L>>>, Arc<L>, Arc<peer_handler::IgnoringMessageHandler>>;
+pub type SimpleArcPeerManager<SD, M, T, F, C, L> = peer_handler::PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<P2PGossipSync<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<C>, Arc<L>>>, Arc<SimpleArcOnionMessenger<L>>, Arc<L>, IgnoringMessageHandler, Arc<MyKeysManager>>;
 //
 pub(crate) type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
 	BitcoindClient,
 	BitcoindClient,
-	dyn chain::Access + Send + Sync,
+	BitcoindClient,
 	FilesystemLogger,
 >;
-pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<InMemorySigner, Arc<M>, Arc<T>, Arc<MyKeysManager>, Arc<F>, Arc<L>>;
+pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<
+	Arc<M>,
+	Arc<T>,
+	Arc<MyKeysManager>,
+	Arc<MyKeysManager>,
+	Arc<MyKeysManager>,
+	Arc<F>,
+	Arc<DefaultRouter<
+		Arc<gossip::NetworkGraph<Arc<L>>>,
+		Arc<L>,
+		Arc<Mutex<ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>>>
+	>>,
+	Arc<L>
+>;
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 // pub type SimpleArcChannelManager<M, T, F, L> = ChannelManager<InMemorySigner, Arc<M>, Arc<T>, Arc<KeysManager>, Arc<F>, Arc<L>>;
 
-pub(crate) type InvoicePayer<E> = payment::InvoicePayer<
-	Arc<ChannelManager>,
-	Router,
-	Arc<Mutex<ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>>>>,
-	Arc<FilesystemLogger>,
-	E,
->;
-
-type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
-
-type GossipSync<P, G, A, L> =
-	lightning_background_processor::GossipSync<P, Arc<RapidGossipSync<G, L>>, G, A, L>;
-
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-struct NodeAlias<'a>(&'a [u8; 32]);
+/////////////////////////////////////// Mykeysmanager implementation
+// struct NodeAlias<'a>(&'a [u8; 32]);
 
-impl fmt::Display for NodeAlias<'_> {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		let alias = self
-			.0
-			.iter()
-			.map(|b| *b as char)
-			.take_while(|c| *c != '\0')
-			.filter(|c| c.is_ascii_graphic() || *c == ' ')
-			.collect::<String>();
-		write!(f, "{}", alias)
-	}
-}
+// impl fmt::Display for NodeAlias<'_> {
+// 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// 		let alias = self
+// 			.0
+// 			.iter()
+// 			.map(|b| *b as char)
+// 			.take_while(|c| *c != '\0')
+// 			.filter(|c| c.is_ascii_graphic() || *c == ' ')
+// 			.collect::<String>();
+// 		write!(f, "{}", alias)
+// 	}
+// }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// 
 /// 
@@ -278,18 +295,66 @@ pub fn slice_to_be64(v: &[u8]) -> u64 {
 	((v[6] as u64) << 8*1) |
 	((v[7] as u64) << 8*0)
 }
+// atomic
+pub(crate) struct AtomicCounter {
+	// Usize needs to be at least 32 bits to avoid overflowing both low and high. If usize is 64
+	// bits we will never realistically count into high:
+	counter_low: AtomicUsize,
+	counter_high: AtomicUsize,
+}
+
+impl AtomicCounter {
+	pub(crate) fn new() -> Self {
+		Self {
+			counter_low: AtomicUsize::new(0),
+			counter_high: AtomicUsize::new(0),
+		}
+	}
+	pub(crate) fn get_increment(&self) -> u64 {
+		let low = self.counter_low.fetch_add(1, Ordering::AcqRel) as u64;
+		let high = if low == 0 {
+			self.counter_high.fetch_add(1, Ordering::AcqRel) as u64
+		} else {
+			self.counter_high.load(Ordering::Acquire) as u64
+		};
+		(high << 32) | low
+	}
+}
+
+pub fn sign_with_aux_rand<C: Signing, ES: Deref>(
+	ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey, entropy_source: &ES
+) -> Signature where ES::Target: EntropySource {
+	#[cfg(feature = "grind_signatures")]
+	let sig = loop {
+		let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
+		if sig.serialize_compact()[0] < 0x80 {
+			break sig;
+		}
+	};
+	#[cfg(all(not(feature = "grind_signatures"), not(feature = "_test_vectors")))]
+	let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
+	#[cfg(all(not(feature = "grind_signatures"), feature = "_test_vectors"))]
+	let sig = sign(ctx, msg, sk);
+	sig
+}
+
+
+////////////////////////////////////////////////////////////////////////////
+///////////////////new mkm
+/// 
+/// 
 pub struct MyKeysManager {
 	secp_ctx: Secp256k1<secp256k1::All>,
 	node_secret: SecretKey,
+	node_id: PublicKey,
 	inbound_payment_key: KeyMaterial,
 	destination_script: Script,
 	shutdown_pubkey: PublicKey,
 	channel_master_key: ExtendedPrivKey,
 	channel_child_index: AtomicUsize,
 
-	rand_bytes_master_key: ExtendedPrivKey,
-	rand_bytes_child_index: AtomicUsize,
-	rand_bytes_unique_start: Sha256State,
+	rand_bytes_unique_start: [u8; 32],
+	rand_bytes_index: AtomicCounter,
 
 	seed: [u8; 32],
 	starting_time_secs: u64,
@@ -297,37 +362,39 @@ pub struct MyKeysManager {
 }
 
 impl MyKeysManager {
-	/// Constructs a KeysManager from a 32-byte seed. If the seed is in some way biased (eg your
-	/// CSRNG is busted) this may panic (but more importantly, you will possibly lose funds).
-	/// starting_time isn't strictly required to actually be a time, but it must absolutely,
+	/// Constructs a [`KeysManager`] from a 32-byte seed. If the seed is in some way biased (e.g.,
+	/// your CSRNG is busted) this may panic (but more importantly, you will possibly lose funds).
+	/// `starting_time` isn't strictly required to actually be a time, but it must absolutely,
 	/// without a doubt, be unique to this instance. ie if you start multiple times with the same
-	/// seed, starting_time must be unique to each run. Thus, the easiest way to achieve this is to
-	/// simply use the current time (with very high precision).
+	/// `seed`, `starting_time` must be unique to each run. Thus, the easiest way to achieve this
+	/// is to simply use the current time (with very high precision).
 	///
-	/// The seed MUST be backed up safely prior to use so that the keys can be re-created, however,
-	/// obviously, starting_time should be unique every time you reload the library - it is only
+	/// The `seed` MUST be backed up safely prior to use so that the keys can be re-created, however,
+	/// obviously, `starting_time` should be unique every time you reload the library - it is only
 	/// used to generate new ephemeral key data (which will be stored by the individual channel if
 	/// necessary).
 	///
 	/// Note that the seed is required to recover certain on-chain funds independent of
-	/// ChannelMonitor data, though a current copy of ChannelMonitor data is also required for any
-	/// channel, and some on-chain during-closing funds.
+	/// [`ChannelMonitor`] data, though a current copy of [`ChannelMonitor`] data is also required
+	/// for any channel, and some on-chain during-closing funds.
 	///
-	/// Note that until the 0.1 release there is no guarantee of backward compatibility between
-	/// versions. Once the library is more fully supported, the docs will be updated to include a
-	/// detailed description of the guarantee.
+	/// [`ChannelMonitor`]: crate::chain::channelmonitor::ChannelMonitor
 	pub fn new(seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32) -> Self {
 		let secp_ctx = Secp256k1::new();
 		// Note that when we aren't serializing the key, network doesn't matter
 		match ExtendedPrivKey::new_master(Network::Testnet, seed) {
 			Ok(master_key) => {
-				// let node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
+				//let node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
+				// **private key
+                let node_secret= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+                // **public key
+                let node_id = PublicKey::from_secret_key(&secp_ctx, &node_secret);
 				let destination_script = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap()) {
 					Ok(destination_key) => {
 						let wpubkey_hash = WPubkeyHash::hash(&ExtendedPubKey::from_priv(&secp_ctx, &destination_key).to_pub().to_bytes());
 						Builder::new().push_opcode(opcodes::all::OP_PUSHBYTES_0)
-						              .push_slice(&wpubkey_hash.into_inner())
-						              .into_script()
+							.push_slice(&wpubkey_hash.into_inner())
+							.into_script()
 					},
 					Err(_) => panic!("Your RNG is busted"),
 				};
@@ -336,19 +403,21 @@ impl MyKeysManager {
 					Err(_) => panic!("Your RNG is busted"),
 				};
 				let channel_master_key = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(3).unwrap()).expect("Your RNG is busted");
-				let rand_bytes_master_key = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(4).unwrap()).expect("Your RNG is busted");
 				let inbound_payment_key: SecretKey = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(5).unwrap()).expect("Your RNG is busted").private_key;
 				let mut inbound_pmt_key_bytes = [0; 32];
 				inbound_pmt_key_bytes.copy_from_slice(&inbound_payment_key[..]);
 
-				let mut rand_bytes_unique_start = Sha256::engine();
-				rand_bytes_unique_start.input(&be64_to_array(starting_time_secs));
-				rand_bytes_unique_start.input(&be32_to_array(starting_time_nanos));
-				rand_bytes_unique_start.input(seed);
-				let node_secret2= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+				let mut rand_bytes_engine = Sha256::engine();
+				rand_bytes_engine.input(&starting_time_secs.to_be_bytes());
+				rand_bytes_engine.input(&starting_time_nanos.to_be_bytes());
+				rand_bytes_engine.input(seed);
+				rand_bytes_engine.input(b"LDK PRNG Seed");
+				let rand_bytes_unique_start = Sha256::from_engine(rand_bytes_engine).into_inner();
+
 				let mut res = MyKeysManager {
 					secp_ctx,
-					node_secret: node_secret2,
+					node_secret,
+					node_id,
 					inbound_payment_key: KeyMaterial(inbound_pmt_key_bytes),
 
 					destination_script,
@@ -357,9 +426,8 @@ impl MyKeysManager {
 					channel_master_key,
 					channel_child_index: AtomicUsize::new(0),
 
-					rand_bytes_master_key,
-					rand_bytes_child_index: AtomicUsize::new(0),
 					rand_bytes_unique_start,
+					rand_bytes_index: AtomicCounter::new(),
 
 					seed: *seed,
 					starting_time_secs,
@@ -372,14 +440,15 @@ impl MyKeysManager {
 			Err(_) => panic!("Your rng is busted"),
 		}
 	}
-	/// Derive an old Sign containing per-channel secrets based on a key derivation parameters.
-	///
-	/// Key derivation parameters are accessible through a per-channel secrets
-	/// Sign::channel_keys_id and is provided inside DynamicOuputP2WSH in case of
-	/// onchain output detection for which a corresponding delayed_payment_key must be derived.
+
+	/// Gets the "node_id" secret key used to sign gossip announcements, decode onion data, etc.
+	pub fn get_node_secret_key(&self) -> SecretKey {
+		self.node_secret
+	}
+
+	/// Derive an old [`WriteableEcdsaChannelSigner`] containing per-channel secrets based on a key derivation parameters.
 	pub fn derive_channel_keys(&self, channel_value_satoshis: u64, params: &[u8; 32]) -> InMemorySigner {
-		let chan_id = slice_to_be64(&params[0..8]);
-		assert!(chan_id <= core::u32::MAX as u64); // Otherwise the params field wasn't created by us
+		let chan_id = u64::from_be_bytes(params[0..8].try_into().unwrap());
 		let mut unique_start = Sha256::engine();
 		unique_start.input(params);
 		unique_start.input(&self.seed);
@@ -387,25 +456,32 @@ impl MyKeysManager {
 		// We only seriously intend to rely on the channel_master_key for true secure
 		// entropy, everything else just ensures uniqueness. We rely on the unique_start (ie
 		// starting_time provided in the constructor) to be unique.
-		let child_privkey = self.channel_master_key.ckd_priv(&self.secp_ctx, ChildNumber::from_hardened_idx(chan_id as u32).expect("key space exhausted")).expect("Your RNG is busted");
+		let child_privkey = self.channel_master_key.ckd_priv(&self.secp_ctx,
+				ChildNumber::from_hardened_idx((chan_id as u32) % (1 << 31)).expect("key space exhausted")
+			).expect("Your RNG is busted");
 		unique_start.input(&child_privkey.private_key[..]);
 
-		let seed = Sha256::from_engine(unique_start).into_inner();
+		// let seed = Sha256::from_engine(unique_start).into_inner();
 
-		let commitment_seed = {
-			let mut sha = Sha256::engine();
-			sha.input(&seed);
-			sha.input(&b"commitment seed"[..]);
-			Sha256::from_engine(sha).into_inner()
-		};
+		let commitment_seed: [u8;32] = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+		// macro_rules! key_step {
+		// 	($info: expr, $prev_key: expr) => {{
+		// 		let mut sha = Sha256::engine();
+		// 		sha.input(&seed);
+		// 		sha.input(&$prev_key[..]);
+		// 		sha.input(&$info[..]);
+		// 		SecretKey::from_slice(&Sha256::from_engine(sha).into_inner()).expect("SHA-256 is busted")
+		// 	}}
+		// }
 		let funding_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000010").unwrap();
 		let revocation_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000011").unwrap();
 		let payment_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000012").unwrap();
 		let delayed_payment_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000013").unwrap();
 		let htlc_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000014").unwrap();
+		let prng_seed = self.get_secure_random_bytes();
+
 		InMemorySigner::new(
 			&self.secp_ctx,
-			self.node_secret,
 			funding_key,
 			revocation_base_key,
 			payment_key,
@@ -413,11 +489,12 @@ impl MyKeysManager {
 			htlc_base_key,
 			commitment_seed,
 			channel_value_satoshis,
-			params.clone()
+			params.clone(),
+			prng_seed,
 		)
 	}
 
-	/// Creates a Transaction which spends the given descriptors to the given outputs, plus an
+	/// Creates a [`Transaction`] which spends the given descriptors to the given outputs, plus an
 	/// output to the given change destination (if sufficient change value remains). The
 	/// transaction will have a feerate, at least, of the given value.
 	///
@@ -427,8 +504,8 @@ impl MyKeysManager {
 	///
 	/// We do not enforce that outputs meet the dust limit or that any output scripts are standard.
 	///
-	/// May panic if the `SpendableOutputDescriptor`s were not generated by Channels which used
-	/// this KeysManager or one of the `InMemorySigner` created by this KeysManager.
+	/// May panic if the [`SpendableOutputDescriptor`]s were not generated by channels which used
+	/// this [`KeysManager`] or one of the [`InMemorySigner`] created by this [`KeysManager`].
 	pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
 		let mut input = Vec::new();
 		let mut input_value = 0;
@@ -440,7 +517,7 @@ impl MyKeysManager {
 					input.push(TxIn {
 						previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
 						script_sig: Script::new(),
-						sequence: 0,
+						sequence: Sequence::ZERO,
 						witness: Witness::new(),
 					});
 					witness_weight += StaticPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
@@ -451,7 +528,7 @@ impl MyKeysManager {
 					input.push(TxIn {
 						previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
 						script_sig: Script::new(),
-						sequence: descriptor.to_self_delay as u32,
+						sequence: Sequence(descriptor.to_self_delay as u32),
 						witness: Witness::new(),
 					});
 					witness_weight += DelayedPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
@@ -462,7 +539,7 @@ impl MyKeysManager {
 					input.push(TxIn {
 						previous_output: outpoint.into_bitcoin_outpoint(),
 						script_sig: Script::new(),
-						sequence: 0,
+						sequence: Sequence::ZERO,
 						witness: Witness::new(),
 					});
 					witness_weight += 1 + 73 + 34;
@@ -474,7 +551,7 @@ impl MyKeysManager {
 		}
 		let mut spend_tx = Transaction {
 			version: 2,
-			lock_time: 0,
+			lock_time: PackedLockTime(0),
 			input,
 			output: outputs,
 		};
@@ -529,7 +606,7 @@ impl MyKeysManager {
 					if payment_script != output.script_pubkey { return Err(()); };
 
 					let sighash = hash_to_message!(&sighash::SighashCache::new(&spend_tx).segwit_signature_hash(input_idx, &witness_script, output.value, EcdsaSighashType::All).unwrap()[..]);
-					let sig = sign(secp_ctx, &sighash, &secret.private_key);
+					let sig = sign_with_aux_rand(secp_ctx, &sighash, &secret.private_key, &self);
 					let mut sig_ser = sig.serialize_der().to_vec();
 					sig_ser.push(EcdsaSighashType::All as u8);
 					spend_tx.input[input_idx].witness.push(sig_ser);
@@ -546,75 +623,101 @@ impl MyKeysManager {
 
 		Ok(spend_tx)
 	}
-
 }
 
-impl KeysInterface for MyKeysManager {
-	type Signer = InMemorySigner;
+impl EntropySource for MyKeysManager {
+	fn get_secure_random_bytes(&self) -> [u8; 32] {
+		let index = self.rand_bytes_index.get_increment();
+		let mut nonce = [0u8; 16];
+		nonce[..8].copy_from_slice(&index.to_be_bytes());
+		ChaCha20::get_single_block(&self.rand_bytes_unique_start, &nonce)
+	}
+}
 
-	fn get_node_secret(&self, recipient: Recipient) -> Result<SecretKey, ()> {
+impl NodeSigner for MyKeysManager {
+	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
 		match recipient {
-			Recipient::Node => Ok(self.node_secret.clone()),
+			Recipient::Node => Ok(self.node_id.clone()),
 			Recipient::PhantomNode => Err(())
 		}
+	}
+
+	fn ecdh(&self, recipient: Recipient, other_key: &PublicKey, tweak: Option<&Scalar>) -> Result<SharedSecret, ()> {
+		let mut node_secret = match recipient {
+			Recipient::Node => Ok(self.node_secret.clone()),
+			Recipient::PhantomNode => Err(())
+		}?;
+		if let Some(tweak) = tweak {
+			node_secret = node_secret.mul_tweak(tweak).map_err(|_| ())?;
+		}
+		Ok(SharedSecret::new(other_key, &node_secret))
 	}
 
 	fn get_inbound_payment_key_material(&self) -> KeyMaterial {
 		self.inbound_payment_key.clone()
 	}
 
+	fn sign_invoice(&self, hrp_bytes: &[u8], invoice_data: &[u5], recipient: Recipient) -> Result<RecoverableSignature, ()> {
+		let preimage = construct_invoice_preimage(&hrp_bytes, &invoice_data);
+		let secret = match recipient {
+			Recipient::Node => Ok(&self.node_secret),
+			Recipient::PhantomNode => Err(())
+		}?;
+		Ok(self.secp_ctx.sign_ecdsa_recoverable(&hash_to_message!(&Sha256::hash(&preimage)), secret))
+	}
+
+	fn sign_gossip_message(&self, msg: UnsignedGossipMessage) -> Result<Signature, ()> {
+		let msg_hash = hash_to_message!(&Sha256dHash::hash(&msg.encode()[..])[..]);
+		Ok(self.secp_ctx.sign_ecdsa(&msg_hash, &self.node_secret))
+	}
+}
+
+impl SignerProvider for MyKeysManager {
+	type Signer = InMemorySigner;
+
+	fn generate_channel_keys_id(&self, _inbound: bool, _channel_value_satoshis: u64, user_channel_id: u128) -> [u8; 32] {
+		let child_idx = self.channel_child_index.fetch_add(1, Ordering::AcqRel);
+		// `child_idx` is the only thing guaranteed to make each channel unique without a restart
+		// (though `user_channel_id` should help, depending on user behavior). If it manages to
+		// roll over, we may generate duplicate keys for two different channels, which could result
+		// in loss of funds. Because we only support 32-bit+ systems, assert that our `AtomicUsize`
+		// doesn't reach `u32::MAX`.
+		assert!(child_idx < core::u32::MAX as usize, "2^32 channels opened without restart");
+		let mut id = [0; 32];
+		id[0..4].copy_from_slice(&(child_idx as u32).to_be_bytes());
+		id[4..8].copy_from_slice(&self.starting_time_nanos.to_be_bytes());
+		id[8..16].copy_from_slice(&self.starting_time_secs.to_be_bytes());
+		id[16..32].copy_from_slice(&user_channel_id.to_be_bytes());
+		id
+	}
+
+	fn derive_channel_signer(&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32]) -> Self::Signer {
+		self.derive_channel_keys(channel_value_satoshis, &channel_keys_id)
+	}
+
+	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::Signer, DecodeError> {
+		InMemorySigner::read(&mut io::Cursor::new(reader), self)
+	}
+
 	fn get_destination_script(&self) -> Script {
 		self.destination_script.clone()
 	}
-
 
 	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
 		let other_publickey=OtherPublicKey::new(self.shutdown_pubkey.clone());
 		let other_wpubkeyhash=other_publickey.wpubkey_hash().unwrap();
 		ShutdownScript::new_p2wpkh(&other_wpubkeyhash)
 	}
-
-	fn get_channel_signer(&self, _inbound: bool, channel_value_satoshis: u64) -> Self::Signer {
-		let child_ix = self.channel_child_index.fetch_add(1, Ordering::AcqRel);
-		assert!(child_ix <= core::u32::MAX as usize);
-		let mut id = [0; 32];
-		id[0..8].copy_from_slice(&be64_to_array(child_ix as u64));
-		id[8..16].copy_from_slice(&be64_to_array(self.starting_time_nanos as u64));
-		id[16..24].copy_from_slice(&be64_to_array(self.starting_time_secs));
-		self.derive_channel_keys(channel_value_satoshis, &id)
-	}
-
-	fn get_secure_random_bytes(&self) -> [u8; 32] {
-		let mut sha = self.rand_bytes_unique_start.clone();
-
-		let child_ix = self.rand_bytes_child_index.fetch_add(1, Ordering::AcqRel);
-		let child_privkey = self.rand_bytes_master_key.ckd_priv(&self.secp_ctx, ChildNumber::from_hardened_idx(child_ix as u32).expect("key space exhausted")).expect("Your RNG is busted");
-		sha.input(&child_privkey.private_key[..]);
-
-		sha.input(b"Unique Secure Random Bytes Salt");
-		Sha256::from_engine(sha).into_inner()
-	}
-
-	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::Signer, DecodeError> {
-		InMemorySigner::read(&mut io::Cursor::new(reader), self.node_secret.clone())
-	}
-
-	fn sign_invoice(&self, hrp_bytes: &[u8], invoice_data: &[u5], recipient: Recipient) -> Result<RecoverableSignature, ()> {
-		let preimage = construct_invoice_preimage(&hrp_bytes, &invoice_data);
-		let secret = match recipient {
-			Recipient::Node => self.get_node_secret(Recipient::Node)?,
-			Recipient::PhantomNode => return Err(()),
-		};
-		Ok(self.secp_ctx.sign_ecdsa_recoverable(&hash_to_message!(&Sha256::hash(&preimage)), &secret))
-	}
 }
-////////////////////////////////////////////////////////////////////////////
+///////////////////////
+pub type SimpleArcOnionMessenger<L> = onion_message::OnionMessenger<Arc<MyKeysManager>, Arc<MyKeysManager>, Arc<L>, IgnoringMessageHandler>;
+type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &MyKeysManager,
 	inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage,
-	network: Network, event: &Event,
+	persister: &Arc<FilesystemPersister>, network: Network, event: Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -638,7 +741,7 @@ async fn handle_ldk_events(
 			.expect("Lightning funding tx should always be to a SegWit output")
 			.to_address();
 			let mut outputs = vec![HashMap::with_capacity(1)];
-			outputs[0].insert(addr, *channel_value_satoshis as f64 / 100_000_000.0);
+			outputs[0].insert(addr, channel_value_satoshis as f64 / 100_000_000.0);
 			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
 
 			// Have your wallet put the inputs into the transaction such that the output is
@@ -654,7 +757,7 @@ async fn handle_ldk_events(
 			if channel_manager
 				.funding_transaction_generated(
 					&temporary_channel_id,
-					counterparty_node_id,
+					&counterparty_node_id,
 					final_tx,
 				)
 				.is_err()
@@ -665,7 +768,16 @@ async fn handle_ldk_events(
 				io::stdout().flush().unwrap();
 			}
 		}
-		Event::PaymentReceived { payment_hash, purpose, amount_msat } => {
+		Event::PaymentClaimable {
+			payment_hash,
+			purpose,
+			amount_msat,
+			receiver_node_id: _,
+			via_channel_id: _,
+			via_user_channel_id: _,
+			claim_deadline: _,
+			onion_fields: _,
+		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
 				hex_utils::hex_str(&payment_hash.0),
@@ -674,12 +786,12 @@ async fn handle_ldk_events(
 			print!("> ");
 			io::stdout().flush().unwrap();
 			let payment_preimage = match purpose {
-				PaymentPurpose::InvoicePayment { payment_preimage, .. } => *payment_preimage,
-				PaymentPurpose::SpontaneousPayment(preimage) => Some(*preimage),
+				PaymentPurpose::InvoicePayment { payment_preimage, .. } => payment_preimage,
+				PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
 			};
 			channel_manager.claim_funds(payment_preimage.unwrap());
 		}
-		Event::PaymentClaimed { payment_hash, purpose, amount_msat } => {
+		Event::PaymentClaimed { payment_hash, purpose, amount_msat, receiver_node_id: _ } => {
 			println!(
 				"\nEVENT: claimed payment from payment hash {} of {} millisatoshis",
 				hex_utils::hex_str(&payment_hash.0),
@@ -689,12 +801,12 @@ async fn handle_ldk_events(
 			io::stdout().flush().unwrap();
 			let (payment_preimage, payment_secret) = match purpose {
 				PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
-					(*payment_preimage, Some(*payment_secret))
+					(payment_preimage, Some(payment_secret))
 				}
-				PaymentPurpose::SpontaneousPayment(preimage) => (Some(*preimage), None),
+				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
 			};
 			let mut payments = inbound_payments.lock().unwrap();
-			match payments.entry(*payment_hash) {
+			match payments.entry(payment_hash) {
 				Entry::Occupied(mut e) => {
 					let payment = e.get_mut();
 					payment.status = HTLCStatus::Succeeded;
@@ -706,7 +818,7 @@ async fn handle_ldk_events(
 						preimage: payment_preimage,
 						secret: payment_secret,
 						status: HTLCStatus::Succeeded,
-						amt_msat: MillisatAmount(Some(*amount_msat)),
+						amt_msat: MillisatAmount(Some(amount_msat)),
 					});
 				}
 			}
@@ -714,8 +826,8 @@ async fn handle_ldk_events(
 		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 			let mut payments = outbound_payments.lock().unwrap();
 			for (hash, payment) in payments.iter_mut() {
-				if *hash == *payment_hash {
-					payment.preimage = Some(*payment_preimage);
+				if *hash == payment_hash {
+					payment.preimage = Some(payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 					println!(
 						"\nEVENT: successfully sent payment of {} millisatoshis{} from \
@@ -739,10 +851,13 @@ async fn handle_ldk_events(
 		}
 		Event::PaymentPathSuccessful { .. } => {}
 		Event::PaymentPathFailed { .. } => {}
-		Event::PaymentFailed { payment_hash, .. } => {
+		Event::ProbeSuccessful { .. } => {}
+		Event::ProbeFailed { .. } => {}
+		Event::PaymentFailed { payment_hash, reason, .. } => {
 			print!(
-				"\nEVENT: Failed to send payment to payment hash {:?}: exhausted payment retry attempts",
-				hex_utils::hex_str(&payment_hash.0)
+				"\nEVENT: Failed to send payment to payment hash {:?}: {:?}",
+				hex_utils::hex_str(&payment_hash.0),
+				if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -758,6 +873,7 @@ async fn handle_ldk_events(
 			next_channel_id,
 			fee_earned_msat,
 			claim_from_onchain_tx,
+			outbound_amount_forwarded_msat,
 		} => {
 			let read_only_network_graph = network_graph.read_only();
 			let nodes = read_only_network_graph.nodes();
@@ -769,11 +885,11 @@ async fn handle_ldk_events(
 					None => String::new(),
 					Some(channel) => {
 						match nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id)) {
-							None => " from private node".to_string(),
+							None => "private node".to_string(),
 							Some(node) => match &node.announcement_info {
-								None => " from unnamed node".to_string(),
+								None => "unnamed node".to_string(),
 								Some(announcement) => {
-									format!(" from node {}", NodeAlias(&announcement.alias))
+									format!("node {}", announcement.alias)
 								}
 							},
 						}
@@ -786,29 +902,35 @@ async fn handle_ldk_events(
 					.unwrap_or_default()
 			};
 			let from_prev_str =
-				format!("{}{}", node_str(prev_channel_id), channel_str(prev_channel_id));
+				format!(" from {}{}", node_str(&prev_channel_id), channel_str(&prev_channel_id));
 			let to_next_str =
-				format!("{}{}", node_str(next_channel_id), channel_str(next_channel_id));
+				format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
-			let from_onchain_str = if *claim_from_onchain_tx {
+			let from_onchain_str = if claim_from_onchain_tx {
 				"from onchain downstream claim"
 			} else {
 				"from HTLC fulfill message"
 			};
+			let amt_args = if let Some(v) = outbound_amount_forwarded_msat {
+				format!("{}", v)
+			} else {
+				"?".to_string()
+			};
 			if let Some(fee_earned) = fee_earned_msat {
 				println!(
-					"\nEVENT: Forwarded payment{}{}, earning {} msat {}",
-					from_prev_str, to_next_str, fee_earned, from_onchain_str
+					"\nEVENT: Forwarded payment for {} msat{}{}, earning {} msat {}",
+					amt_args, from_prev_str, to_next_str, fee_earned, from_onchain_str
 				);
 			} else {
 				println!(
-					"\nEVENT: Forwarded payment{}{}, claiming onchain {}",
-					from_prev_str, to_next_str, from_onchain_str
+					"\nEVENT: Forwarded payment for {} msat{}{}, claiming onchain {}",
+					amt_args, from_prev_str, to_next_str, from_onchain_str
 				);
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
 		}
+		Event::HTLCHandlingFailed { .. } => {}
 		Event::PendingHTLCsForwardable { time_forwardable } => {
 			let forwarding_channel_manager = channel_manager.clone();
 			let min = time_forwardable.as_millis() as u64;
@@ -819,25 +941,51 @@ async fn handle_ldk_events(
 			});
 		}
 		Event::SpendableOutputs { outputs } => {
-			let destination_address = bitcoind_client.get_new_address().await;
-			let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
-			let tx_feerate =
-				bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Normal);
-			let spending_tx = keys_manager
-				.spend_spendable_outputs(
-					output_descriptors,
-					Vec::new(),
-					destination_address.script_pubkey(),
-					tx_feerate,
-					&Secp256k1::new(),
-				)
-				.unwrap();
-			bitcoind_client.broadcast_transaction(&spending_tx);
+			// SpendableOutputDescriptors, of which outputs is a vec of, are critical to keep track
+			// of! While a `StaticOutput` descriptor is just an output to a static, well-known key,
+			// other descriptors are not currently ever regenerated for you by LDK. Once we return
+			// from this method, the descriptor will be gone, and you may lose track of some funds.
+			//
+			// Here we simply persist them to disk, with a background task running which will try
+			// to spend them regularly (possibly duplicatively/RBF'ing them). These can just be
+			// treated as normal funds where possible - they are only spendable by us and there is
+			// no rush to claim them.
+			for output in outputs {
+				let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
+				// Note that if the type here changes our read code needs to change as well.
+				let output: SpendableOutputDescriptor = output;
+				persister
+					.persist(&format!("{}/{}", PENDING_SPENDABLE_OUTPUT_DIR, key), &output)
+					.unwrap();
+			}
+		}
+		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
+			println!(
+				"\nEVENT: Channel {} with peer {} is pending awaiting funding lock-in!",
+				hex_utils::hex_str(&channel_id),
+				hex_utils::hex_str(&counterparty_node_id.serialize()),
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
+		}
+		Event::ChannelReady {
+			ref channel_id,
+			user_channel_id: _,
+			ref counterparty_node_id,
+			channel_type: _,
+		} => {
+			println!(
+				"\nEVENT: Channel {} with peer {} is ready to be used!",
+				hex_utils::hex_str(channel_id),
+				hex_utils::hex_str(&counterparty_node_id.serialize()),
+			);
+			print!("> ");
+			io::stdout().flush().unwrap();
 		}
 		Event::ChannelClosed { channel_id, reason, user_channel_id: _ } => {
 			println!(
 				"\nEVENT: Channel {} closed due to: {:?}",
-				hex_utils::hex_str(channel_id),
+				hex_utils::hex_str(&channel_id),
 				reason
 			);
 			print!("> ");
@@ -847,11 +995,12 @@ async fn handle_ldk_events(
 			// A "real" node should probably "lock" the UTXOs spent in funding transactions until
 			// the funding transaction either confirms, or this event is generated.
 		}
+		Event::HTLCIntercepted { .. } => {}
 	}
 }
 
 async fn start_ldk() {
-	let args = match cli::parse_startup_args() {
+	let args = match args::parse_startup_args() {
 		Ok(user_args) => user_args,
 		Err(()) => return,
 	};
@@ -860,6 +1009,10 @@ async fn start_ldk() {
 	let ldk_data_dir = format!("{}/.ldk", args.ldk_storage_dir_path);
 	fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
+	// ## Setup
+	// Step 1: Initialize the Logger
+	let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
+
 	// Initialize our bitcoind client.
 	let bitcoind_client = match BitcoindClient::new(
 		args.bitcoind_rpc_host.clone(),
@@ -867,6 +1020,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
 		tokio::runtime::Handle::current(),
+		Arc::clone(&logger),
 	)
 	.await
 	{
@@ -893,14 +1047,10 @@ async fn start_ldk() {
 		return;
 	}
 
-	// ## Setup
-	// Step 1: Initialize the FeeEstimator
+	// Step 2: Initialize the FeeEstimator
 
 	// BitcoindClient implements the FeeEstimator trait, so it'll act as our fee estimator.
 	let fee_estimator = bitcoind_client.clone();
-
-	// Step 2: Initialize the Logger
-	let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
 
 	// Step 3: Initialize the BroadcasterInterface
 
@@ -949,11 +1099,37 @@ async fn start_ldk() {
 	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, 0, 0));
 	//let st= te.derive_channel_keys(100000,)
 	// Step 7: Read ChannelMonitor state from disk
-	let mut channelmonitors = persister.read_channelmonitors(keys_manager.clone()).unwrap();
+	let mut channelmonitors =
+		persister.read_channelmonitors(keys_manager.clone(), keys_manager.clone()).unwrap();
 
-	// Step 8: Initialize the ChannelManager
+	// Step 8: Poll for the best chain tip, which may be used by the channel manager & spv client
+	let polled_chain_tip = init::validate_best_block_header(bitcoind_client.as_ref())
+		.await
+		.expect("Failed to fetch best block header and best block");
+
+	// Step 9: Initialize routing ProbabilisticScorer
+	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
+	let network_graph =
+		Arc::new(disk::read_network(Path::new(&network_graph_path), args.network, logger.clone()));
+
+	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
+	let scorer = Arc::new(Mutex::new(disk::read_scorer(
+		Path::new(&scorer_path),
+		Arc::clone(&network_graph),
+		Arc::clone(&logger),
+	)));
+
+	// Step 10: Create Router
+	let router = Arc::new(DefaultRouter::new(
+		network_graph.clone(),
+		logger.clone(),
+		keys_manager.get_secure_random_bytes(),
+		scorer.clone(),
+	));
+
+	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
-	user_config.peer_channel_config_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_limits.force_announced_channel_preference = false;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
@@ -963,9 +1139,12 @@ async fn start_ldk() {
 			}
 			let read_args = ChannelManagerReadArgs::new(
 				keys_manager.clone(),
+				keys_manager.clone(),
+				keys_manager.clone(),
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
+				router,
 				logger.clone(),
 				user_config,
 				channel_monitor_mut_references,
@@ -974,35 +1153,35 @@ async fn start_ldk() {
 		} else {
 			// We're starting a fresh node.
 			restarting_node = false;
-			let getinfo_resp = bitcoind_client.get_blockchain_info().await;
 
-			let chain_params = ChainParameters {
-				network: args.network,
-				best_block: BestBlock::new(
-					getinfo_resp.latest_blockhash,
-					getinfo_resp.latest_height as u32,
-				),
-			};
+			let polled_best_block = polled_chain_tip.to_best_block();
+			let polled_best_block_hash = polled_best_block.block_hash();
+			let chain_params =
+				ChainParameters { network: args.network, best_block: polled_best_block };
 			let fresh_channel_manager = channelmanager::ChannelManager::new(
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
+				router,
 				logger.clone(),
+				keys_manager.clone(),
+				keys_manager.clone(),
 				keys_manager.clone(),
 				user_config,
 				chain_params,
 			);
-			(getinfo_resp.latest_blockhash, fresh_channel_manager)
+			(polled_best_block_hash, fresh_channel_manager)
 		}
 	};
 
-	// Step 9: Sync ChannelMonitors and ChannelManager to chain tip
+	// Step 12: Sync ChannelMonitors and ChannelManager to chain tip
 	let mut chain_listener_channel_monitors = Vec::new();
 	let mut cache = UnboundedCache::new();
-	let mut chain_tip: Option<poll::ValidatedBlockHeader> = None;
-	if restarting_node {
-		let mut chain_listeners =
-			vec![(channel_manager_blockhash, &channel_manager as &dyn chain::Listen)];
+	let chain_tip = if restarting_node {
+		let mut chain_listeners = vec![(
+			channel_manager_blockhash,
+			&channel_manager as &(dyn chain::Listen + Send + Sync),
+		)];
 
 		for (blockhash, channel_monitor) in channelmonitors.drain(..) {
 			let outpoint = channel_monitor.get_funding_txo().0;
@@ -1014,64 +1193,75 @@ async fn start_ldk() {
 		}
 
 		for monitor_listener_info in chain_listener_channel_monitors.iter_mut() {
-			chain_listeners
-				.push((monitor_listener_info.0, &monitor_listener_info.1 as &dyn chain::Listen));
+			chain_listeners.push((
+				monitor_listener_info.0,
+				&monitor_listener_info.1 as &(dyn chain::Listen + Send + Sync),
+			));
 		}
-		chain_tip = Some(
-			init::synchronize_listeners(
-				&mut bitcoind_client.deref(),
-				args.network,
-				&mut cache,
-				chain_listeners,
-			)
-			.await
-			.unwrap(),
-		);
-	}
 
-	// Step 10: Give ChannelMonitors to ChainMonitor
+		init::synchronize_listeners(
+			bitcoind_client.as_ref(),
+			args.network,
+			&mut cache,
+			chain_listeners,
+		)
+		.await
+		.unwrap()
+	} else {
+		polled_chain_tip
+	};
+
+	// Step 13: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
 		let funding_outpoint = item.2;
-		chain_monitor.watch_channel(funding_outpoint, channel_monitor).unwrap();
+		assert_eq!(
+			chain_monitor.watch_channel(funding_outpoint, channel_monitor),
+			ChannelMonitorUpdateStatus::Completed
+		);
 	}
 
-	// Step 11: Optional: Initialize the P2PGossipSync
-	let genesis = genesis_block(args.network).header.block_hash();
-	let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
-	let network_graph =
-		Arc::new(disk::read_network(Path::new(&network_graph_path), genesis, logger.clone()));
+	// Step 14: Optional: Initialize the P2PGossipSync
 	let gossip_sync = Arc::new(P2PGossipSync::new(
 		Arc::clone(&network_graph),
-		None::<Arc<dyn chain::Access + Send + Sync>>,
+		None::<Arc<BitcoindClient>>,
 		logger.clone(),
 	));
 
-	// Step 12: Initialize the PeerManager
+	// Step 15: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
+	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+		IgnoringMessageHandler {},
+	));
 	let mut ephemeral_bytes = [0; 32];
+	let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 	rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
-	let lightning_msg_handler = peer_handler::MessageHandler {
+	let lightning_msg_handler = MessageHandler {
 		chan_handler: channel_manager.clone(),
 		route_handler: gossip_sync.clone(),
+		onion_message_handler: onion_messenger.clone(),
 	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
-		keys_manager.get_node_secret(Recipient::Node).unwrap(),
+		current_time.try_into().unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
-		Arc::new(peer_handler::IgnoringMessageHandler {}),
+		IgnoringMessageHandler {},
+		Arc::clone(&keys_manager),
 	));
 
 	// ## Running LDK
-	// Step 13: Initialize networking
+	// Step 16: Initialize networking
 
 	let peer_manager_connection_handler = peer_manager.clone();
 	let listening_port = args.ldk_peer_listening_port;
 	let stop_listen_connect = Arc::new(AtomicBool::new(false));
 	let stop_listen = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
-		let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", listening_port))
+		let listener = tokio::net::TcpListener::bind(format!("[::]:{}", listening_port))
 			.await
 			.expect("Failed to bind to listen port - is something else already listening on it?");
 		loop {
@@ -1090,89 +1280,83 @@ async fn start_ldk() {
 		}
 	});
 
-	// Step 14: Connect and Disconnect Blocks
-	if chain_tip.is_none() {
-		chain_tip =
-			Some(init::validate_best_block_header(&mut bitcoind_client.deref()).await.unwrap());
-	}
+	// Step 17: Connect and Disconnect Blocks
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
 	let network = args.network;
 	tokio::spawn(async move {
-		let mut derefed = bitcoind_block_source.deref();
-		let chain_poller = poll::ChainPoller::new(&mut derefed, network);
+		let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
 		let chain_listener = (chain_monitor_listener, channel_manager_listener);
-		let mut spv_client =
-			SpvClient::new(chain_tip.unwrap(), chain_poller, &mut cache, &chain_listener);
+		let mut spv_client = SpvClient::new(chain_tip, chain_poller, &mut cache, &chain_listener);
 		loop {
 			spv_client.poll_best_tip().await.unwrap();
 			tokio::time::sleep(Duration::from_secs(1)).await;
 		}
 	});
 
-	// Step 15: Handle LDK Events
-	let channel_manager_event_listener = channel_manager.clone();
-	let keys_manager_listener = keys_manager.clone();
 	// TODO: persist payment info to disk
 	let inbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
 	let outbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
-	let inbound_pmts_for_events = inbound_payments.clone();
-	let outbound_pmts_for_events = outbound_payments.clone();
+
+	// Step 18: Handle LDK Events
+	let channel_manager_event_listener = Arc::clone(&channel_manager);
+	let bitcoind_client_event_listener = Arc::clone(&bitcoind_client);
+	let network_graph_event_listener = Arc::clone(&network_graph);
+	let keys_manager_event_listener = Arc::clone(&keys_manager);
+	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
+	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
+	let persister_event_listener = Arc::clone(&persister);
 	let network = args.network;
-	let bitcoind_rpc = bitcoind_client.clone();
-	let network_graph_events = network_graph.clone();
-	let handle = tokio::runtime::Handle::current();
-	let event_handler = move |event: &Event| {
-		handle.block_on(handle_ldk_events(
-			&channel_manager_event_listener,
-			&bitcoind_rpc,
-			&network_graph_events,
-			&keys_manager_listener,
-			&inbound_pmts_for_events,
-			&outbound_pmts_for_events,
-			network,
-			event,
-		));
+	let event_handler = move |event: Event| {
+		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
+		let bitcoind_client_event_listener = Arc::clone(&bitcoind_client_event_listener);
+		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
+		let keys_manager_event_listener = Arc::clone(&keys_manager_event_listener);
+		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
+		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
+		let persister_event_listener = Arc::clone(&persister_event_listener);
+		async move {
+			handle_ldk_events(
+				&channel_manager_event_listener,
+				&bitcoind_client_event_listener,
+				&network_graph_event_listener,
+				&keys_manager_event_listener,
+				&inbound_payments_event_listener,
+				&outbound_payments_event_listener,
+				&persister_event_listener,
+				network,
+				event,
+			)
+			.await;
+		}
 	};
 
-	// Step 16: Initialize routing ProbabilisticScorer
-	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
-	let scorer = Arc::new(Mutex::new(disk::read_scorer(
-		Path::new(&scorer_path),
-		Arc::clone(&network_graph),
-		Arc::clone(&logger),
-	)));
-
-	// Step 17: Create InvoicePayer
-	let router = DefaultRouter::new(
-		network_graph.clone(),
-		logger.clone(),
-		keys_manager.get_secure_random_bytes(),
-	);
-	let invoice_payer = Arc::new(InvoicePayer::new(
-		channel_manager.clone(),
-		router,
-		scorer.clone(),
-		logger.clone(),
-		event_handler,
-		payment::Retry::Timeout(Duration::from_secs(10)),
-	));
-
-	// Step 18: Persist ChannelManager and NetworkGraph
+	// Step 19: Persist ChannelManager and NetworkGraph
 	let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
 
-	// Step 19: Background Processing
-	let background_processor = BackgroundProcessor::start(
-		persister,
-		invoice_payer.clone(),
+	// Step 20: Background Processing
+	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
+	let background_processor = tokio::spawn(process_events_async(
+		Arc::clone(&persister),
+		event_handler,
 		chain_monitor.clone(),
 		channel_manager.clone(),
-		GossipSync::P2P(gossip_sync.clone()),
+		GossipSync::p2p(gossip_sync.clone()),
 		peer_manager.clone(),
 		logger.clone(),
 		Some(scorer.clone()),
-	);
+		move |t| {
+			let mut bp_exit_fut_check = bp_exit_check.clone();
+			Box::pin(async move {
+				tokio::select! {
+					_ = tokio::time::sleep(t) => false,
+					_ = bp_exit_fut_check.changed() => true,
+				}
+			})
+		},
+		false,
+	));
 
 	// Regularly reconnect to channel peers.
 	let connect_cm = Arc::clone(&channel_manager);
@@ -1190,7 +1374,7 @@ async fn start_ldk() {
 						.list_channels()
 						.iter()
 						.map(|chan| chan.counterparty.node_id)
-						.filter(|id| !peers.contains(id))
+						.filter(|id| !peers.iter().any(|(pk, _)| id == pk))
 					{
 						if stop_connect.load(Ordering::Acquire) {
 							return;
@@ -1213,36 +1397,51 @@ async fn start_ldk() {
 	});
 
 	// Regularly broadcast our node_announcement. This is only required (or possible) if we have
-	// some public channels, and is only useful if we have public listen address(es) to announce.
-	// In a production environment, this should occur only after the announcement of new channels
-	// to avoid churn in the global network graph.
-	let chan_manager = Arc::clone(&channel_manager);
+	// some public channels.
+	let peer_man = Arc::clone(&peer_manager);
+	let chan_man = Arc::clone(&channel_manager);
 	let network = args.network;
-	if !args.ldk_announced_listen_addr.is_empty() {
-		tokio::spawn(async move {
-			let mut interval = tokio::time::interval(Duration::from_secs(60));
-			loop {
-				interval.tick().await;
-				chan_manager.broadcast_node_announcement(
+	tokio::spawn(async move {
+		// First wait a minute until we have some peers and maybe have opened a channel.
+		tokio::time::sleep(Duration::from_secs(60)).await;
+		// Then, update our announcement once an hour to keep it fresh but avoid unnecessary churn
+		// in the global gossip network.
+		let mut interval = tokio::time::interval(Duration::from_secs(3600));
+		loop {
+			interval.tick().await;
+			// Don't bother trying to announce if we don't have any public channls, though our
+			// peers should drop such an announcement anyway. Note that announcement may not
+			// propagate until we have a channel with 6+ confirmations.
+			if chan_man.list_channels().iter().any(|chan| chan.is_public) {
+				peer_man.broadcast_node_announcement(
 					[0; 3],
 					args.ldk_announced_node_name,
 					args.ldk_announced_listen_addr.clone(),
 				);
 			}
-		});
-	}
+		}
+	});
+
+	tokio::spawn(sweep::periodic_sweep(
+		ldk_data_dir.clone(),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+		Arc::clone(&persister),
+		Arc::clone(&bitcoind_client),
+	));
 
 	// Start the CLI.
 	cli::poll_for_user_input(
-		Arc::clone(&invoice_payer),
 		Arc::clone(&peer_manager),
 		Arc::clone(&channel_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&network_graph),
+		Arc::clone(&onion_messenger),
 		inbound_payments,
 		outbound_payments,
-		ldk_data_dir.clone(),
+		ldk_data_dir,
 		network,
+		Arc::clone(&logger),
 	)
 	.await;
 
@@ -1252,10 +1451,34 @@ async fn start_ldk() {
 	peer_manager.disconnect_all_peers();
 
 	// Stop the background processor.
-	background_processor.stop().unwrap();
+	bp_exit.send(()).unwrap();
+	background_processor.await.unwrap().unwrap();
 }
 
 #[tokio::main]
 pub async fn main() {
+	#[cfg(not(target_os = "windows"))]
+	{
+		// Catch Ctrl-C with a dummy signal handler.
+		unsafe {
+			let mut new_action: libc::sigaction = core::mem::zeroed();
+			let mut old_action: libc::sigaction = core::mem::zeroed();
+
+			extern "C" fn dummy_handler(
+				_: libc::c_int, _: *const libc::siginfo_t, _: *const libc::c_void,
+			) {
+			}
+
+			new_action.sa_sigaction = dummy_handler as libc::sighandler_t;
+			new_action.sa_flags = libc::SA_SIGINFO;
+
+			libc::sigaction(
+				libc::SIGINT,
+				&new_action as *const libc::sigaction,
+				&mut old_action as *mut libc::sigaction,
+			);
+		}
+	}
+
 	start_ldk().await;
 }

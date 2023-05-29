@@ -6,11 +6,17 @@ jobs:
   build:
     strategy:
       matrix:
-        toolchain: [ stable, beta ]
+        platform: [ ubuntu-latest, macos-latest, windows-latest ]
+        toolchain: [ stable, 1.48.0 ]
         include:
           - toolchain: stable
             check-fmt: true
-    runs-on: ubuntu-latest
+        exclude:
+          - platform: macos-latest
+            toolchain: 1.48.0
+          - platform: windows-latest
+            toolchain: stable
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v2
