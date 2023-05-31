@@ -10,44 +10,49 @@ mod sweep;
 use crate::bitcoind_client::BitcoindClient;
 use crate::chacha20::ChaCha20;
 use crate::disk::FilesystemLogger;
-use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::consensus::encode;
-use bitcoin::network::constants::Network;
-
-use bitcoin::secp256k1::{Secp256k1, SecretKey};
+use bitcoin::bech32::u5;
 use bitcoin::{BlockHash, PackedLockTime,Sequence};
+use bitcoin::blockdata::opcodes;
+use bitcoin::blockdata::script::{Script, Builder};
+use bitcoin::blockdata::transaction::{Transaction, TxOut, TxIn, EcdsaSighashType};
+use bitcoin::consensus::Encodable;
+use bitcoin::consensus::encode::VarInt;
+use bitcoin::consensus::encode;
+use bitcoin::hashes::{Hash, HashEngine};
+use bitcoin::hashes::sha256::HashEngine as Sha256State;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::hash_types::WPubkeyHash;
+use bitcoin::network::constants::Network;
+use bitcoin::PublicKey as OtherPublicKey;
+use bitcoin::secp256k1::{ecdh::SharedSecret, ecdsa::RecoverableSignature, ecdsa::Signature, Message, PublicKey, Scalar, Secp256k1, SecretKey, Signing};
+use bitcoin::{secp256k1, Witness};
+use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey, ChildNumber};
+use bitcoin::util::sighash;
 use bitcoin_bech32::WitnessProgram;
-
 use core::ops::Deref;
-
+use core::sync::atomic::{AtomicUsize};
 use lightning::chain;
 use lightning::chain::keysinterface::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
 	SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor, SignerProvider, NodeSigner};
-use lightning::chain::{BestBlock, Filter, Watch};
-use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
+use lightning::chain::{BestBlock, chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
-use lightning::ln::msgs::{UnsignedChannelAnnouncement, UnsignedGossipMessage};
-// use lightning::ln::channelmanager::{
-// 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
-//  };
-// use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
+use lightning::ln::msgs::{DecodeError, UnsignedChannelAnnouncement, UnsignedGossipMessage};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::peer_handler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::script::{ShutdownScript};
 use lightning::onion_message;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::util::config::UserConfig;
+use lightning::util::invoice::construct_invoice_preimage;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{ReadableArgs, Writeable};
-
-
-
-
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
@@ -65,48 +70,12 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
+use std::io::sink;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-
-use bitcoin::blockdata::transaction::{ TxOut, TxIn, EcdsaSighashType};
-use bitcoin::blockdata::script::{Script, Builder};
-use bitcoin::blockdata::opcodes;
-use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey, ChildNumber};
-use bitcoin::util::sighash;
-
-use bitcoin::bech32::u5;
-use bitcoin::hashes::{Hash, HashEngine};
-use bitcoin::hashes::sha256::HashEngine as Sha256State;
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::sha256d::Hash as Sha256dHash;
-use bitcoin::hash_types::WPubkeyHash;
-
-use bitcoin::secp256k1::{ PublicKey};
-use bitcoin::secp256k1::{ Signing};
-use bitcoin::secp256k1::ecdsa::RecoverableSignature;
-use bitcoin::secp256k1::ecdh::SharedSecret;
-use bitcoin::secp256k1::Scalar;
-use bitcoin::{secp256k1, Witness};
-
-//
-use bitcoin::PublicKey as OtherPublicKey;
-//
-
-use bitcoin::consensus::Encodable;
-use bitcoin::consensus::encode::VarInt;
-
-use std::io::sink;
-use lightning::ln::script::{ShutdownScript};
-
-
-use core::sync::atomic::{AtomicUsize};
-use lightning::ln::msgs::{DecodeError};
-use lightning::util::invoice::construct_invoice_preimage;
-
-use bitcoin::secp256k1::{Message, ecdsa::Signature};
 
 const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
@@ -145,9 +114,8 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<FilesystemLogger>,
 	Arc<FilesystemPersister>,
 >;
-//
+
 pub type SimpleArcPeerManager<SD, M, T, F, C, L> = peer_handler::PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<P2PGossipSync<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<C>, Arc<L>>>, Arc<SimpleArcOnionMessenger<L>>, Arc<L>, IgnoringMessageHandler, Arc<MyKeysManager>>;
-//
 pub(crate) type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
@@ -172,40 +140,10 @@ pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<
 >;
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
-// pub type SimpleArcChannelManager<M, T, F, L> = ChannelManager<InMemorySigner, Arc<M>, Arc<T>, Arc<KeysManager>, Arc<F>, Arc<L>>;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-/////////////////////////////////////// Mykeysmanager implementation
-// struct NodeAlias<'a>(&'a [u8; 32]);
-
-// impl fmt::Display for NodeAlias<'_> {
-// 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-// 		let alias = self
-// 			.0
-// 			.iter()
-// 			.map(|b| *b as char)
-// 			.take_while(|c| *c != '\0')
-// 			.filter(|c| c.is_ascii_graphic() || *c == ' ')
-// 			.collect::<String>();
-// 		write!(f, "{}", alias)
-// 	}
-// }
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/// 
-/// 
-/// 
-// use lightning::ln::script::ShutdownScript;
-// mod deeply {
-//    pub mod nested {
-//        pub fn function() {
-//            println!("called `deeply::nested::function()`");
-//        }
-//    }
-//}
-//
-
-
+//////////////////////////////////////////////////Methods required for MyKeysManager/////////////////////////////////////////////////////////////
 
 macro_rules! hash_to_message {
 	($slice: expr) => {
@@ -295,7 +233,6 @@ pub fn slice_to_be64(v: &[u8]) -> u64 {
 	((v[6] as u64) << 8*1) |
 	((v[7] as u64) << 8*0)
 }
-// atomic
 pub(crate) struct AtomicCounter {
 	// Usize needs to be at least 32 bits to avoid overflowing both low and high. If usize is 64
 	// bits we will never realistically count into high:
@@ -338,11 +275,8 @@ pub fn sign_with_aux_rand<C: Signing, ES: Deref>(
 	sig
 }
 
+////////////////////////////////////////////MyKeysManager////////////////////////////////
 
-////////////////////////////////////////////////////////////////////////////
-///////////////////new mkm
-/// 
-/// 
 pub struct MyKeysManager {
 	secp_ctx: Secp256k1<secp256k1::All>,
 	node_secret: SecretKey,
@@ -709,7 +643,7 @@ impl SignerProvider for MyKeysManager {
 		ShutdownScript::new_p2wpkh(&other_wpubkeyhash)
 	}
 }
-///////////////////////
+
 pub type SimpleArcOnionMessenger<L> = onion_message::OnionMessenger<Arc<MyKeysManager>, Arc<MyKeysManager>, Arc<L>, IgnoringMessageHandler>;
 type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 

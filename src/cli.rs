@@ -89,7 +89,7 @@ pub(crate) async fn poll_for_user_input(
 		if let Some(word) = words.next() {
 			match word {
 				"help" => help(),
-				"exit" => exit(),				
+				// "exit" => exit(),				
 				"openchannel_test" => {
 					let peer_pubkey = words.next();
 					let channel_value_sat = words.next();
@@ -866,8 +866,8 @@ pub(crate) fn parse_peer_info(
 	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
 }
 
-fn exit()
-{
-	println!("Exiting LDK-Sample Node");
-	std::process::exit(0);
-}
+// fn exit()
+// {
+// 	println!("Exiting LDK-Sample Node");
+// 	std::process::exit(0);
+// }
