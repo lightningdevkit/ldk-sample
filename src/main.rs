@@ -77,6 +77,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+
+use lightning::ln::msgs::ChannelMessageHandler;
+
 const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
 
@@ -322,6 +325,7 @@ impl MyKeysManager {
 				// **private key
                 let node_secret= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
                 // **public key
+				// 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
                 let node_id = PublicKey::from_secret_key(&secp_ctx, &node_secret);
 				let destination_script = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap()) {
 					Ok(destination_key) => {
@@ -412,7 +416,7 @@ impl MyKeysManager {
 		let payment_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000012").unwrap();
 		let delayed_payment_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000013").unwrap();
 		let htlc_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000014").unwrap();
-		let prng_seed = self.get_secure_random_bytes();
+		let prng_seed = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
 
 		InMemorySigner::new(
 			&self.secp_ctx,
@@ -1031,7 +1035,8 @@ async fn start_ldk() {
 	};
 	// let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, 0, 0));
-	//let st= te.derive_channel_keys(100000,)
+	//println!("{}",keys_manager.get_node_secret_key().display_secret());
+	
 	// Step 7: Read ChannelMonitor state from disk
 	let mut channelmonitors =
 		persister.read_channelmonitors(keys_manager.clone(), keys_manager.clone()).unwrap();
@@ -1178,6 +1183,8 @@ async fn start_ldk() {
 		route_handler: gossip_sync.clone(),
 		onion_message_handler: onion_messenger.clone(),
 	};
+	// println!("{}",lightning_msg_handler.chan_handler.provided_init_features(&keys_manager.get_node_id(Recipient::Node).unwrap()));
+	
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		current_time.try_into().unwrap(),
@@ -1186,7 +1193,7 @@ async fn start_ldk() {
 		IgnoringMessageHandler {},
 		Arc::clone(&keys_manager),
 	));
-
+	
 	// ## Running LDK
 	// Step 16: Initialize networking
 

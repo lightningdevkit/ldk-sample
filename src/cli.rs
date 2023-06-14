@@ -115,7 +115,7 @@ pub(crate) async fn poll_for_user_input(
 					};
 					let pubkey = peer_pubkey;
 					let pubkey = hex_utils::to_compressed_pubkey(pubkey);
-					if open_channel(
+					if open_channeltest(
 						pubkey.unwrap(),
 						chan_amt_sat.unwrap(),
 						announce_channel,
@@ -123,7 +123,11 @@ pub(crate) async fn poll_for_user_input(
 					)
 					.is_ok()
 					{
-						//fix
+						// let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+						// let _ = disk::persist_channel_peer(
+						// 	Path::new(&peer_data_path),
+						// 	peer_pubkey,
+						// );
 					}
 				},
 				"openchannel" => {
@@ -666,6 +670,35 @@ fn do_disconnect_peer(
 
 	peer_manager.disconnect_by_node_id(pubkey);
 	Ok(())
+}
+
+fn open_channeltest(
+	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool,
+	channel_manager: Arc<ChannelManager>,
+) -> Result<(), ()> {
+	let config = UserConfig {
+		channel_handshake_limits: ChannelHandshakeLimits {
+			// lnd's max to_self_delay is 2016, so we want to be compatible.
+			their_to_self_delay: 2016,
+			..Default::default()
+		},
+		channel_handshake_config: ChannelHandshakeConfig {
+			announced_channel,
+			..Default::default()
+		},
+		..Default::default()
+	};
+
+	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
+		Ok(_) => {
+			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
+			return Ok(());
+		}
+		Err(e) => {
+			println!("ERROR: failed to open channel: {:?}", e);
+			return Err(());
+		}
+	}
 }
 
 fn open_channel(
