@@ -1,4 +1,6 @@
-use crate::convert::{BlockchainInfo, FeeResponse, FundedTx, NewAddress, RawTx, SignedTx};
+use crate::convert::{
+	BlockchainInfo, FeeResponse, FundedTx, MempoolMinFeeResponse, NewAddress, RawTx, SignedTx,
+};
 use crate::disk::FilesystemLogger;
 use base64;
 use bitcoin::blockdata::transaction::Transaction;
@@ -32,6 +34,7 @@ pub struct BitcoindClient {
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum Target {
+	MempoolMinimum,
 	Background,
 	Normal,
 	HighPriority,
@@ -75,6 +78,7 @@ impl BitcoindClient {
 				"Failed to make initial call to bitcoind - please check your RPC user/password and access settings")
 			})?;
 		let mut fees: HashMap<Target, AtomicU32> = HashMap::new();
+		fees.insert(Target::MempoolMinimum, AtomicU32::new(MIN_FEERATE));
 		fees.insert(Target::Background, AtomicU32::new(MIN_FEERATE));
 		fees.insert(Target::Normal, AtomicU32::new(2000));
 		fees.insert(Target::HighPriority, AtomicU32::new(5000));
@@ -102,6 +106,16 @@ impl BitcoindClient {
 	) {
 		handle.spawn(async move {
 			loop {
+				let mempoolmin_estimate = {
+					let resp = rpc_client
+						.call_method::<MempoolMinFeeResponse>("getmempoolinfo", &vec![])
+						.await
+						.unwrap();
+					match resp.feerate_sat_per_kw {
+						Some(feerate) => std::cmp::max(feerate, MIN_FEERATE),
+						None => MIN_FEERATE,
+					}
+				};
 				let background_estimate = {
 					let background_conf_target = serde_json::json!(144);
 					let background_estimate_mode = serde_json::json!("ECONOMICAL");
@@ -151,6 +165,9 @@ impl BitcoindClient {
 					}
 				};
 
+				fees.get(&Target::MempoolMinimum)
+					.unwrap()
+					.store(mempoolmin_estimate, Ordering::Release);
 				fees.get(&Target::Background)
 					.unwrap()
 					.store(background_estimate, Ordering::Release);
@@ -238,6 +255,9 @@ impl BitcoindClient {
 impl FeeEstimator for BitcoindClient {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
 		match confirmation_target {
+			ConfirmationTarget::MempoolMinimum => {
+				self.fees.get(&Target::MempoolMinimum).unwrap().load(Ordering::Acquire)
+			}
 			ConfirmationTarget::Background => {
 				self.fees.get(&Target::Background).unwrap().load(Ordering::Acquire)
 			}
@@ -252,29 +272,33 @@ impl FeeEstimator for BitcoindClient {
 }
 
 impl BroadcasterInterface for BitcoindClient {
-	fn broadcast_transaction(&self, tx: &Transaction) {
-		let bitcoind_rpc_client = self.bitcoind_rpc_client.clone();
-		let tx_serialized = encode::serialize_hex(tx);
-		let tx_json = serde_json::json!(tx_serialized);
-		let logger = Arc::clone(&self.logger);
-		self.handle.spawn(async move {
-			// This may error due to RL calling `broadcast_transaction` with the same transaction
-			// multiple times, but the error is safe to ignore.
-			match bitcoind_rpc_client
-				.call_method::<Txid>("sendrawtransaction", &vec![tx_json])
-				.await
-			{
-				Ok(_) => {}
-				Err(e) => {
-					let err_str = e.get_ref().unwrap().to_string();
-					log_error!(logger,
-						"Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransaction: {}",
-						err_str,
-						tx_serialized);
-					print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
-				}
-			}
-		});
+	fn broadcast_transactions(&self, txs: &[&Transaction]) {
+		// TODO: Rather than calling `sendrawtransaction` in a a loop, we should probably use
+		// `submitpackage` once it becomes available.
+		for tx in txs {
+			let bitcoind_rpc_client = Arc::clone(&self.bitcoind_rpc_client);
+			let tx_serialized = encode::serialize_hex(tx);
+			let tx_json = serde_json::json!(tx_serialized);
+			let logger = Arc::clone(&self.logger);
+			self.handle.spawn(async move {
+				// This may error due to RL calling `broadcast_transactions` with the same transaction
+				// multiple times, but the error is safe to ignore.
+				match bitcoind_rpc_client
+					.call_method::<Txid>("sendrawtransaction", &vec![tx_json])
+					.await
+					{
+						Ok(_) => {}
+						Err(e) => {
+							let err_str = e.get_ref().unwrap().to_string();
+							log_error!(logger,
+									   "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransaction: {}",
+									   err_str,
+									   tx_serialized);
+							print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
+						}
+					}
+			});
+		}
 	}
 }
 

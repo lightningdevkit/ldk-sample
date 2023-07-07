@@ -14,9 +14,6 @@ use bitcoin::network::constants::Network;
 use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
-use lightning::chain::keysinterface::{
-	EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor,
-};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
@@ -27,10 +24,12 @@ use lightning::ln::channelmanager::{
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::onion_message::SimpleArcOnionMessenger;
+use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
+use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
+use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -207,6 +206,7 @@ async fn handle_ldk_events(
 			via_user_channel_id: _,
 			claim_deadline: _,
 			onion_fields: _,
+			counterparty_skimmed_fee_msat: _,
 		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
@@ -429,6 +429,7 @@ async fn handle_ldk_events(
 			// the funding transaction either confirms, or this event is generated.
 		}
 		Event::HTLCIntercepted { .. } => {}
+		Event::BumpTransaction(_) => {}
 	}
 }
 
@@ -553,11 +554,13 @@ async fn start_ldk() {
 	)));
 
 	// Step 10: Create Router
+	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
 		network_graph.clone(),
 		logger.clone(),
 		keys_manager.get_secure_random_bytes(),
 		scorer.clone(),
+		scoring_fee_params,
 	));
 
 	// Step 11: Initialize the ChannelManager
@@ -602,6 +605,7 @@ async fn start_ldk() {
 				keys_manager.clone(),
 				user_config,
 				chain_params,
+				cur.as_secs() as u32,
 			);
 			(polled_best_block_hash, fresh_channel_manager)
 		}
@@ -667,6 +671,8 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
+		Arc::new(DefaultMessageRouter {}),
+		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 	));
 	let mut ephemeral_bytes = [0; 32];
@@ -676,13 +682,13 @@ async fn start_ldk() {
 		chan_handler: channel_manager.clone(),
 		route_handler: gossip_sync.clone(),
 		onion_message_handler: onion_messenger.clone(),
+		custom_message_handler: IgnoringMessageHandler {},
 	};
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		current_time.try_into().unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
-		IgnoringMessageHandler {},
 		Arc::clone(&keys_manager),
 	));
 
@@ -888,6 +894,7 @@ async fn start_ldk() {
 		Arc::clone(&logger),
 		Arc::clone(&persister),
 		Arc::clone(&bitcoind_client),
+		Arc::clone(&channel_manager),
 	));
 
 	// Start the CLI.

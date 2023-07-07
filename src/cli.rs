@@ -8,18 +8,19 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
-use lightning::chain::keysinterface::{EntropySource, KeysManager};
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::onion_message::OnionMessagePath;
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::sign::{EntropySource, KeysManager};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Writeable, Writer};
 use lightning_invoice::payment::pay_invoice;
-use lightning_invoice::{utils, Currency, Invoice};
+use lightning_invoice::{utils, Bolt11Invoice, Currency};
 use lightning_persister::FilesystemPersister;
 use std::env;
 use std::io;
@@ -150,7 +151,7 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					let invoice = match Invoice::from_str(invoice_str.unwrap()) {
+					let invoice = match Bolt11Invoice::from_str(invoice_str.unwrap()) {
 						Ok(inv) => inv,
 						Err(e) => {
 							println!("ERROR: invalid invoice: {:?}", e);
@@ -387,7 +388,7 @@ pub(crate) async fn poll_for_user_input(
 						);
 						continue;
 					}
-					let mut node_pks = Vec::new();
+					let mut intermediate_nodes = Vec::new();
 					let mut errored = false;
 					for pk_str in path_pks_str.unwrap().split(",") {
 						let node_pubkey_vec = match hex_utils::to_vec(pk_str) {
@@ -406,7 +407,7 @@ pub(crate) async fn poll_for_user_input(
 								break;
 							}
 						};
-						node_pks.push(node_pubkey);
+						intermediate_nodes.push(node_pubkey);
 					}
 					if errored {
 						continue;
@@ -425,10 +426,10 @@ pub(crate) async fn poll_for_user_input(
 							continue;
 						}
 					};
-					let destination_pk = node_pks.pop().unwrap();
+					let destination = Destination::Node(intermediate_nodes.pop().unwrap());
+					let message_path = OnionMessagePath { intermediate_nodes, destination };
 					match onion_messenger.send_onion_message(
-						&node_pks,
-						Destination::Node(destination_pk),
+						message_path,
 						OnionMessageContents::Custom(UserOnionMessageContents { tlv_type, data }),
 						None,
 					) {
@@ -666,7 +667,7 @@ fn open_channel(
 }
 
 fn send_payment(
-	channel_manager: &ChannelManager, invoice: &Invoice,
+	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
 	outbound_payments: &mut PaymentInfoStorage, persister: Arc<FilesystemPersister>,
 ) {
 	let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
@@ -705,7 +706,7 @@ fn keysend<E: EntropySource>(
 	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
 
 	let route_params = RouteParameters {
-		payment_params: PaymentParameters::for_keysend(payee_pubkey, 40),
+		payment_params: PaymentParameters::for_keysend(payee_pubkey, 40, false),
 		final_value_msat: amt_msat,
 	};
 	outbound_payments.payments.insert(
