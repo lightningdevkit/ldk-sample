@@ -759,6 +759,7 @@ async fn start_ldk() {
 	let stop_connect = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
+		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			interval.tick().await;
 			match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
