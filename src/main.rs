@@ -13,17 +13,18 @@ use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
 use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
-use lightning::chain;
+use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain::keysinterface::{
 	EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor,
 };
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
-use lightning::ln::channelmanager;
+use lightning::ln::channelmanager::{self, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
+use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::onion_message::SimpleArcOnionMessenger;
@@ -32,7 +33,8 @@ use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::util::config::UserConfig;
 use lightning::util::persist::KVStorePersister;
-use lightning::util::ser::ReadableArgs;
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
@@ -56,11 +58,18 @@ use std::time::{Duration, SystemTime};
 
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
 
+#[derive(Copy, Clone)]
 pub(crate) enum HTLCStatus {
 	Pending,
 	Succeeded,
 	Failed,
 }
+
+impl_writeable_tlv_based_enum!(HTLCStatus,
+	(0, Pending) => {},
+	(1, Succeeded) => {},
+	(2, Failed) => {};
+);
 
 pub(crate) struct MillisatAmount(Option<u64>);
 
@@ -73,6 +82,19 @@ impl fmt::Display for MillisatAmount {
 	}
 }
 
+impl Readable for MillisatAmount {
+	fn read<R: io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let amt: Option<u64> = Readable::read(r)?;
+		Ok(MillisatAmount(amt))
+	}
+}
+
+impl Writeable for MillisatAmount {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), std::io::Error> {
+		self.0.write(w)
+	}
+}
+
 pub(crate) struct PaymentInfo {
 	preimage: Option<PaymentPreimage>,
 	secret: Option<PaymentSecret>,
@@ -80,7 +102,20 @@ pub(crate) struct PaymentInfo {
 	amt_msat: MillisatAmount,
 }
 
-pub(crate) type PaymentInfoStorage = Arc<Mutex<HashMap<PaymentHash, PaymentInfo>>>;
+impl_writeable_tlv_based!(PaymentInfo, {
+	(0, preimage, required),
+	(2, secret, required),
+	(4, status, required),
+	(6, amt_msat, required),
+});
+
+pub(crate) struct PaymentInfoStorage {
+	payments: HashMap<PaymentHash, PaymentInfo>,
+}
+
+impl_writeable_tlv_based!(PaymentInfoStorage, {
+	(0, payments, required),
+});
 
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -110,8 +145,9 @@ type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage,
-	persister: &Arc<FilesystemPersister>, network: Network, event: Event,
+	inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
+	network: Network, event: Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -199,8 +235,8 @@ async fn handle_ldk_events(
 				}
 				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
 			};
-			let mut payments = inbound_payments.lock().unwrap();
-			match payments.entry(payment_hash) {
+			let mut inbound = inbound_payments.lock().unwrap();
+			match inbound.payments.entry(payment_hash) {
 				Entry::Occupied(mut e) => {
 					let payment = e.get_mut();
 					payment.status = HTLCStatus::Succeeded;
@@ -216,10 +252,11 @@ async fn handle_ldk_events(
 					});
 				}
 			}
+			persister.persist(INBOUND_PAYMENTS_FNAME, &*inbound).unwrap();
 		}
 		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
-			let mut payments = outbound_payments.lock().unwrap();
-			for (hash, payment) in payments.iter_mut() {
+			let mut outbound = outbound_payments.lock().unwrap();
+			for (hash, payment) in outbound.payments.iter_mut() {
 				if *hash == payment_hash {
 					payment.preimage = Some(payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
@@ -239,6 +276,7 @@ async fn handle_ldk_events(
 					io::stdout().flush().unwrap();
 				}
 			}
+			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
 		Event::OpenChannelRequest { .. } => {
 			// Unreachable, we don't set manually_accept_inbound_channels
@@ -256,11 +294,12 @@ async fn handle_ldk_events(
 			print!("> ");
 			io::stdout().flush().unwrap();
 
-			let mut payments = outbound_payments.lock().unwrap();
-			if payments.contains_key(&payment_hash) {
-				let payment = payments.get_mut(&payment_hash).unwrap();
+			let mut outbound = outbound_payments.lock().unwrap();
+			if outbound.payments.contains_key(&payment_hash) {
+				let payment = outbound.payments.get_mut(&payment_hash).unwrap();
 				payment.status = HTLCStatus::Failed;
 			}
+			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
 		Event::PaymentForwarded {
 			prev_channel_id,
@@ -479,7 +518,7 @@ async fn start_ldk() {
 		thread_rng().fill_bytes(&mut key);
 		match File::create(keys_seed_path.clone()) {
 			Ok(mut f) => {
-				f.write_all(&key).expect("Failed to write node keys seed to disk");
+				Write::write_all(&mut f, &key).expect("Failed to write node keys seed to disk");
 				f.sync_all().expect("Failed to sync node keys seed to disk");
 			}
 			Err(e) => {
@@ -689,9 +728,35 @@ async fn start_ldk() {
 		}
 	});
 
-	// TODO: persist payment info to disk
-	let inbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
-	let outbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
+	let inbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
+		"{}/{}",
+		ldk_data_dir, INBOUND_PAYMENTS_FNAME
+	)))));
+	let outbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
+		"{}/{}",
+		ldk_data_dir, OUTBOUND_PAYMENTS_FNAME
+	)))));
+	let recent_payments_payment_hashes = channel_manager
+		.list_recent_payments()
+		.into_iter()
+		.filter_map(|p| match p {
+			RecentPaymentDetails::Pending { payment_hash, .. } => Some(payment_hash),
+			RecentPaymentDetails::Fulfilled { payment_hash } => payment_hash,
+			RecentPaymentDetails::Abandoned { payment_hash } => Some(payment_hash),
+		})
+		.collect::<Vec<PaymentHash>>();
+	for (payment_hash, payment_info) in outbound_payments
+		.lock()
+		.unwrap()
+		.payments
+		.iter_mut()
+		.filter(|(_, i)| matches!(i.status, HTLCStatus::Pending))
+	{
+		if !recent_payments_payment_hashes.contains(payment_hash) {
+			payment_info.status = HTLCStatus::Failed;
+		}
+	}
+	persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments.lock().unwrap()).unwrap();
 
 	// Step 18: Handle LDK Events
 	let channel_manager_event_listener = Arc::clone(&channel_manager);
@@ -716,8 +781,8 @@ async fn start_ldk() {
 				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
-				&inbound_payments_event_listener,
-				&outbound_payments_event_listener,
+				inbound_payments_event_listener,
+				outbound_payments_event_listener,
 				&persister_event_listener,
 				network,
 				event,
@@ -837,6 +902,7 @@ async fn start_ldk() {
 		ldk_data_dir,
 		network,
 		Arc::clone(&logger),
+		Arc::clone(&persister),
 	)
 	.await;
 
