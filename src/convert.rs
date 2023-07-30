@@ -74,6 +74,31 @@ impl TryInto<FeeResponse> for JsonResponse {
 	}
 }
 
+pub struct MempoolMinFeeResponse {
+	pub feerate_sat_per_kw: Option<u32>,
+	pub errored: bool,
+}
+
+impl TryInto<MempoolMinFeeResponse> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> std::io::Result<MempoolMinFeeResponse> {
+		let errored = !self.0["errors"].is_null();
+		assert_eq!(self.0["maxmempool"].as_u64(), Some(300000000));
+		Ok(MempoolMinFeeResponse {
+			errored,
+			feerate_sat_per_kw: match self.0["mempoolminfee"].as_f64() {
+				// Bitcoin Core gives us a feerate in BTC/KvB, which we need to convert to
+				// satoshis/KW. Thus, we first multiply by 10^8 to get satoshis, then divide by 4
+				// to convert virtual-bytes into weight units.
+				Some(feerate_btc_per_kvbyte) => {
+					Some((feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32)
+				}
+				None => None,
+			},
+		})
+	}
+}
+
 pub struct BlockchainInfo {
 	pub latest_height: usize,
 	pub latest_blockhash: BlockHash,

@@ -5,15 +5,17 @@ use std::time::Duration;
 use std::{fs, io};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::chain::keysinterface::{EntropySource, KeysManager, SpendableOutputDescriptor};
+use lightning::sign::{EntropySource, KeysManager, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Readable, WithoutLength};
 
 use bitcoin::secp256k1::Secp256k1;
+use bitcoin::{LockTime, PackedLockTime};
 
 use crate::hex_utils;
 use crate::BitcoindClient;
+use crate::ChannelManager;
 use crate::FilesystemLogger;
 use crate::FilesystemPersister;
 
@@ -28,6 +30,7 @@ use crate::FilesystemPersister;
 pub(crate) async fn periodic_sweep(
 	ldk_data_dir: String, keys_manager: Arc<KeysManager>, logger: Arc<FilesystemLogger>,
 	persister: Arc<FilesystemPersister>, bitcoind_client: Arc<BitcoindClient>,
+	channel_manager: Arc<ChannelManager>,
 ) {
 	// Regularly claim outputs which are exclusively spendable by us and send them to Bitcoin Core.
 	// Note that if you more tightly integrate your wallet with LDK you may not need to do this -
@@ -106,16 +109,23 @@ pub(crate) async fn periodic_sweep(
 				let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
 				let tx_feerate =
 					bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Background);
+
+				// We set nLockTime to the current height to discourage fee sniping.
+				let cur_height = channel_manager.current_best_block().height();
+				let locktime: PackedLockTime =
+					LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
+
 				if let Ok(spending_tx) = keys_manager.spend_spendable_outputs(
 					output_descriptors,
 					Vec::new(),
 					destination_address.script_pubkey(),
 					tx_feerate,
+					Some(locktime),
 					&Secp256k1::new(),
 				) {
 					// Note that, most likely, we've already sweeped this set of outputs
 					// and they're already confirmed on-chain, so this broadcast will fail.
-					bitcoind_client.broadcast_transaction(&spending_tx);
+					bitcoind_client.broadcast_transactions(&[&spending_tx]);
 				} else {
 					lightning::log_error!(
 						logger,

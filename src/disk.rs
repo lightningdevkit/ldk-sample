@@ -2,7 +2,7 @@ use crate::{cli, NetworkGraph, PaymentInfoStorage};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use chrono::Utc;
-use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringParameters};
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{Readable, ReadableArgs, Writer};
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ pub(crate) fn read_payment_info(path: &Path) -> PaymentInfoStorage {
 pub(crate) fn read_scorer(
 	path: &Path, graph: Arc<NetworkGraph>, logger: Arc<FilesystemLogger>,
 ) -> ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>> {
-	let params = ProbabilisticScoringParameters::default();
+	let params = ProbabilisticScoringDecayParameters::default();
 	if let Ok(file) = File::open(path) {
 		let args = (params.clone(), Arc::clone(&graph), Arc::clone(&logger));
 		if let Ok(scorer) = ProbabilisticScorer::read(&mut BufReader::new(file), args) {
