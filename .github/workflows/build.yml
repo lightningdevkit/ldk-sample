@@ -19,13 +19,11 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Install Rust ${{ matrix.toolchain }} toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.toolchain }}
-          override: true
-          profile: minimal
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
+          rustup override set ${{ matrix.toolchain }}
       - name: Build on Rust ${{ matrix.toolchain }}
         run: cargo build --verbose --color always
       - name: Check formatting

@@ -24,6 +24,7 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::WPubkeyHash;
 use bitcoin::network::constants::Network;
+use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::PublicKey as OtherPublicKey;
 use bitcoin::secp256k1::{ecdh::SharedSecret, ecdsa::RecoverableSignature, ecdsa::Signature, Message, PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{secp256k1, Witness};
@@ -33,7 +34,7 @@ use bitcoin_bech32::WitnessProgram;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize};
 use lightning::chain;
-use lightning::chain::keysinterface::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
+use lightning::sign::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
 	SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor, SignerProvider, NodeSigner};
 use lightning::chain::{BestBlock, chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
@@ -43,16 +44,35 @@ use lightning::ln::msgs::{DecodeError, UnsignedChannelAnnouncement, UnsignedGoss
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::peer_handler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::ln::script::{ShutdownScript};
+use lightning::ln::script::ShutdownScript;
 use lightning::onion_message;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
+use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
+// use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
+// use lightning::chain::{Filter, Watch};
+// use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
+use lightning::ln::channelmanager::{RecentPaymentDetails};
+// use lightning::ln::channelmanager::{
+// 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+// };
+// use lightning::ln::msgs::DecodeError;
+// use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
+// use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+// use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
+// use lightning::routing::gossip;
+// use lightning::routing::gossip::{NodeId, P2PGossipSync};
+// use lightning::routing::router::DefaultRouter;
+use lightning::onion_message::DefaultMessageRouter;
+use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
+// use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
 use lightning::util::invoice::construct_invoice_preimage;
 use lightning::util::persist::KVStorePersister;
-use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::{ impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
@@ -83,11 +103,18 @@ use lightning::ln::msgs::ChannelMessageHandler;
 const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
 
+#[derive(Copy, Clone)]
 pub(crate) enum HTLCStatus {
 	Pending,
 	Succeeded,
 	Failed,
 }
+
+impl_writeable_tlv_based_enum!(HTLCStatus,
+	(0, Pending) => {},
+	(1, Succeeded) => {},
+	(2, Failed) => {};
+);
 
 pub(crate) struct MillisatAmount(Option<u64>);
 
@@ -100,6 +127,19 @@ impl fmt::Display for MillisatAmount {
 	}
 }
 
+impl Readable for MillisatAmount {
+	fn read<R: io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let amt: Option<u64> = Readable::read(r)?;
+		Ok(MillisatAmount(amt))
+	}
+}
+
+impl Writeable for MillisatAmount {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), std::io::Error> {
+		self.0.write(w)
+	}
+}
+
 pub(crate) struct PaymentInfo {
 	preimage: Option<PaymentPreimage>,
 	secret: Option<PaymentSecret>,
@@ -107,7 +147,20 @@ pub(crate) struct PaymentInfo {
 	amt_msat: MillisatAmount,
 }
 
-pub(crate) type PaymentInfoStorage = Arc<Mutex<HashMap<PaymentHash, PaymentInfo>>>;
+impl_writeable_tlv_based!(PaymentInfo, {
+	(0, preimage, required),
+	(2, secret, required),
+	(4, status, required),
+	(6, amt_msat, required),
+});
+
+pub(crate) struct PaymentInfoStorage {
+	payments: HashMap<PaymentHash, PaymentInfo>,
+}
+
+impl_writeable_tlv_based!(PaymentInfoStorage, {
+	(0, payments, required),
+});
 
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
@@ -137,7 +190,9 @@ pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<
 	Arc<DefaultRouter<
 		Arc<gossip::NetworkGraph<Arc<L>>>,
 		Arc<L>,
-		Arc<Mutex<ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>>>
+		Arc<Mutex<ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>>>,
+		ProbabilisticScoringFeeParameters,
+		ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>,
 	>>,
 	Arc<L>
 >;
@@ -432,91 +487,40 @@ impl MyKeysManager {
 		)
 	}
 
-	/// Creates a [`Transaction`] which spends the given descriptors to the given outputs, plus an
-	/// output to the given change destination (if sufficient change value remains). The
-	/// transaction will have a feerate, at least, of the given value.
+	/// Signs the given [`PartiallySignedTransaction`] which spends the given [`SpendableOutputDescriptor`]s.
+	/// The resulting inputs will be finalized and the PSBT will be ready for broadcast if there
+	/// are no other inputs that need signing.
 	///
-	/// Returns `Err(())` if the output value is greater than the input value minus required fee,
-	/// if a descriptor was duplicated, or if an output descriptor `script_pubkey`
-	/// does not match the one we can spend.
-	///
-	/// We do not enforce that outputs meet the dust limit or that any output scripts are standard.
+	/// Returns `Err(())` if the PSBT is missing a descriptor or if we fail to sign.
 	///
 	/// May panic if the [`SpendableOutputDescriptor`]s were not generated by channels which used
 	/// this [`KeysManager`] or one of the [`InMemorySigner`] created by this [`KeysManager`].
-	pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
-		let mut input = Vec::new();
-		let mut input_value = 0;
-		let mut witness_weight = 0;
-		let mut output_set = HashSet::with_capacity(descriptors.len());
+	pub fn sign_spendable_outputs_psbt<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], mut psbt: PartiallySignedTransaction, secp_ctx: &Secp256k1<C>) -> Result<PartiallySignedTransaction, ()> {
+		let mut keys_cache: Option<(InMemorySigner, [u8; 32])> = None;
 		for outp in descriptors {
 			match outp {
 				SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
-					input.push(TxIn {
-						previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
-						script_sig: Script::new(),
-						sequence: Sequence::ZERO,
-						witness: Witness::new(),
-					});
-					witness_weight += StaticPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
-					input_value += descriptor.output.value;
-					if !output_set.insert(descriptor.outpoint) { return Err(()); }
+					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == descriptor.outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
+						keys_cache = Some((
+							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
+							descriptor.channel_keys_id));
+					}
+					let witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(&psbt.unsigned_tx, input_idx, &descriptor, &secp_ctx)?);
+					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 				SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
-					input.push(TxIn {
-						previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
-						script_sig: Script::new(),
-						sequence: Sequence(descriptor.to_self_delay as u32),
-						witness: Witness::new(),
-					});
-					witness_weight += DelayedPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
-					input_value += descriptor.output.value;
-					if !output_set.insert(descriptor.outpoint) { return Err(()); }
+					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == descriptor.outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
+						keys_cache = Some((
+							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
+							descriptor.channel_keys_id));
+					}
+					let witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&psbt.unsigned_tx, input_idx, &descriptor, &secp_ctx)?);
+					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output } => {
-					input.push(TxIn {
-						previous_output: outpoint.into_bitcoin_outpoint(),
-						script_sig: Script::new(),
-						sequence: Sequence::ZERO,
-						witness: Witness::new(),
-					});
-					witness_weight += 1 + 73 + 34;
-					input_value += output.value;
-					if !output_set.insert(*outpoint) { return Err(()); }
-				}
-			}
-			if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
-		}
-		let mut spend_tx = Transaction {
-			version: 2,
-			lock_time: PackedLockTime(0),
-			input,
-			output: outputs,
-		};
-		let expected_max_weight =
-			maybe_add_change_output(&mut spend_tx, input_value, witness_weight, feerate_sat_per_1000_weight, change_destination_script)?;
-
-		let mut keys_cache: Option<(InMemorySigner, [u8; 32])> = None;
-		let mut input_idx = 0;
-		for outp in descriptors {
-			match outp {
-				SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
-					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
-						keys_cache = Some((
-							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
-							descriptor.channel_keys_id));
-					}
-					spend_tx.input[input_idx].witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(&spend_tx, input_idx, &descriptor, &secp_ctx)?);
-				},
-				SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
-					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
-						keys_cache = Some((
-							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
-							descriptor.channel_keys_id));
-					}
-					spend_tx.input[input_idx].witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&spend_tx, input_idx, &descriptor, &secp_ctx)?);
-				},
-				SpendableOutputDescriptor::StaticOutput { ref output, .. } => {
+					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == outpoint.into_bitcoin_outpoint()).ok_or(())?;
 					let derivation_idx = if output.script_pubkey == self.destination_script {
 						1
 					} else {
@@ -543,16 +547,36 @@ impl MyKeysManager {
 
 					if payment_script != output.script_pubkey { return Err(()); };
 
-					let sighash = hash_to_message!(&sighash::SighashCache::new(&spend_tx).segwit_signature_hash(input_idx, &witness_script, output.value, EcdsaSighashType::All).unwrap()[..]);
+					let sighash = hash_to_message!(&sighash::SighashCache::new(&psbt.unsigned_tx).segwit_signature_hash(input_idx, &witness_script, output.value, EcdsaSighashType::All).unwrap()[..]);
 					let sig = sign_with_aux_rand(secp_ctx, &sighash, &secret.private_key, &self);
 					let mut sig_ser = sig.serialize_der().to_vec();
 					sig_ser.push(EcdsaSighashType::All as u8);
-					spend_tx.input[input_idx].witness.push(sig_ser);
-					spend_tx.input[input_idx].witness.push(pubkey.inner.serialize().to_vec());
+					let witness = Witness::from_vec(vec![sig_ser, pubkey.inner.serialize().to_vec()]);
+					psbt.inputs[input_idx].final_script_witness = Some(witness);
 				},
 			}
-			input_idx += 1;
 		}
+
+		Ok(psbt)
+	}
+
+	/// Creates a [`Transaction`] which spends the given descriptors to the given outputs, plus an
+	/// output to the given change destination (if sufficient change value remains). The
+	/// transaction will have a feerate, at least, of the given value.
+	///
+	/// Returns `Err(())` if the output value is greater than the input value minus required fee,
+	/// if a descriptor was duplicated, or if an output descriptor `script_pubkey`
+	/// does not match the one we can spend.
+	///
+	/// We do not enforce that outputs meet the dust limit or that any output scripts are standard.
+	///
+	/// May panic if the [`SpendableOutputDescriptor`]s were not generated by channels which used
+	/// this [`KeysManager`] or one of the [`InMemorySigner`] created by this [`KeysManager`].
+	pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, locktime: Option<PackedLockTime>, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
+		let (mut psbt, expected_max_weight) = SpendableOutputDescriptor::create_spendable_outputs_psbt(descriptors, outputs, change_destination_script, feerate_sat_per_1000_weight, locktime)?;
+		psbt = self.sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)?;
+
+		let spend_tx = psbt.extract_tx();
 
 		debug_assert!(expected_max_weight >= spend_tx.weight());
 		// Note that witnesses with a signature vary somewhat in size, so allow
@@ -561,6 +585,123 @@ impl MyKeysManager {
 
 		Ok(spend_tx)
 	}
+	// pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
+	// 	let mut input = Vec::new();
+	// 	let mut input_value = 0;
+	// 	let mut witness_weight = 0;
+	// 	let mut output_set = HashSet::with_capacity(descriptors.len());
+	// 	for outp in descriptors {
+	// 		match outp {
+	// 			SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
+	// 				input.push(TxIn {
+	// 					previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
+	// 					script_sig: Script::new(),
+	// 					sequence: Sequence::ZERO,
+	// 					witness: Witness::new(),
+	// 				});
+	// 				witness_weight += StaticPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
+	// 				input_value += descriptor.output.value;
+	// 				if !output_set.insert(descriptor.outpoint) { return Err(()); }
+	// 			},
+	// 			SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
+	// 				input.push(TxIn {
+	// 					previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
+	// 					script_sig: Script::new(),
+	// 					sequence: Sequence(descriptor.to_self_delay as u32),
+	// 					witness: Witness::new(),
+	// 				});
+	// 				witness_weight += DelayedPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
+	// 				input_value += descriptor.output.value;
+	// 				if !output_set.insert(descriptor.outpoint) { return Err(()); }
+	// 			},
+	// 			SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output } => {
+	// 				input.push(TxIn {
+	// 					previous_output: outpoint.into_bitcoin_outpoint(),
+	// 					script_sig: Script::new(),
+	// 					sequence: Sequence::ZERO,
+	// 					witness: Witness::new(),
+	// 				});
+	// 				witness_weight += 1 + 73 + 34;
+	// 				input_value += output.value;
+	// 				if !output_set.insert(*outpoint) { return Err(()); }
+	// 			}
+	// 		}
+	// 		if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
+	// 	}
+	// 	let mut spend_tx = Transaction {
+	// 		version: 2,
+	// 		lock_time: PackedLockTime(0),
+	// 		input,
+	// 		output: outputs,
+	// 	};
+	// 	let expected_max_weight =
+	// 		maybe_add_change_output(&mut spend_tx, input_value, witness_weight, feerate_sat_per_1000_weight, change_destination_script)?;
+
+	// 	let mut keys_cache: Option<(InMemorySigner, [u8; 32])> = None;
+	// 	let mut input_idx = 0;
+	// 	for outp in descriptors {
+	// 		match outp {
+	// 			SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
+	// 				if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
+	// 					keys_cache = Some((
+	// 						self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
+	// 						descriptor.channel_keys_id));
+	// 				}
+	// 				spend_tx.input[input_idx].witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(&spend_tx, input_idx, &descriptor, &secp_ctx)?);
+	// 			},
+	// 			SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
+	// 				if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
+	// 					keys_cache = Some((
+	// 						self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
+	// 						descriptor.channel_keys_id));
+	// 				}
+	// 				spend_tx.input[input_idx].witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&spend_tx, input_idx, &descriptor, &secp_ctx)?);
+	// 			},
+	// 			SpendableOutputDescriptor::StaticOutput { ref output, .. } => {
+	// 				let derivation_idx = if output.script_pubkey == self.destination_script {
+	// 					1
+	// 				} else {
+	// 					2
+	// 				};
+	// 				let secret = {
+	// 					// Note that when we aren't serializing the key, network doesn't matter
+	// 					match ExtendedPrivKey::new_master(Network::Testnet, &self.seed) {
+	// 						Ok(master_key) => {
+	// 							match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(derivation_idx).expect("key space exhausted")) {
+	// 								Ok(key) => key,
+	// 								Err(_) => panic!("Your RNG is busted"),
+	// 							}
+	// 						}
+	// 						Err(_) => panic!("Your rng is busted"),
+	// 					}
+	// 				};
+	// 				let pubkey = ExtendedPubKey::from_priv(&secp_ctx, &secret).to_pub();
+	// 				if derivation_idx == 2 {
+	// 					assert_eq!(pubkey.inner, self.shutdown_pubkey);
+	// 				}
+	// 				let witness_script = bitcoin::Address::p2pkh(&pubkey, Network::Testnet).script_pubkey();
+	// 				let payment_script = bitcoin::Address::p2wpkh(&pubkey, Network::Testnet).expect("uncompressed key found").script_pubkey();
+
+	// 				if payment_script != output.script_pubkey { return Err(()); };
+
+	// 				let sighash = hash_to_message!(&sighash::SighashCache::new(&spend_tx).segwit_signature_hash(input_idx, &witness_script, output.value, EcdsaSighashType::All).unwrap()[..]);
+	// 				let sig = sign_with_aux_rand(secp_ctx, &sighash, &secret.private_key, &self);
+	// 				let mut sig_ser = sig.serialize_der().to_vec();
+	// 				sig_ser.push(EcdsaSighashType::All as u8);
+	// 				spend_tx.input[input_idx].witness.push(sig_ser);
+	// 				spend_tx.input[input_idx].witness.push(pubkey.inner.serialize().to_vec());
+	// 			},
+	// 		}
+	// 		input_idx += 1;
+	// 	}
+
+	// 	debug_assert!(expected_max_weight >= spend_tx.weight());
+	// 	// Note that witnesses with a signature vary somewhat in size, so allow
+	// 	// `expected_max_weight` to overshoot by up to 3 bytes per input.
+	// 	debug_assert!(expected_max_weight <= spend_tx.weight() + descriptors.len() * 3);
+
+	// 	Ok(spend_tx)
+	// }
 }
 
 impl EntropySource for MyKeysManager {
@@ -637,25 +778,30 @@ impl SignerProvider for MyKeysManager {
 		InMemorySigner::read(&mut io::Cursor::new(reader), self)
 	}
 
-	fn get_destination_script(&self) -> Script {
-		self.destination_script.clone()
+	fn get_destination_script(&self) -> Result<Script, ()> {
+		Ok(self.destination_script.clone())
 	}
 
-	fn get_shutdown_scriptpubkey(&self) -> ShutdownScript {
+	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
 		let other_publickey=OtherPublicKey::new(self.shutdown_pubkey.clone());
 		let other_wpubkeyhash=other_publickey.wpubkey_hash().unwrap();
-		ShutdownScript::new_p2wpkh(&other_wpubkeyhash)
+		Ok(ShutdownScript::new_p2wpkh(&other_wpubkeyhash))
 	}
 }
 
-pub type SimpleArcOnionMessenger<L> = onion_message::OnionMessenger<Arc<MyKeysManager>, Arc<MyKeysManager>, Arc<L>, IgnoringMessageHandler>;
+pub type SimpleArcOnionMessenger<L> = onion_message::OnionMessenger<Arc<MyKeysManager>, Arc<MyKeysManager>,
+Arc<L>,
+Arc<DefaultMessageRouter>,
+IgnoringMessageHandler,
+IgnoringMessageHandler>;
 type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &MyKeysManager,
-	inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage,
-	persister: &Arc<FilesystemPersister>, network: Network, event: Event,
+	inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
+	network: Network, event: Event,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -715,6 +861,7 @@ async fn handle_ldk_events(
 			via_user_channel_id: _,
 			claim_deadline: _,
 			onion_fields: _,
+			counterparty_skimmed_fee_msat: _,
 		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
@@ -743,8 +890,8 @@ async fn handle_ldk_events(
 				}
 				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
 			};
-			let mut payments = inbound_payments.lock().unwrap();
-			match payments.entry(payment_hash) {
+			let mut inbound = inbound_payments.lock().unwrap();
+			match inbound.payments.entry(payment_hash) {
 				Entry::Occupied(mut e) => {
 					let payment = e.get_mut();
 					payment.status = HTLCStatus::Succeeded;
@@ -760,10 +907,11 @@ async fn handle_ldk_events(
 					});
 				}
 			}
+			persister.persist(INBOUND_PAYMENTS_FNAME, &*inbound).unwrap();
 		}
 		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
-			let mut payments = outbound_payments.lock().unwrap();
-			for (hash, payment) in payments.iter_mut() {
+			let mut outbound = outbound_payments.lock().unwrap();
+			for (hash, payment) in outbound.payments.iter_mut() {
 				if *hash == payment_hash {
 					payment.preimage = Some(payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
@@ -783,6 +931,7 @@ async fn handle_ldk_events(
 					io::stdout().flush().unwrap();
 				}
 			}
+			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
 		Event::OpenChannelRequest { .. } => {
 			// Unreachable, we don't set manually_accept_inbound_channels
@@ -800,11 +949,12 @@ async fn handle_ldk_events(
 			print!("> ");
 			io::stdout().flush().unwrap();
 
-			let mut payments = outbound_payments.lock().unwrap();
-			if payments.contains_key(&payment_hash) {
-				let payment = payments.get_mut(&payment_hash).unwrap();
+			let mut outbound = outbound_payments.lock().unwrap();
+			if outbound.payments.contains_key(&payment_hash) {
+				let payment = outbound.payments.get_mut(&payment_hash).unwrap();
 				payment.status = HTLCStatus::Failed;
 			}
+			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
 		Event::PaymentForwarded {
 			prev_channel_id,
@@ -934,6 +1084,7 @@ async fn handle_ldk_events(
 			// the funding transaction either confirms, or this event is generated.
 		}
 		Event::HTLCIntercepted { .. } => {}
+		Event::BumpTransaction(_) => {}
 	}
 }
 
@@ -1023,7 +1174,7 @@ async fn start_ldk() {
 		thread_rng().fill_bytes(&mut key);
 		match File::create(keys_seed_path.clone()) {
 			Ok(mut f) => {
-				f.write_all(&key).expect("Failed to write node keys seed to disk");
+				Write::write_all(&mut f, &key).expect("Failed to write node keys seed to disk");
 				f.sync_all().expect("Failed to sync node keys seed to disk");
 			}
 			Err(e) => {
@@ -1033,7 +1184,7 @@ async fn start_ldk() {
 		}
 		key
 	};
-	// let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, 0, 0));
 	//println!("{}",keys_manager.get_node_secret_key().display_secret());
 	
@@ -1059,11 +1210,13 @@ async fn start_ldk() {
 	)));
 
 	// Step 10: Create Router
+	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
 		network_graph.clone(),
 		logger.clone(),
 		keys_manager.get_secure_random_bytes(),
 		scorer.clone(),
+		scoring_fee_params,
 	));
 
 	// Step 11: Initialize the ChannelManager
@@ -1108,6 +1261,7 @@ async fn start_ldk() {
 				keys_manager.clone(),
 				user_config,
 				chain_params,
+				cur.as_secs() as u32,
 			);
 			(polled_best_block_hash, fresh_channel_manager)
 		}
@@ -1173,6 +1327,8 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
+		Arc::new(DefaultMessageRouter {}),
+		IgnoringMessageHandler {},
 		IgnoringMessageHandler {},
 	));
 	let mut ephemeral_bytes = [0; 32];
@@ -1182,6 +1338,7 @@ async fn start_ldk() {
 		chan_handler: channel_manager.clone(),
 		route_handler: gossip_sync.clone(),
 		onion_message_handler: onion_messenger.clone(),
+		custom_message_handler: IgnoringMessageHandler {},
 	};
 	// println!("{}",lightning_msg_handler.chan_handler.provided_init_features(&keys_manager.get_node_id(Recipient::Node).unwrap()));
 	
@@ -1190,7 +1347,6 @@ async fn start_ldk() {
 		current_time.try_into().unwrap(),
 		&ephemeral_bytes,
 		logger.clone(),
-		IgnoringMessageHandler {},
 		Arc::clone(&keys_manager),
 	));
 	
@@ -1236,9 +1392,35 @@ async fn start_ldk() {
 		}
 	});
 
-	// TODO: persist payment info to disk
-	let inbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
-	let outbound_payments: PaymentInfoStorage = Arc::new(Mutex::new(HashMap::new()));
+	let inbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
+		"{}/{}",
+		ldk_data_dir, INBOUND_PAYMENTS_FNAME
+	)))));
+	let outbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
+		"{}/{}",
+		ldk_data_dir, OUTBOUND_PAYMENTS_FNAME
+	)))));
+	let recent_payments_payment_hashes = channel_manager
+		.list_recent_payments()
+		.into_iter()
+		.filter_map(|p| match p {
+			RecentPaymentDetails::Pending { payment_hash, .. } => Some(payment_hash),
+			RecentPaymentDetails::Fulfilled { payment_hash } => payment_hash,
+			RecentPaymentDetails::Abandoned { payment_hash } => Some(payment_hash),
+		})
+		.collect::<Vec<PaymentHash>>();
+	for (payment_hash, payment_info) in outbound_payments
+		.lock()
+		.unwrap()
+		.payments
+		.iter_mut()
+		.filter(|(_, i)| matches!(i.status, HTLCStatus::Pending))
+	{
+		if !recent_payments_payment_hashes.contains(payment_hash) {
+			payment_info.status = HTLCStatus::Failed;
+		}
+	}
+	persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments.lock().unwrap()).unwrap();
 
 	// Step 18: Handle LDK Events
 	let channel_manager_event_listener = Arc::clone(&channel_manager);
@@ -1263,8 +1445,8 @@ async fn start_ldk() {
 				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
-				&inbound_payments_event_listener,
-				&outbound_payments_event_listener,
+				inbound_payments_event_listener,
+				outbound_payments_event_listener,
 				&persister_event_listener,
 				network,
 				event,
@@ -1306,6 +1488,7 @@ async fn start_ldk() {
 	let stop_connect = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
+		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			interval.tick().await;
 			match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
@@ -1369,6 +1552,7 @@ async fn start_ldk() {
 		Arc::clone(&logger),
 		Arc::clone(&persister),
 		Arc::clone(&bitcoind_client),
+		Arc::clone(&channel_manager),
 	));
 
 	// Start the CLI.
@@ -1383,6 +1567,7 @@ async fn start_ldk() {
 		ldk_data_dir,
 		network,
 		Arc::clone(&logger),
+		Arc::clone(&persister),
 	)
 	.await;
 

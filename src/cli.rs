@@ -1,4 +1,4 @@
-use crate::disk;
+use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
 	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
@@ -8,26 +8,27 @@ use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
-
-use lightning::chain::keysinterface::EntropySource;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::onion_message::OnionMessagePath;
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::sign::{EntropySource, KeysManager};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Writeable, Writer};
 use lightning_invoice::payment::pay_invoice;
-use lightning_invoice::{utils, Currency, Invoice};
+use lightning_invoice::{utils, Bolt11Invoice, Currency};
+use lightning_persister::FilesystemPersister;
 use std::env;
 use std::io;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub(crate) struct LdkUserInfo {
@@ -63,9 +64,9 @@ impl Writeable for UserOnionMessageContents {
 pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<MyKeysManager>, network_graph: Arc<NetworkGraph>,
-	onion_messenger: Arc<OnionMessenger>, inbound_payments: PaymentInfoStorage,
-	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
-	logger: Arc<disk::FilesystemLogger>,
+	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, ldk_data_dir: String, network: Network,
+	logger: Arc<disk::FilesystemLogger>, persister: Arc<FilesystemPersister>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -192,7 +193,7 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					let invoice = match Invoice::from_str(invoice_str.unwrap()) {
+					let invoice = match Bolt11Invoice::from_str(invoice_str.unwrap()) {
 						Ok(inv) => inv,
 						Err(e) => {
 							println!("ERROR: invalid invoice: {:?}", e);
@@ -200,7 +201,12 @@ pub(crate) async fn poll_for_user_input(
 						}
 					};
 
-					send_payment(&*channel_manager, &invoice, outbound_payments.clone());
+					send_payment(
+						&channel_manager,
+						&invoice,
+						&mut outbound_payments.lock().unwrap(),
+						persister.clone(),
+					);
 				}
 				"keysend" => {
 					let dest_pubkey = match words.next() {
@@ -231,11 +237,12 @@ pub(crate) async fn poll_for_user_input(
 						}
 					};
 					keysend(
-						&*channel_manager,
+						&channel_manager,
 						dest_pubkey,
 						amt_msat,
 						&*keys_manager,
-						outbound_payments.clone(),
+						&mut outbound_payments.lock().unwrap(),
+						persister.clone(),
 					);
 				}
 				"getinvoice" => {
@@ -263,15 +270,17 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
+					let mut inbound_payments = inbound_payments.lock().unwrap();
 					get_invoice(
 						amt_msat.unwrap(),
-						Arc::clone(&inbound_payments),
-						&*channel_manager,
+						&mut inbound_payments,
+						&channel_manager,
 						Arc::clone(&keys_manager),
 						network,
 						expiry_secs.unwrap(),
 						Arc::clone(&logger),
 					);
+					persister.persist(INBOUND_PAYMENTS_FNAME, &*inbound_payments).unwrap();
 				}
 				"connectpeer" => {
 					let peer_pubkey_and_ip_addr = words.next();
@@ -321,9 +330,10 @@ pub(crate) async fn poll_for_user_input(
 					}
 				}
 				"listchannels" => list_channels(&channel_manager, &network_graph),
-				"listpayments" => {
-					list_payments(inbound_payments.clone(), outbound_payments.clone())
-				}
+				"listpayments" => list_payments(
+					&inbound_payments.lock().unwrap(),
+					&outbound_payments.lock().unwrap(),
+				),
 				"closechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
@@ -420,7 +430,7 @@ pub(crate) async fn poll_for_user_input(
 						);
 						continue;
 					}
-					let mut node_pks = Vec::new();
+					let mut intermediate_nodes = Vec::new();
 					let mut errored = false;
 					for pk_str in path_pks_str.unwrap().split(",") {
 						let node_pubkey_vec = match hex_utils::to_vec(pk_str) {
@@ -439,7 +449,7 @@ pub(crate) async fn poll_for_user_input(
 								break;
 							}
 						};
-						node_pks.push(node_pubkey);
+						intermediate_nodes.push(node_pubkey);
 					}
 					if errored {
 						continue;
@@ -458,10 +468,10 @@ pub(crate) async fn poll_for_user_input(
 							continue;
 						}
 					};
-					let destination_pk = node_pks.pop().unwrap();
+					let destination = Destination::Node(intermediate_nodes.pop().unwrap());
+					let message_path = OnionMessagePath { intermediate_nodes, destination };
 					match onion_messenger.send_onion_message(
-						&node_pks,
-						Destination::Node(destination_pk),
+						message_path,
 						OnionMessageContents::Custom(UserOnionMessageContents { tlv_type, data }),
 						None,
 					) {
@@ -571,11 +581,9 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 	println!("]");
 }
 
-fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: PaymentInfoStorage) {
-	let inbound = inbound_payments.lock().unwrap();
-	let outbound = outbound_payments.lock().unwrap();
+fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage) {
 	print!("[");
-	for (payment_hash, payment_info) in inbound.deref() {
+	for (payment_hash, payment_info) in &inbound_payments.payments {
 		println!("");
 		println!("\t{{");
 		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
@@ -593,7 +601,7 @@ fn list_payments(inbound_payments: PaymentInfoStorage, outbound_payments: Paymen
 		println!("\t}},");
 	}
 
-	for (payment_hash, payment_info) in outbound.deref() {
+	for (payment_hash, payment_info) in &outbound_payments.payments {
 		println!("");
 		println!("\t{{");
 		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
@@ -731,50 +739,59 @@ fn open_channel(
 }
 
 fn send_payment(
-	channel_manager: &ChannelManager, invoice: &Invoice, payment_storage: PaymentInfoStorage,
+	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
+	outbound_payments: &mut PaymentInfoStorage, persister: Arc<FilesystemPersister>,
 ) {
-	let status =
-		match pay_invoice(invoice, Retry::Timeout(Duration::from_secs(10)), channel_manager) {
-			Ok(_payment_id) => {
-				let payee_pubkey = invoice.recover_payee_pub_key();
-				let amt_msat = invoice.amount_milli_satoshis().unwrap();
-				println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-				print!("> ");
-				HTLCStatus::Pending
-			}
-			Err(e) => {
-				println!("ERROR: failed to send payment: {:?}", e);
-				print!("> ");
-				HTLCStatus::Failed
-			}
-		};
-	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
-	let payment_secret = Some(invoice.payment_secret().clone());
-
-	let mut payments = payment_storage.lock().unwrap();
-	payments.insert(
+	let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+	let payment_secret = Some(*invoice.payment_secret());
+	outbound_payments.payments.insert(
 		payment_hash,
 		PaymentInfo {
 			preimage: None,
 			secret: payment_secret,
-			status,
+			status: HTLCStatus::Pending,
 			amt_msat: MillisatAmount(invoice.amount_milli_satoshis()),
 		},
 	);
+	persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments).unwrap();
+	match pay_invoice(invoice, Retry::Timeout(Duration::from_secs(10)), channel_manager) {
+		Ok(_payment_id) => {
+			let payee_pubkey = invoice.recover_payee_pub_key();
+			let amt_msat = invoice.amount_milli_satoshis().unwrap();
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			print!("> ");
+		}
+		Err(e) => {
+			println!("ERROR: failed to send payment: {:?}", e);
+			print!("> ");
+			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments).unwrap();
+		}
+	};
 }
 
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	payment_storage: PaymentInfoStorage,
+	outbound_payments: &mut PaymentInfoStorage, persister: Arc<FilesystemPersister>,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
 	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
 
 	let route_params = RouteParameters {
-		payment_params: PaymentParameters::for_keysend(payee_pubkey, 40),
+		payment_params: PaymentParameters::for_keysend(payee_pubkey, 40, false),
 		final_value_msat: amt_msat,
 	};
-	let status = match channel_manager.send_spontaneous_payment_with_retry(
+	outbound_payments.payments.insert(
+		payment_hash,
+		PaymentInfo {
+			preimage: None,
+			secret: None,
+			status: HTLCStatus::Pending,
+			amt_msat: MillisatAmount(Some(amt_msat)),
+		},
+	);
+	persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments).unwrap();
+	match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
 		PaymentId(payment_hash.0),
@@ -784,33 +801,21 @@ fn keysend<E: EntropySource>(
 		Ok(_payment_hash) => {
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 			print!("> ");
-			HTLCStatus::Pending
 		}
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
-			HTLCStatus::Failed
+			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments).unwrap();
 		}
 	};
-
-	let mut payments = payment_storage.lock().unwrap();
-	payments.insert(
-		payment_hash,
-		PaymentInfo {
-			preimage: None,
-			secret: None,
-			status,
-			amt_msat: MillisatAmount(Some(amt_msat)),
-		},
-	);
 }
 
 fn get_invoice(
-	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: &ChannelManager,
+	amt_msat: u64, inbound_payments: &mut PaymentInfoStorage, channel_manager: &ChannelManager,
 	keys_manager: Arc<MyKeysManager>, network: Network, expiry_secs: u32,
 	logger: Arc<disk::FilesystemLogger>,
 ) {
-	let mut payments = payment_storage.lock().unwrap();
 	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,
 		Network::Testnet => Currency::BitcoinTestnet,
@@ -838,7 +843,7 @@ fn get_invoice(
 	};
 
 	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
-	payments.insert(
+	inbound_payments.payments.insert(
 		payment_hash,
 		PaymentInfo {
 			preimage: None,
