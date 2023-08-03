@@ -11,15 +11,12 @@ use crate::bitcoind_client::BitcoindClient;
 use crate::chacha20::ChaCha20;
 use crate::disk::FilesystemLogger;
 use bitcoin::bech32::u5;
-use bitcoin::{BlockHash, PackedLockTime,Sequence};
+use bitcoin::{BlockHash, PackedLockTime};
 use bitcoin::blockdata::opcodes;
 use bitcoin::blockdata::script::{Script, Builder};
-use bitcoin::blockdata::transaction::{Transaction, TxOut, TxIn, EcdsaSighashType};
-use bitcoin::consensus::Encodable;
-use bitcoin::consensus::encode::VarInt;
+use bitcoin::blockdata::transaction::{Transaction, TxOut, EcdsaSighashType};
 use bitcoin::consensus::encode;
 use bitcoin::hashes::{Hash, HashEngine};
-use bitcoin::hashes::sha256::HashEngine as Sha256State;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::WPubkeyHash;
@@ -32,15 +29,16 @@ use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey, ChildNumber};
 use bitcoin::util::sighash;
 use bitcoin_bech32::WitnessProgram;
 use core::ops::Deref;
-use core::sync::atomic::{AtomicUsize};
+use core::sync::atomic::AtomicUsize;
+use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain;
 use lightning::sign::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
-	SpendableOutputDescriptor, StaticPaymentOutputDescriptor, DelayedPaymentOutputDescriptor, SignerProvider, NodeSigner};
-use lightning::chain::{BestBlock, chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
+	SpendableOutputDescriptor, SignerProvider, NodeSigner};
+use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
-use lightning::ln::msgs::{DecodeError, UnsignedChannelAnnouncement, UnsignedGossipMessage};
+use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::ln::peer_handler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
@@ -50,24 +48,9 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScorer;
-use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
-// use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
-// use lightning::chain::{Filter, Watch};
-// use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
-use lightning::ln::channelmanager::{RecentPaymentDetails};
-// use lightning::ln::channelmanager::{
-// 	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
-// };
-// use lightning::ln::msgs::DecodeError;
-// use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
-// use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-// use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
-// use lightning::routing::gossip;
-// use lightning::routing::gossip::{NodeId, P2PGossipSync};
-// use lightning::routing::router::DefaultRouter;
+use lightning::ln::channelmanager::RecentPaymentDetails;
 use lightning::onion_message::DefaultMessageRouter;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
-// use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
 use lightning::util::invoice::construct_invoice_preimage;
 use lightning::util::persist::KVStorePersister;
@@ -83,22 +66,18 @@ use lightning_persister::FilesystemPersister;
 use rand::{thread_rng, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
-use std::io::sink;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-
-use lightning::ln::msgs::ChannelMessageHandler;
 
 const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
@@ -201,7 +180,7 @@ pub(crate) type ChannelManager =
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-//////////////////////////////////////////////////Methods required for MyKeysManager/////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////Methods and structs required for MyKeysManager/////////////////////////////////////////////////////////////
 
 macro_rules! hash_to_message {
 	($slice: expr) => {
@@ -218,39 +197,6 @@ macro_rules! hash_to_message {
 				}
 			}
 		}
-	}
-}
-pub(crate) fn maybe_add_change_output(tx: &mut Transaction, input_value: u64, witness_max_weight: usize, feerate_sat_per_1000_weight: u32, change_destination_script: Script) -> Result<usize, ()> {
-	if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
-
-	const WITNESS_FLAG_BYTES: i64 = 2;
-
-	let mut output_value = 0;
-	for output in tx.output.iter() {
-		output_value += output.value;
-		if output_value >= input_value { return Err(()); }
-	}
-
-	let dust_value = change_destination_script.dust_value();
-	let mut change_output = TxOut {
-		script_pubkey: change_destination_script,
-		value: 0,
-	};
-	let change_len = change_output.consensus_encode(&mut sink()).unwrap();
-	let starting_weight = tx.weight() + WITNESS_FLAG_BYTES as usize + witness_max_weight;
-	let mut weight_with_change: i64 = starting_weight as i64 + change_len as i64 * 4;
-	// Include any extra bytes required to push an extra output.
-	weight_with_change += (VarInt(tx.output.len() as u64 + 1).len() - VarInt(tx.output.len() as u64).len()) as i64 * 4;
-	// When calculating weight, add two for the flag bytes
-	let change_value: i64 = (input_value - output_value) as i64 - weight_with_change * feerate_sat_per_1000_weight as i64 / 1000;
-	if change_value >= dust_value.as_sat() as i64 {
-		change_output.value = change_value as u64;
-		tx.output.push(change_output);
-		Ok(weight_with_change as usize)
-	} else if (input_value - output_value) as i64 - (starting_weight as i64) * feerate_sat_per_1000_weight as i64 / 1000 < 0 {
-		Err(())
-	} else {
-		Ok(starting_weight)
 	}
 }
 pub fn sign<C: Signing>(ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey) -> Signature {
@@ -354,23 +300,7 @@ pub struct MyKeysManager {
 }
 
 impl MyKeysManager {
-	/// Constructs a [`KeysManager`] from a 32-byte seed. If the seed is in some way biased (e.g.,
-	/// your CSRNG is busted) this may panic (but more importantly, you will possibly lose funds).
-	/// `starting_time` isn't strictly required to actually be a time, but it must absolutely,
-	/// without a doubt, be unique to this instance. ie if you start multiple times with the same
-	/// `seed`, `starting_time` must be unique to each run. Thus, the easiest way to achieve this
-	/// is to simply use the current time (with very high precision).
-	///
-	/// The `seed` MUST be backed up safely prior to use so that the keys can be re-created, however,
-	/// obviously, `starting_time` should be unique every time you reload the library - it is only
-	/// used to generate new ephemeral key data (which will be stored by the individual channel if
-	/// necessary).
-	///
-	/// Note that the seed is required to recover certain on-chain funds independent of
-	/// [`ChannelMonitor`] data, though a current copy of [`ChannelMonitor`] data is also required
-	/// for any channel, and some on-chain during-closing funds.
-	///
-	/// [`ChannelMonitor`]: crate::chain::channelmonitor::ChannelMonitor
+	/// Constructs a [`KeysManager`] using custom channel secrets
 	pub fn new(seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32) -> Self {
 		let secp_ctx = Secp256k1::new();
 		// Note that when we aren't serializing the key, network doesn't matter
@@ -439,33 +369,10 @@ impl MyKeysManager {
 		self.node_secret
 	}
 
-	/// Derive an old [`WriteableEcdsaChannelSigner`] containing per-channel secrets based on a key derivation parameters.
+	/// Derive an old [`WriteableEcdsaChannelSigner`] containing per-channel secrets.
 	pub fn derive_channel_keys(&self, channel_value_satoshis: u64, params: &[u8; 32]) -> InMemorySigner {
-		let chan_id = u64::from_be_bytes(params[0..8].try_into().unwrap());
-		let mut unique_start = Sha256::engine();
-		unique_start.input(params);
-		unique_start.input(&self.seed);
-
-		// We only seriously intend to rely on the channel_master_key for true secure
-		// entropy, everything else just ensures uniqueness. We rely on the unique_start (ie
-		// starting_time provided in the constructor) to be unique.
-		let child_privkey = self.channel_master_key.ckd_priv(&self.secp_ctx,
-				ChildNumber::from_hardened_idx((chan_id as u32) % (1 << 31)).expect("key space exhausted")
-			).expect("Your RNG is busted");
-		unique_start.input(&child_privkey.private_key[..]);
-
-		// let seed = Sha256::from_engine(unique_start).into_inner();
 
 		let commitment_seed: [u8;32] = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
-		// macro_rules! key_step {
-		// 	($info: expr, $prev_key: expr) => {{
-		// 		let mut sha = Sha256::engine();
-		// 		sha.input(&seed);
-		// 		sha.input(&$prev_key[..]);
-		// 		sha.input(&$info[..]);
-		// 		SecretKey::from_slice(&Sha256::from_engine(sha).into_inner()).expect("SHA-256 is busted")
-		// 	}}
-		// }
 		let funding_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000010").unwrap();
 		let revocation_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000011").unwrap();
 		let payment_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000012").unwrap();
@@ -585,123 +492,7 @@ impl MyKeysManager {
 
 		Ok(spend_tx)
 	}
-	// pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
-	// 	let mut input = Vec::new();
-	// 	let mut input_value = 0;
-	// 	let mut witness_weight = 0;
-	// 	let mut output_set = HashSet::with_capacity(descriptors.len());
-	// 	for outp in descriptors {
-	// 		match outp {
-	// 			SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
-	// 				input.push(TxIn {
-	// 					previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
-	// 					script_sig: Script::new(),
-	// 					sequence: Sequence::ZERO,
-	// 					witness: Witness::new(),
-	// 				});
-	// 				witness_weight += StaticPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
-	// 				input_value += descriptor.output.value;
-	// 				if !output_set.insert(descriptor.outpoint) { return Err(()); }
-	// 			},
-	// 			SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
-	// 				input.push(TxIn {
-	// 					previous_output: descriptor.outpoint.into_bitcoin_outpoint(),
-	// 					script_sig: Script::new(),
-	// 					sequence: Sequence(descriptor.to_self_delay as u32),
-	// 					witness: Witness::new(),
-	// 				});
-	// 				witness_weight += DelayedPaymentOutputDescriptor::MAX_WITNESS_LENGTH;
-	// 				input_value += descriptor.output.value;
-	// 				if !output_set.insert(descriptor.outpoint) { return Err(()); }
-	// 			},
-	// 			SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output } => {
-	// 				input.push(TxIn {
-	// 					previous_output: outpoint.into_bitcoin_outpoint(),
-	// 					script_sig: Script::new(),
-	// 					sequence: Sequence::ZERO,
-	// 					witness: Witness::new(),
-	// 				});
-	// 				witness_weight += 1 + 73 + 34;
-	// 				input_value += output.value;
-	// 				if !output_set.insert(*outpoint) { return Err(()); }
-	// 			}
-	// 		}
-	// 		if input_value > MAX_VALUE_MSAT / 1000 { return Err(()); }
-	// 	}
-	// 	let mut spend_tx = Transaction {
-	// 		version: 2,
-	// 		lock_time: PackedLockTime(0),
-	// 		input,
-	// 		output: outputs,
-	// 	};
-	// 	let expected_max_weight =
-	// 		maybe_add_change_output(&mut spend_tx, input_value, witness_weight, feerate_sat_per_1000_weight, change_destination_script)?;
 
-	// 	let mut keys_cache: Option<(InMemorySigner, [u8; 32])> = None;
-	// 	let mut input_idx = 0;
-	// 	for outp in descriptors {
-	// 		match outp {
-	// 			SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
-	// 				if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
-	// 					keys_cache = Some((
-	// 						self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
-	// 						descriptor.channel_keys_id));
-	// 				}
-	// 				spend_tx.input[input_idx].witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(&spend_tx, input_idx, &descriptor, &secp_ctx)?);
-	// 			},
-	// 			SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
-	// 				if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
-	// 					keys_cache = Some((
-	// 						self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
-	// 						descriptor.channel_keys_id));
-	// 				}
-	// 				spend_tx.input[input_idx].witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&spend_tx, input_idx, &descriptor, &secp_ctx)?);
-	// 			},
-	// 			SpendableOutputDescriptor::StaticOutput { ref output, .. } => {
-	// 				let derivation_idx = if output.script_pubkey == self.destination_script {
-	// 					1
-	// 				} else {
-	// 					2
-	// 				};
-	// 				let secret = {
-	// 					// Note that when we aren't serializing the key, network doesn't matter
-	// 					match ExtendedPrivKey::new_master(Network::Testnet, &self.seed) {
-	// 						Ok(master_key) => {
-	// 							match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(derivation_idx).expect("key space exhausted")) {
-	// 								Ok(key) => key,
-	// 								Err(_) => panic!("Your RNG is busted"),
-	// 							}
-	// 						}
-	// 						Err(_) => panic!("Your rng is busted"),
-	// 					}
-	// 				};
-	// 				let pubkey = ExtendedPubKey::from_priv(&secp_ctx, &secret).to_pub();
-	// 				if derivation_idx == 2 {
-	// 					assert_eq!(pubkey.inner, self.shutdown_pubkey);
-	// 				}
-	// 				let witness_script = bitcoin::Address::p2pkh(&pubkey, Network::Testnet).script_pubkey();
-	// 				let payment_script = bitcoin::Address::p2wpkh(&pubkey, Network::Testnet).expect("uncompressed key found").script_pubkey();
-
-	// 				if payment_script != output.script_pubkey { return Err(()); };
-
-	// 				let sighash = hash_to_message!(&sighash::SighashCache::new(&spend_tx).segwit_signature_hash(input_idx, &witness_script, output.value, EcdsaSighashType::All).unwrap()[..]);
-	// 				let sig = sign_with_aux_rand(secp_ctx, &sighash, &secret.private_key, &self);
-	// 				let mut sig_ser = sig.serialize_der().to_vec();
-	// 				sig_ser.push(EcdsaSighashType::All as u8);
-	// 				spend_tx.input[input_idx].witness.push(sig_ser);
-	// 				spend_tx.input[input_idx].witness.push(pubkey.inner.serialize().to_vec());
-	// 			},
-	// 		}
-	// 		input_idx += 1;
-	// 	}
-
-	// 	debug_assert!(expected_max_weight >= spend_tx.weight());
-	// 	// Note that witnesses with a signature vary somewhat in size, so allow
-	// 	// `expected_max_weight` to overshoot by up to 3 bytes per input.
-	// 	debug_assert!(expected_max_weight <= spend_tx.weight() + descriptors.len() * 3);
-
-	// 	Ok(spend_tx)
-	// }
 }
 
 impl EntropySource for MyKeysManager {

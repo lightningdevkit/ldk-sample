@@ -15,7 +15,7 @@ use lightning::onion_message::OnionMessagePath;
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
-use lightning::sign::{EntropySource, KeysManager};
+use lightning::sign::EntropySource;
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Writeable, Writer};
@@ -89,13 +89,13 @@ pub(crate) async fn poll_for_user_input(
 		let mut words = line.split_whitespace();
 		if let Some(word) = words.next() {
 			match word {
-				"help" => help(),
-				// "exit" => exit(),				
-				"openchannel_test" => {
+				"help" => help(),				
+				"openchannel_without_peer_addr" => {
+					// opens a channel with a connected node
 					let peer_pubkey = words.next();
 					let channel_value_sat = words.next();
 					if peer_pubkey.is_none() || channel_value_sat.is_none() {
-						println!("ERROR: openchannel_test has 2 required arguments: `openchannel_test pubkey channel_amt_satoshis` [--public]");
+						println!("ERROR: openchannel_without_peer_addr has 2 required arguments: `openchannel_test pubkey channel_amt_satoshis` [--public]");
 						continue;
 					}
 					let peer_pubkey = peer_pubkey.unwrap();
@@ -116,7 +116,7 @@ pub(crate) async fn poll_for_user_input(
 					};
 					let pubkey = peer_pubkey;
 					let pubkey = hex_utils::to_compressed_pubkey(pubkey);
-					if open_channeltest(
+					if open_channel_without_addr(
 						pubkey.unwrap(),
 						chan_amt_sat.unwrap(),
 						announce_channel,
@@ -680,7 +680,7 @@ fn do_disconnect_peer(
 	Ok(())
 }
 
-fn open_channeltest(
+fn open_channel_without_addr(
 	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool,
 	channel_manager: Arc<ChannelManager>,
 ) -> Result<(), ()> {
