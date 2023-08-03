@@ -802,7 +802,7 @@ async fn start_ldk() {
 
 	// Step 20: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
-	let background_processor = tokio::spawn(process_events_async(
+	let mut background_processor = tokio::spawn(process_events_async(
 		Arc::clone(&persister),
 		event_handler,
 		chain_monitor.clone(),
@@ -898,7 +898,7 @@ async fn start_ldk() {
 	));
 
 	// Start the CLI.
-	cli::poll_for_user_input(
+	let cli_poll = tokio::spawn(cli::poll_for_user_input(
 		Arc::clone(&peer_manager),
 		Arc::clone(&channel_manager),
 		Arc::clone(&keys_manager),
@@ -910,8 +910,18 @@ async fn start_ldk() {
 		network,
 		Arc::clone(&logger),
 		Arc::clone(&persister),
-	)
-	.await;
+	));
+
+	// Exit if either CLI polling exits or the background processor exits (which shouldn't happen
+	// unless we fail to write to the filesystem).
+	tokio::select! {
+		_ = cli_poll => {},
+		bg_res = &mut background_processor => {
+			stop_listen_connect.store(true, Ordering::Release);
+			peer_manager.disconnect_all_peers();
+			panic!("ERR: background processing stopped with result {:?}, exiting", bg_res);
+		},
+	}
 
 	// Disconnect our peers and stop accepting new connections. This ensures we don't continue
 	// updating our channel data after we've stopped the background processor.
@@ -919,8 +929,10 @@ async fn start_ldk() {
 	peer_manager.disconnect_all_peers();
 
 	// Stop the background processor.
-	bp_exit.send(()).unwrap();
-	background_processor.await.unwrap().unwrap();
+	if !bp_exit.is_closed() {
+		bp_exit.send(()).unwrap();
+		background_processor.await.unwrap().unwrap();
+	}
 }
 
 #[tokio::main]
