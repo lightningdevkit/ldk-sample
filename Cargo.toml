@@ -23,7 +23,7 @@ bech32 = "0.8"
 hex = "0.3"
 libc = "0.2"
 
-chrono = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rand = "0.4"
 serde_json = { version = "1.0" }
 tokio = { version = "1", features = [ "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
