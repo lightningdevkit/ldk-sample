@@ -1,5 +1,6 @@
 use crate::cli::LdkUserInfo;
 use bitcoin::network::constants::Network;
+use home;
 use lightning::ln::msgs::NetAddress;
 use std::collections::HashMap;
 use std::env;
@@ -130,7 +131,7 @@ const BITCOIND_RPC_PASSWORD_KEY: &str = "RPC_PASSWORD";
 
 fn print_rpc_auth_help() {
 	// Get the default data directory
-	let home_dir = env::home_dir()
+	let home_dir = home::home_dir()
 		.as_ref()
 		.map(|ref p| p.to_str())
 		.flatten()
@@ -169,9 +170,9 @@ fn get_cookie_path(
 	data_dir: Option<(&str, bool)>, network: Option<Network>, cookie_file_name: Option<&str>,
 ) -> Result<PathBuf, ()> {
 	let data_dir_path = match data_dir {
-		Some((dir, true)) => env::home_dir().ok_or(())?.join(dir),
+		Some((dir, true)) => home::home_dir().ok_or(())?.join(dir),
 		Some((dir, false)) => PathBuf::from(dir),
-		None => env::home_dir().ok_or(())?.join(DEFAULT_BITCOIN_DATADIR),
+		None => home::home_dir().ok_or(())?.join(DEFAULT_BITCOIN_DATADIR),
 	};
 
 	let data_dir_path_with_net = match network {
@@ -273,13 +274,13 @@ mod rpc_auth_tests {
 				None,
 				None,
 				None,
-				env::home_dir().unwrap().join(DEFAULT_BITCOIN_DATADIR).join(".cookie"),
+				home::home_dir().unwrap().join(DEFAULT_BITCOIN_DATADIR).join(".cookie"),
 			),
 			(
 				Some((TEST_DATA_DIR, true)),
 				Some(Network::Testnet),
 				None,
-				env::home_dir().unwrap().join(TEST_DATA_DIR).join("testnet3").join(".cookie"),
+				home::home_dir().unwrap().join(TEST_DATA_DIR).join("testnet3").join(".cookie"),
 			),
 			(
 				Some((TEST_DATA_DIR, false)),
