@@ -16,6 +16,7 @@ use bitcoin_bech32::WitnessProgram;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
+use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager::{self, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
@@ -141,10 +142,17 @@ pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
 type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
+pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
+	Arc<BitcoindClient>,
+	Arc<Wallet<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
+	Arc<KeysManager>,
+	Arc<FilesystemLogger>,
+>;
+
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
 	network: Network, event: Event,
 ) {
@@ -278,8 +286,34 @@ async fn handle_ldk_events(
 			}
 			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
-		Event::OpenChannelRequest { .. } => {
-			// Unreachable, we don't set manually_accept_inbound_channels
+		Event::OpenChannelRequest {
+			ref temporary_channel_id, ref counterparty_node_id, ..
+		} => {
+			let mut random_bytes = [0u8; 16];
+			random_bytes.copy_from_slice(&keys_manager.get_secure_random_bytes()[..16]);
+			let user_channel_id = u128::from_be_bytes(random_bytes);
+			let res = channel_manager.accept_inbound_channel(
+				temporary_channel_id,
+				counterparty_node_id,
+				user_channel_id,
+			);
+
+			if let Err(e) = res {
+				print!(
+					"\nEVENT: Failed to accept inbound channel ({}) from {}: {:?}",
+					hex_utils::hex_str(&temporary_channel_id[..]),
+					hex_utils::hex_str(&counterparty_node_id.serialize()),
+					e,
+				);
+			} else {
+				print!(
+					"\nEVENT: Accepted inbound channel ({}) from {}",
+					hex_utils::hex_str(&temporary_channel_id[..]),
+					hex_utils::hex_str(&counterparty_node_id.serialize()),
+				);
+			}
+			print!("> ");
+			io::stdout().flush().unwrap();
 		}
 		Event::PaymentPathSuccessful { .. } => {}
 		Event::PaymentPathFailed { .. } => {}
@@ -429,7 +463,7 @@ async fn handle_ldk_events(
 			// the funding transaction either confirms, or this event is generated.
 		}
 		Event::HTLCIntercepted { .. } => {}
-		Event::BumpTransaction(_) => {}
+		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
 	}
 }
 
@@ -532,6 +566,13 @@ async fn start_ldk() {
 	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 	let keys_manager = Arc::new(KeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
 
+	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
+		Arc::clone(&broadcaster),
+		Arc::new(Wallet::new(Arc::clone(&bitcoind_client), Arc::clone(&logger))),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+	));
+
 	// Step 7: Read ChannelMonitor state from disk
 	let mut channelmonitors =
 		persister.read_channelmonitors(keys_manager.clone(), keys_manager.clone()).unwrap();
@@ -566,6 +607,8 @@ async fn start_ldk() {
 	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
+	user_config.manually_accept_inbound_channels = true;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
@@ -778,6 +821,7 @@ async fn start_ldk() {
 		let bitcoind_client_event_listener = Arc::clone(&bitcoind_client_event_listener);
 		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
 		let keys_manager_event_listener = Arc::clone(&keys_manager_event_listener);
+		let bump_tx_event_handler = Arc::clone(&bump_tx_event_handler);
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
 		let persister_event_listener = Arc::clone(&persister_event_listener);
@@ -787,6 +831,7 @@ async fn start_ldk() {
 				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
+				&bump_tx_event_handler,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
 				&persister_event_listener,
