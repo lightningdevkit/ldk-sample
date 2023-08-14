@@ -278,8 +278,34 @@ async fn handle_ldk_events(
 			}
 			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
-		Event::OpenChannelRequest { .. } => {
-			// Unreachable, we don't set manually_accept_inbound_channels
+		Event::OpenChannelRequest {
+			ref temporary_channel_id, ref counterparty_node_id, ..
+		} => {
+			let mut random_bytes = [0u8; 16];
+			random_bytes.copy_from_slice(&keys_manager.get_secure_random_bytes()[..16]);
+			let user_channel_id = u128::from_be_bytes(random_bytes);
+			let res = channel_manager.accept_inbound_channel(
+				temporary_channel_id,
+				counterparty_node_id,
+				user_channel_id,
+			);
+
+			if let Err(e) = res {
+				print!(
+					"\nEVENT: Failed to accept inbound channel ({}) from {}: {:?}",
+					hex_utils::hex_str(&temporary_channel_id[..]),
+					hex_utils::hex_str(&counterparty_node_id.serialize()),
+					e,
+				);
+			} else {
+				print!(
+					"\nEVENT: Accepted inbound channel ({}) from {}",
+					hex_utils::hex_str(&temporary_channel_id[..]),
+					hex_utils::hex_str(&counterparty_node_id.serialize()),
+				);
+			}
+			print!("> ");
+			io::stdout().flush().unwrap();
 		}
 		Event::PaymentPathSuccessful { .. } => {}
 		Event::PaymentPathFailed { .. } => {}
@@ -566,6 +592,7 @@ async fn start_ldk() {
 	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.manually_accept_inbound_channels = true;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
