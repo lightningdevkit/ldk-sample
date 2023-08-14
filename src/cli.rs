@@ -368,14 +368,14 @@ pub(crate) async fn poll_for_user_input(
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
 					const MSG_STARTPOS: usize = "signmessage".len() + 1;
-					if line.as_bytes().len() <= MSG_STARTPOS {
+					if line.trim().as_bytes().len() <= MSG_STARTPOS {
 						println!("ERROR: signmsg requires a message");
 						continue;
 					}
 					println!(
 						"{:?}",
 						lightning::util::message_signing::sign(
-							&line.as_bytes()[MSG_STARTPOS..],
+							&line.trim().as_bytes()[MSG_STARTPOS..],
 							&keys_manager.get_node_secret_key()
 						)
 					);
