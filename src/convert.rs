@@ -1,7 +1,8 @@
 use bitcoin::hashes::hex::FromHex;
-use bitcoin::BlockHash;
+use bitcoin::{Address, BlockHash, Txid};
 use lightning_block_sync::http::JsonResponse;
 use std::convert::TryInto;
+use std::str::FromStr;
 
 pub struct FundedTx {
 	pub changepos: i64,
@@ -114,5 +115,35 @@ impl TryInto<BlockchainInfo> for JsonResponse {
 				.unwrap(),
 			chain: self.0["chain"].as_str().unwrap().to_string(),
 		})
+	}
+}
+
+pub struct ListUnspentUtxo {
+	pub txid: Txid,
+	pub vout: u32,
+	pub amount: u64,
+	pub address: Address,
+}
+
+pub struct ListUnspentResponse(pub Vec<ListUnspentUtxo>);
+
+impl TryInto<ListUnspentResponse> for JsonResponse {
+	type Error = std::io::Error;
+	fn try_into(self) -> Result<ListUnspentResponse, Self::Error> {
+		let utxos = self
+			.0
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|utxo| ListUnspentUtxo {
+				txid: Txid::from_str(&utxo["txid"].as_str().unwrap().to_string()).unwrap(),
+				vout: utxo["vout"].as_u64().unwrap() as u32,
+				amount: bitcoin::Amount::from_btc(utxo["amount"].as_f64().unwrap())
+					.unwrap()
+					.to_sat(),
+				address: Address::from_str(&utxo["address"].as_str().unwrap().to_string()).unwrap(),
+			})
+			.collect();
+		Ok(ListUnspentResponse(utxos))
 	}
 }
