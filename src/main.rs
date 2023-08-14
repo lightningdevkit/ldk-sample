@@ -959,12 +959,11 @@ async fn start_ldk() {
 
 	// Exit if either CLI polling exits or the background processor exits (which shouldn't happen
 	// unless we fail to write to the filesystem).
+	let mut bg_res = Ok(Ok(()));
 	tokio::select! {
 		_ = cli_poll => {},
-		bg_res = &mut background_processor => {
-			stop_listen_connect.store(true, Ordering::Release);
-			peer_manager.disconnect_all_peers();
-			panic!("ERR: background processing stopped with result {:?}, exiting", bg_res);
+		bg_exit = &mut background_processor => {
+			bg_res = bg_exit;
 		},
 	}
 
@@ -972,6 +971,21 @@ async fn start_ldk() {
 	// updating our channel data after we've stopped the background processor.
 	stop_listen_connect.store(true, Ordering::Release);
 	peer_manager.disconnect_all_peers();
+
+	if let Err(e) = bg_res {
+		let persist_res = persister.persist("manager", &*channel_manager).unwrap();
+		use lightning::util::logger::Logger;
+		lightning::log_error!(
+			&*logger,
+			"Last-ditch ChannelManager persistence result: {:?}",
+			persist_res
+		);
+		panic!(
+			"ERR: background processing stopped with result {:?}, exiting.\n\
+			Last-ditch ChannelManager persistence result {:?}",
+			e, persist_res
+		);
+	}
 
 	// Stop the background processor.
 	if !bp_exit.is_closed() {
