@@ -607,6 +607,7 @@ async fn start_ldk() {
 	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
 	user_config.manually_accept_inbound_channels = true;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
