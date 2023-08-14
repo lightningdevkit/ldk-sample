@@ -16,6 +16,7 @@ use bitcoin_bech32::WitnessProgram;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
+use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager::{self, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
@@ -141,10 +142,17 @@ pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
 type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
+pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
+	Arc<BitcoindClient>,
+	Arc<Wallet<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
+	Arc<KeysManager>,
+	Arc<FilesystemLogger>,
+>;
+
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
 	network: Network, event: Event,
 ) {
@@ -455,7 +463,7 @@ async fn handle_ldk_events(
 			// the funding transaction either confirms, or this event is generated.
 		}
 		Event::HTLCIntercepted { .. } => {}
-		Event::BumpTransaction(_) => {}
+		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
 	}
 }
 
@@ -557,6 +565,13 @@ async fn start_ldk() {
 	};
 	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 	let keys_manager = Arc::new(KeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
+
+	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
+		Arc::clone(&broadcaster),
+		Arc::new(Wallet::new(Arc::clone(&bitcoind_client), Arc::clone(&logger))),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+	));
 
 	// Step 7: Read ChannelMonitor state from disk
 	let mut channelmonitors =
@@ -805,6 +820,7 @@ async fn start_ldk() {
 		let bitcoind_client_event_listener = Arc::clone(&bitcoind_client_event_listener);
 		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
 		let keys_manager_event_listener = Arc::clone(&keys_manager_event_listener);
+		let bump_tx_event_handler = Arc::clone(&bump_tx_event_handler);
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
 		let persister_event_listener = Arc::clone(&persister_event_listener);
@@ -814,6 +830,7 @@ async fn start_ldk() {
 				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
+				&bump_tx_event_handler,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
 				&persister_event_listener,
