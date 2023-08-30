@@ -943,19 +943,25 @@ async fn start_ldk() {
 	));
 
 	// Start the CLI.
-	let cli_poll = tokio::spawn(cli::poll_for_user_input(
-		Arc::clone(&peer_manager),
-		Arc::clone(&channel_manager),
-		Arc::clone(&keys_manager),
-		Arc::clone(&network_graph),
-		Arc::clone(&onion_messenger),
-		inbound_payments,
-		outbound_payments,
-		ldk_data_dir,
-		network,
-		Arc::clone(&logger),
-		Arc::clone(&persister),
-	));
+	let cli_channel_manager = Arc::clone(&channel_manager);
+	let cli_persister = Arc::clone(&persister);
+	let cli_logger = Arc::clone(&logger);
+	let cli_peer_manager = Arc::clone(&peer_manager);
+	let cli_poll = tokio::task::spawn_blocking(move || {
+		cli::poll_for_user_input(
+			cli_peer_manager,
+			cli_channel_manager,
+			keys_manager,
+			network_graph,
+			onion_messenger,
+			inbound_payments,
+			outbound_payments,
+			ldk_data_dir,
+			network,
+			cli_logger,
+			cli_persister,
+		)
+	});
 
 	// Exit if either CLI polling exits or the background processor exits (which shouldn't happen
 	// unless we fail to write to the filesystem).

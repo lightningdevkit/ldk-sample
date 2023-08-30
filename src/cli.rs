@@ -60,7 +60,7 @@ impl Writeable for UserOnionMessageContents {
 	}
 }
 
-pub(crate) async fn poll_for_user_input(
+pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
 	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
@@ -112,8 +112,12 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
-						.await
+					if tokio::runtime::Handle::current()
+						.block_on(connect_peer_if_necessary(
+							pubkey,
+							peer_addr,
+							peer_manager.clone(),
+						))
 						.is_err()
 					{
 						continue;
@@ -259,8 +263,12 @@ pub(crate) async fn poll_for_user_input(
 								continue;
 							}
 						};
-					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
-						.await
+					if tokio::runtime::Handle::current()
+						.block_on(connect_peer_if_necessary(
+							pubkey,
+							peer_addr,
+							peer_manager.clone(),
+						))
 						.is_ok()
 					{
 						println!("SUCCESS: connected to peer {}", pubkey);
