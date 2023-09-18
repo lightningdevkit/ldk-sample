@@ -1,10 +1,9 @@
 use crate::cli::LdkUserInfo;
 use bitcoin::network::constants::Network;
-use lightning::ln::msgs::NetAddress;
+use lightning::ln::msgs::SocketAddress;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -86,18 +85,12 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	let mut ldk_announced_listen_addr = Vec::new();
 	loop {
 		match env::args().skip(arg_idx + 1).next().as_ref() {
-			Some(s) => match IpAddr::from_str(s) {
-				Ok(IpAddr::V4(a)) => {
-					ldk_announced_listen_addr
-						.push(NetAddress::IPv4 { addr: a.octets(), port: ldk_peer_listening_port });
+			Some(s) => match SocketAddress::from_str(s) {
+				Ok(sa) => {
+					ldk_announced_listen_addr.push(sa);
 					arg_idx += 1;
 				}
-				Ok(IpAddr::V6(a)) => {
-					ldk_announced_listen_addr
-						.push(NetAddress::IPv6 { addr: a.octets(), port: ldk_peer_listening_port });
-					arg_idx += 1;
-				}
-				Err(_) => panic!("Failed to parse announced-listen-addr into an IP address"),
+				Err(_) => panic!("Failed to parse announced-listen-addr into a socket address"),
 			},
 			None => break,
 		}
