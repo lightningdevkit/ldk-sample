@@ -20,7 +20,7 @@ use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager::{self, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+	ChainParameters, ChannelManagerReadArgs, PaymentId, SimpleArcChannelManager,
 };
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
@@ -109,11 +109,19 @@ impl_writeable_tlv_based!(PaymentInfo, {
 	(6, amt_msat, required),
 });
 
-pub(crate) struct PaymentInfoStorage {
+pub(crate) struct InboundPaymentInfoStorage {
 	payments: HashMap<PaymentHash, PaymentInfo>,
 }
 
-impl_writeable_tlv_based!(PaymentInfoStorage, {
+impl_writeable_tlv_based!(InboundPaymentInfoStorage, {
+	(0, payments, required),
+});
+
+pub(crate) struct OutboundPaymentInfoStorage {
+	payments: HashMap<PaymentId, PaymentInfo>,
+}
+
+impl_writeable_tlv_based!(OutboundPaymentInfoStorage, {
 	(0, payments, required),
 });
 
@@ -171,8 +179,9 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
+	bump_tx_event_handler: &BumpTxEventHandler,
+	inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
 	network: Network, event: Event,
 ) {
 	match event {
@@ -286,10 +295,12 @@ async fn handle_ldk_events(
 			}
 			fs_store.write("", "", INBOUND_PAYMENTS_FNAME, &inbound.encode()).unwrap();
 		}
-		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
+		Event::PaymentSent {
+			payment_preimage, payment_hash, fee_paid_msat, payment_id, ..
+		} => {
 			let mut outbound = outbound_payments.lock().unwrap();
-			for (hash, payment) in outbound.payments.iter_mut() {
-				if *hash == payment_hash {
+			for (id, payment) in outbound.payments.iter_mut() {
+				if *id == payment_id.unwrap() {
 					payment.preimage = Some(payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 					println!(
@@ -343,7 +354,7 @@ async fn handle_ldk_events(
 		Event::PaymentPathFailed { .. } => {}
 		Event::ProbeSuccessful { .. } => {}
 		Event::ProbeFailed { .. } => {}
-		Event::PaymentFailed { payment_hash, reason, .. } => {
+		Event::PaymentFailed { payment_hash, reason, payment_id, .. } => {
 			print!(
 				"\nEVENT: Failed to send payment to payment hash {}: {:?}",
 				payment_hash,
@@ -353,8 +364,8 @@ async fn handle_ldk_events(
 			io::stdout().flush().unwrap();
 
 			let mut outbound = outbound_payments.lock().unwrap();
-			if outbound.payments.contains_key(&payment_hash) {
-				let payment = outbound.payments.get_mut(&payment_hash).unwrap();
+			if outbound.payments.contains_key(&payment_id) {
+				let payment = outbound.payments.get_mut(&payment_id).unwrap();
 				payment.status = HTLCStatus::Failed;
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
@@ -364,7 +375,12 @@ async fn handle_ldk_events(
 			print!("> ");
 			io::stdout().flush().unwrap();
 
-			// TODO: mark the payment as failed
+			let mut outbound = outbound_payments.lock().unwrap();
+			if outbound.payments.contains_key(&payment_id) {
+				let payment = outbound.payments.get_mut(&payment_id).unwrap();
+				payment.status = HTLCStatus::Failed;
+			}
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
 		}
 		Event::PaymentForwarded {
 			prev_channel_id,
@@ -833,32 +849,30 @@ async fn start_ldk() {
 		}
 	});
 
-	let inbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
-		"{}/{}",
-		ldk_data_dir, INBOUND_PAYMENTS_FNAME
-	)))));
-	let outbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
-		"{}/{}",
-		ldk_data_dir, OUTBOUND_PAYMENTS_FNAME
-	)))));
-	let recent_payments_payment_hashes = channel_manager
+	let inbound_payments = Arc::new(Mutex::new(disk::read_inbound_payment_info(Path::new(
+		&format!("{}/{}", ldk_data_dir, INBOUND_PAYMENTS_FNAME),
+	))));
+	let outbound_payments = Arc::new(Mutex::new(disk::read_outbound_payment_info(Path::new(
+		&format!("{}/{}", ldk_data_dir, OUTBOUND_PAYMENTS_FNAME),
+	))));
+	let recent_payments_payment_ids = channel_manager
 		.list_recent_payments()
 		.into_iter()
 		.filter_map(|p| match p {
-			RecentPaymentDetails::Pending { payment_hash, .. } => Some(payment_hash),
-			RecentPaymentDetails::Fulfilled { payment_hash, .. } => payment_hash,
-			RecentPaymentDetails::Abandoned { payment_hash, .. } => Some(payment_hash),
-			RecentPaymentDetails::AwaitingInvoice { payment_id: _ } => todo!(),
+			RecentPaymentDetails::Pending { payment_id, .. } => Some(payment_id),
+			RecentPaymentDetails::Fulfilled { payment_id, .. } => Some(payment_id),
+			RecentPaymentDetails::Abandoned { payment_id, .. } => Some(payment_id),
+			RecentPaymentDetails::AwaitingInvoice { payment_id } => Some(payment_id),
 		})
-		.collect::<Vec<PaymentHash>>();
-	for (payment_hash, payment_info) in outbound_payments
+		.collect::<Vec<PaymentId>>();
+	for (payment_id, payment_info) in outbound_payments
 		.lock()
 		.unwrap()
 		.payments
 		.iter_mut()
 		.filter(|(_, i)| matches!(i.status, HTLCStatus::Pending))
 	{
-		if !recent_payments_payment_hashes.contains(payment_hash) {
+		if !recent_payments_payment_ids.contains(payment_id) {
 			payment_info.status = HTLCStatus::Failed;
 		}
 	}
