@@ -559,7 +559,7 @@ fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &Paym
 		println!("");
 		println!("\t{{");
 		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
-		println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
+		println!("\t\tpayment_hash: {},", payment_hash);
 		println!("\t\thtlc_direction: inbound,");
 		println!(
 			"\t\thtlc_status: {},",
@@ -577,7 +577,7 @@ fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &Paym
 		println!("");
 		println!("\t{{");
 		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
-		println!("\t\tpayment_hash: {},", hex_utils::hex_str(&payment_hash.0));
+		println!("\t\tpayment_hash: {},", payment_hash);
 		println!("\t\thtlc_direction: outbound,");
 		println!(
 			"\t\thtlc_status: {},",

@@ -218,8 +218,7 @@ async fn handle_ldk_events(
 		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
-				hex_utils::hex_str(&payment_hash.0),
-				amount_msat,
+				payment_hash, amount_msat,
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -239,8 +238,7 @@ async fn handle_ldk_events(
 		} => {
 			println!(
 				"\nEVENT: claimed payment from payment hash {} of {} millisatoshis",
-				hex_utils::hex_str(&payment_hash.0),
-				amount_msat,
+				payment_hash, amount_msat,
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -277,15 +275,15 @@ async fn handle_ldk_events(
 					payment.status = HTLCStatus::Succeeded;
 					println!(
 						"\nEVENT: successfully sent payment of {} millisatoshis{} from \
-								 payment hash {:?} with preimage {:?}",
+								 payment hash {} with preimage {}",
 						payment.amt_msat,
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
 						} else {
 							"".to_string()
 						},
-						hex_utils::hex_str(&payment_hash.0),
-						hex_utils::hex_str(&payment_preimage.0)
+						payment_hash,
+						payment_preimage
 					);
 					print!("> ");
 					io::stdout().flush().unwrap();
@@ -328,8 +326,8 @@ async fn handle_ldk_events(
 		Event::ProbeFailed { .. } => {}
 		Event::PaymentFailed { payment_hash, reason, .. } => {
 			print!(
-				"\nEVENT: Failed to send payment to payment hash {:?}: {:?}",
-				hex_utils::hex_str(&payment_hash.0),
+				"\nEVENT: Failed to send payment to payment hash {}: {:?}",
+				payment_hash,
 				if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
 			);
 			print!("> ");
