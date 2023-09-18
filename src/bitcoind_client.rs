@@ -33,17 +33,9 @@ pub struct BitcoindClient {
 	port: u16,
 	rpc_user: String,
 	rpc_password: String,
-	fees: Arc<HashMap<Target, AtomicU32>>,
+	fees: Arc<HashMap<ConfirmationTarget, AtomicU32>>,
 	handle: tokio::runtime::Handle,
 	logger: Arc<FilesystemLogger>,
-}
-
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub enum Target {
-	MempoolMinimum,
-	Background,
-	Normal,
-	HighPriority,
 }
 
 impl BlockSource for BitcoindClient {
@@ -83,11 +75,11 @@ impl BitcoindClient {
 				std::io::Error::new(std::io::ErrorKind::PermissionDenied,
 				"Failed to make initial call to bitcoind - please check your RPC user/password and access settings")
 			})?;
-		let mut fees: HashMap<Target, AtomicU32> = HashMap::new();
-		fees.insert(Target::MempoolMinimum, AtomicU32::new(MIN_FEERATE));
-		fees.insert(Target::Background, AtomicU32::new(MIN_FEERATE));
-		fees.insert(Target::Normal, AtomicU32::new(2000));
-		fees.insert(Target::HighPriority, AtomicU32::new(5000));
+		let mut fees: HashMap<ConfirmationTarget, AtomicU32> = HashMap::new();
+		fees.insert(ConfirmationTarget::MempoolMinimum, AtomicU32::new(MIN_FEERATE));
+		fees.insert(ConfirmationTarget::Background, AtomicU32::new(MIN_FEERATE));
+		fees.insert(ConfirmationTarget::Normal, AtomicU32::new(2000));
+		fees.insert(ConfirmationTarget::HighPriority, AtomicU32::new(5000));
 		let client = Self {
 			bitcoind_rpc_client: Arc::new(bitcoind_rpc_client),
 			host,
@@ -107,7 +99,7 @@ impl BitcoindClient {
 	}
 
 	fn poll_for_fee_estimates(
-		fees: Arc<HashMap<Target, AtomicU32>>, rpc_client: Arc<RpcClient>,
+		fees: Arc<HashMap<ConfirmationTarget, AtomicU32>>, rpc_client: Arc<RpcClient>,
 		handle: tokio::runtime::Handle,
 	) {
 		handle.spawn(async move {
@@ -171,14 +163,16 @@ impl BitcoindClient {
 					}
 				};
 
-				fees.get(&Target::MempoolMinimum)
+				fees.get(&ConfirmationTarget::MempoolMinimum)
 					.unwrap()
 					.store(mempoolmin_estimate, Ordering::Release);
-				fees.get(&Target::Background)
+				fees.get(&ConfirmationTarget::Background)
 					.unwrap()
 					.store(background_estimate, Ordering::Release);
-				fees.get(&Target::Normal).unwrap().store(normal_estimate, Ordering::Release);
-				fees.get(&Target::HighPriority)
+				fees.get(&ConfirmationTarget::Normal)
+					.unwrap()
+					.store(normal_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::HighPriority)
 					.unwrap()
 					.store(high_prio_estimate, Ordering::Release);
 				tokio::time::sleep(Duration::from_secs(60)).await;
@@ -267,20 +261,7 @@ impl BitcoindClient {
 
 impl FeeEstimator for BitcoindClient {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
-		match confirmation_target {
-			ConfirmationTarget::MempoolMinimum => {
-				self.fees.get(&Target::MempoolMinimum).unwrap().load(Ordering::Acquire)
-			}
-			ConfirmationTarget::Background => {
-				self.fees.get(&Target::Background).unwrap().load(Ordering::Acquire)
-			}
-			ConfirmationTarget::Normal => {
-				self.fees.get(&Target::Normal).unwrap().load(Ordering::Acquire)
-			}
-			ConfirmationTarget::HighPriority => {
-				self.fees.get(&Target::HighPriority).unwrap().load(Ordering::Acquire)
-			}
-		}
+		self.fees.get(&confirmation_target).unwrap().load(Ordering::Acquire)
 	}
 }
 
