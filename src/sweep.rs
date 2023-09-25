@@ -37,7 +37,7 @@ pub(crate) async fn periodic_sweep(
 	// Note that if you more tightly integrate your wallet with LDK you may not need to do this -
 	// these outputs can just be treated as normal outputs during coin selection.
 	let pending_spendables_dir =
-		format!("{}/{}", crate::PENDING_SPENDABLE_OUTPUT_DIR, ldk_data_dir);
+		format!("{}/{}", ldk_data_dir, crate::PENDING_SPENDABLE_OUTPUT_DIR);
 	let processing_spendables_dir = format!("{}/processing_spendable_outputs", ldk_data_dir);
 	let spendables_dir = format!("{}/spendable_outputs", ldk_data_dir);
 

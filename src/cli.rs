@@ -61,7 +61,7 @@ impl Writeable for UserOnionMessageContents {
 	}
 }
 
-pub(crate) async fn poll_for_user_input(
+pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<MyKeysManager>, network_graph: Arc<NetworkGraph>,
 	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
@@ -135,7 +135,7 @@ pub(crate) async fn poll_for_user_input(
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
 					if peer_pubkey_and_ip_addr.is_none() || channel_value_sat.is_none() {
-						println!("ERROR: openchannel has 2 required arguments: `openchannel pubkey@host:port channel_amt_satoshis` [--public]");
+						println!("ERROR: openchannel has 2 required arguments: `openchannel pubkey@host:port channel_amt_satoshis` [--public] [--with-anchors]");
 						continue;
 					}
 					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
@@ -154,27 +154,36 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
-						.await
+					if tokio::runtime::Handle::current()
+						.block_on(connect_peer_if_necessary(
+							pubkey,
+							peer_addr,
+							peer_manager.clone(),
+						))
 						.is_err()
 					{
 						continue;
 					};
 
-					let announce_channel = match words.next() {
-						Some("--public") | Some("--public=true") => true,
-						Some("--public=false") => false,
-						Some(_) => {
-							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
-							continue;
+					let (mut announce_channel, mut with_anchors) = (false, false);
+					while let Some(word) = words.next() {
+						match word {
+							"--public" | "--public=true" => announce_channel = true,
+							"--public=false" => announce_channel = false,
+							"--with-anchors" | "--with-anchors=true" => with_anchors = true,
+							"--with-anchors=false" => with_anchors = false,
+							_ => {
+								println!("ERROR: invalid boolean flag format. Valid formats: `--option`, `--option=true` `--option=false`");
+								continue;
+							}
 						}
-						None => false,
-					};
+					}
 
 					if open_channel(
 						pubkey,
 						chan_amt_sat.unwrap(),
 						announce_channel,
+						with_anchors,
 						channel_manager.clone(),
 					)
 					.is_ok()
@@ -296,8 +305,12 @@ pub(crate) async fn poll_for_user_input(
 								continue;
 							}
 						};
-					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
-						.await
+					if tokio::runtime::Handle::current()
+						.block_on(connect_peer_if_necessary(
+							pubkey,
+							peer_addr,
+							peer_manager.clone(),
+						))
 						.is_ok()
 					{
 						println!("SUCCESS: connected to peer {}", pubkey);
@@ -410,14 +423,14 @@ pub(crate) async fn poll_for_user_input(
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
 					const MSG_STARTPOS: usize = "signmessage".len() + 1;
-					if line.as_bytes().len() <= MSG_STARTPOS {
+					if line.trim().as_bytes().len() <= MSG_STARTPOS {
 						println!("ERROR: signmsg requires a message");
 						continue;
 					}
 					println!(
 						"{:?}",
 						lightning::util::message_signing::sign(
-							&line.as_bytes()[MSG_STARTPOS..],
+							&line.trim().as_bytes()[MSG_STARTPOS..],
 							&keys_manager.get_node_secret_key()
 						)
 					);
@@ -497,7 +510,7 @@ fn help() {
 	println!("  help\tShows a list of commands.");
 	println!("  quit\tClose the application.");
 	println!("\n  Channels:");
-	println!("      openchannel pubkey@host:port <amt_satoshis> [--public]");
+	println!("      openchannel pubkey@host:port <amt_satoshis> [--public] [--with-anchors]");
 	println!("      closechannel <channel_id> <peer_pubkey>");
 	println!("      forceclosechannel <channel_id> <peer_pubkey>");
 	println!("      listchannels");
@@ -710,7 +723,7 @@ fn open_channel_without_addr(
 }
 
 fn open_channel(
-	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool,
+	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool, with_anchors: bool,
 	channel_manager: Arc<ChannelManager>,
 ) -> Result<(), ()> {
 	let config = UserConfig {
@@ -721,6 +734,7 @@ fn open_channel(
 		},
 		channel_handshake_config: ChannelHandshakeConfig {
 			announced_channel,
+			negotiate_anchors_zero_fee_htlc_tx: with_anchors,
 			..Default::default()
 		},
 		..Default::default()

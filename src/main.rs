@@ -31,10 +31,11 @@ use bitcoin_bech32::WitnessProgram;
 use core::ops::Deref;
 use core::sync::atomic::AtomicUsize;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
-use lightning::chain;
 use lightning::sign::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
 	SpendableOutputDescriptor, SignerProvider, NodeSigner};
-use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
+use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
+use lightning::chain::{Filter, Watch};
+use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager;
 use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
@@ -587,10 +588,17 @@ IgnoringMessageHandler,
 IgnoringMessageHandler>;
 type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
+pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
+	Arc<BitcoindClient>,
+	Arc<Wallet<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
+	Arc<KeysManager>,
+	Arc<FilesystemLogger>,
+>;
+
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &MyKeysManager,
-	inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
 	network: Network, event: Event,
 ) {
@@ -724,8 +732,34 @@ async fn handle_ldk_events(
 			}
 			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
 		}
-		Event::OpenChannelRequest { .. } => {
-			// Unreachable, we don't set manually_accept_inbound_channels
+		Event::OpenChannelRequest {
+			ref temporary_channel_id, ref counterparty_node_id, ..
+		} => {
+			let mut random_bytes = [0u8; 16];
+			random_bytes.copy_from_slice(&keys_manager.get_secure_random_bytes()[..16]);
+			let user_channel_id = u128::from_be_bytes(random_bytes);
+			let res = channel_manager.accept_inbound_channel(
+				temporary_channel_id,
+				counterparty_node_id,
+				user_channel_id,
+			);
+
+			if let Err(e) = res {
+				print!(
+					"\nEVENT: Failed to accept inbound channel ({}) from {}: {:?}",
+					hex_utils::hex_str(&temporary_channel_id[..]),
+					hex_utils::hex_str(&counterparty_node_id.serialize()),
+					e,
+				);
+			} else {
+				print!(
+					"\nEVENT: Accepted inbound channel ({}) from {}",
+					hex_utils::hex_str(&temporary_channel_id[..]),
+					hex_utils::hex_str(&counterparty_node_id.serialize()),
+				);
+			}
+			print!("> ");
+			io::stdout().flush().unwrap();
 		}
 		Event::PaymentPathSuccessful { .. } => {}
 		Event::PaymentPathFailed { .. } => {}
@@ -875,7 +909,7 @@ async fn handle_ldk_events(
 			// the funding transaction either confirms, or this event is generated.
 		}
 		Event::HTLCIntercepted { .. } => {}
-		Event::BumpTransaction(_) => {}
+		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
 	}
 }
 
@@ -976,9 +1010,17 @@ async fn start_ldk() {
 		key
 	};
 	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, 0, 0));
+
 	//println!("{}",keys_manager.get_node_secret_key().display_secret());
-	
+	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
+
+	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
+		Arc::clone(&broadcaster),
+		Arc::new(Wallet::new(Arc::clone(&bitcoind_client), Arc::clone(&logger))),
+		Arc::clone(&keys_manager),
+		Arc::clone(&logger),
+	));
+
 	// Step 7: Read ChannelMonitor state from disk
 	let mut channelmonitors =
 		persister.read_channelmonitors(keys_manager.clone(), keys_manager.clone()).unwrap();
@@ -1013,6 +1055,8 @@ async fn start_ldk() {
 	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
+	user_config.manually_accept_inbound_channels = true;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
@@ -1227,6 +1271,7 @@ async fn start_ldk() {
 		let bitcoind_client_event_listener = Arc::clone(&bitcoind_client_event_listener);
 		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
 		let keys_manager_event_listener = Arc::clone(&keys_manager_event_listener);
+		let bump_tx_event_handler = Arc::clone(&bump_tx_event_handler);
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
 		let persister_event_listener = Arc::clone(&persister_event_listener);
@@ -1236,6 +1281,7 @@ async fn start_ldk() {
 				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
+				&bump_tx_event_handler,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
 				&persister_event_listener,
@@ -1251,7 +1297,7 @@ async fn start_ldk() {
 
 	// Step 20: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
-	let background_processor = tokio::spawn(process_events_async(
+	let mut background_processor = tokio::spawn(process_events_async(
 		Arc::clone(&persister),
 		event_handler,
 		chain_monitor.clone(),
@@ -1347,29 +1393,61 @@ async fn start_ldk() {
 	));
 
 	// Start the CLI.
-	cli::poll_for_user_input(
-		Arc::clone(&peer_manager),
-		Arc::clone(&channel_manager),
-		Arc::clone(&keys_manager),
-		Arc::clone(&network_graph),
-		Arc::clone(&onion_messenger),
-		inbound_payments,
-		outbound_payments,
-		ldk_data_dir,
-		network,
-		Arc::clone(&logger),
-		Arc::clone(&persister),
-	)
-	.await;
+	let cli_channel_manager = Arc::clone(&channel_manager);
+	let cli_persister = Arc::clone(&persister);
+	let cli_logger = Arc::clone(&logger);
+	let cli_peer_manager = Arc::clone(&peer_manager);
+	let cli_poll = tokio::task::spawn_blocking(move || {
+		cli::poll_for_user_input(
+			cli_peer_manager,
+			cli_channel_manager,
+			keys_manager,
+			network_graph,
+			onion_messenger,
+			inbound_payments,
+			outbound_payments,
+			ldk_data_dir,
+			network,
+			cli_logger,
+			cli_persister,
+		)
+	});
+
+	// Exit if either CLI polling exits or the background processor exits (which shouldn't happen
+	// unless we fail to write to the filesystem).
+	let mut bg_res = Ok(Ok(()));
+	tokio::select! {
+		_ = cli_poll => {},
+		bg_exit = &mut background_processor => {
+			bg_res = bg_exit;
+		},
+	}
 
 	// Disconnect our peers and stop accepting new connections. This ensures we don't continue
 	// updating our channel data after we've stopped the background processor.
 	stop_listen_connect.store(true, Ordering::Release);
 	peer_manager.disconnect_all_peers();
 
+	if let Err(e) = bg_res {
+		let persist_res = persister.persist("manager", &*channel_manager).unwrap();
+		use lightning::util::logger::Logger;
+		lightning::log_error!(
+			&*logger,
+			"Last-ditch ChannelManager persistence result: {:?}",
+			persist_res
+		);
+		panic!(
+			"ERR: background processing stopped with result {:?}, exiting.\n\
+			Last-ditch ChannelManager persistence result {:?}",
+			e, persist_res
+		);
+	}
+
 	// Stop the background processor.
-	bp_exit.send(()).unwrap();
-	background_processor.await.unwrap().unwrap();
+	if !bp_exit.is_closed() {
+		bp_exit.send(()).unwrap();
+		background_processor.await.unwrap().unwrap();
+	}
 }
 
 #[tokio::main]
