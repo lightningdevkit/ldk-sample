@@ -32,7 +32,7 @@ use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
 use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
-use lightning::util::persist::{self, read_channel_monitors, KVStore};
+use lightning::util::persist::{self, KVStore, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync};
@@ -123,7 +123,14 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<BitcoindClient>,
 	Arc<BitcoindClient>,
 	Arc<FilesystemLogger>,
-	Arc<FilesystemStore>,
+	Arc<
+		MonitorUpdatingPersister<
+			Arc<FilesystemStore>,
+			Arc<FilesystemLogger>,
+			Arc<KeysManager>,
+			Arc<KeysManager>,
+		>,
+	>,
 >;
 
 pub(crate) type PeerManager = SimpleArcPeerManager<
@@ -536,19 +543,7 @@ async fn start_ldk() {
 	// broadcaster.
 	let broadcaster = bitcoind_client.clone();
 
-	// Step 4: Initialize Persist
-	let persister = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
-
-	// Step 5: Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
-		None,
-		broadcaster.clone(),
-		logger.clone(),
-		fee_estimator.clone(),
-		persister.clone(),
-	));
-
-	// Step 6: Initialize the KeysManager
+	// Step 4: Initialize the KeysManager
 
 	// The key seed that we use to derive the node privkey (that corresponds to the node pubkey) and
 	// other secret key material.
@@ -583,10 +578,35 @@ async fn start_ldk() {
 		Arc::clone(&logger),
 	));
 
+	// Step 5: Initialize Persistence
+	let fs_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
+	let persister = Arc::new(MonitorUpdatingPersister::new(
+		Arc::clone(&fs_store),
+		Arc::clone(&logger),
+		1000,
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+	));
+	// Alternatively, you can use the `FilesystemStore` as a `Persist` directly, at the cost of
+	// larger `ChannelMonitor` update writes (but no deletion or cleanup):
+	//let persister = Arc::clone(&fs_store);
+
+	// Step 6: Initialize the ChainMonitor
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+		None,
+		Arc::clone(&broadcaster),
+		Arc::clone(&logger),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&persister),
+	));
+
 	// Step 7: Read ChannelMonitor state from disk
-	let mut channelmonitors =
-		read_channel_monitors(Arc::clone(&persister), keys_manager.clone(), keys_manager.clone())
-			.unwrap();
+	let mut channelmonitors = persister
+		.read_all_channel_monitors_with_updates(&bitcoind_client, &bitcoind_client)
+		.unwrap();
+	// If you are using the `FilesystemStore` as a `Persist` directly, use
+	// `lightning::util::persist::read_channel_monitors` like this:
+	//read_channel_monitors(Arc::clone(&persister), Arc::clone(&keys_manager), Arc::clone(&keys_manager)).unwrap();
 
 	// Step 8: Poll for the best chain tip, which may be used by the channel manager & spv client
 	let polled_chain_tip = init::validate_best_block_header(bitcoind_client.as_ref())
@@ -817,7 +837,7 @@ async fn start_ldk() {
 			payment_info.status = HTLCStatus::Failed;
 		}
 	}
-	persister
+	fs_store
 		.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.lock().unwrap().encode())
 		.unwrap();
 
@@ -828,7 +848,7 @@ async fn start_ldk() {
 	let keys_manager_event_listener = Arc::clone(&keys_manager);
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
 	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
-	let persister_event_listener = Arc::clone(&persister);
+	let fs_store_event_listener = Arc::clone(&fs_store);
 	let network = args.network;
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
@@ -838,7 +858,7 @@ async fn start_ldk() {
 		let bump_tx_event_handler = Arc::clone(&bump_tx_event_handler);
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
-		let persister_event_listener = Arc::clone(&persister_event_listener);
+		let fs_store_event_listener = Arc::clone(&fs_store_event_listener);
 		async move {
 			handle_ldk_events(
 				&channel_manager_event_listener,
@@ -848,7 +868,7 @@ async fn start_ldk() {
 				&bump_tx_event_handler,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
-				&persister_event_listener,
+				&fs_store_event_listener,
 				network,
 				event,
 			)
