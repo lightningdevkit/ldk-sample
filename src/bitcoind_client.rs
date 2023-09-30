@@ -75,10 +75,23 @@ impl BitcoindClient {
 				"Failed to make initial call to bitcoind - please check your RPC user/password and access settings")
 			})?;
 		let mut fees: HashMap<ConfirmationTarget, AtomicU32> = HashMap::new();
-		fees.insert(ConfirmationTarget::MempoolMinimum, AtomicU32::new(MIN_FEERATE));
-		fees.insert(ConfirmationTarget::Background, AtomicU32::new(MIN_FEERATE));
-		fees.insert(ConfirmationTarget::Normal, AtomicU32::new(2000));
-		fees.insert(ConfirmationTarget::HighPriority, AtomicU32::new(5000));
+		fees.insert(ConfirmationTarget::OnChainSweep, AtomicU32::new(5000));
+		fees.insert(
+			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee,
+			AtomicU32::new(25 * 250),
+		);
+		fees.insert(
+			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
+			AtomicU32::new(MIN_FEERATE),
+		);
+		fees.insert(
+			ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
+			AtomicU32::new(MIN_FEERATE),
+		);
+		fees.insert(ConfirmationTarget::AnchorChannelFee, AtomicU32::new(MIN_FEERATE));
+		fees.insert(ConfirmationTarget::NonAnchorChannelFee, AtomicU32::new(2000));
+		fees.insert(ConfirmationTarget::ChannelCloseMinimum, AtomicU32::new(MIN_FEERATE));
+
 		let client = Self {
 			bitcoind_rpc_client: Arc::new(bitcoind_rpc_client),
 			host,
@@ -162,18 +175,28 @@ impl BitcoindClient {
 					}
 				};
 
-				fees.get(&ConfirmationTarget::MempoolMinimum)
-					.unwrap()
-					.store(mempoolmin_estimate, Ordering::Release);
-				fees.get(&ConfirmationTarget::Background)
-					.unwrap()
-					.store(background_estimate, Ordering::Release);
-				fees.get(&ConfirmationTarget::Normal)
-					.unwrap()
-					.store(normal_estimate, Ordering::Release);
-				fees.get(&ConfirmationTarget::HighPriority)
+				fees.get(&ConfirmationTarget::OnChainSweep)
 					.unwrap()
 					.store(high_prio_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee)
+					.unwrap()
+					.store(std::cmp::max(25 * 250, high_prio_estimate * 10), Ordering::Release);
+				fees.get(&ConfirmationTarget::MinAllowedAnchorChannelRemoteFee)
+					.unwrap()
+					.store(mempoolmin_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee)
+					.unwrap()
+					.store(background_estimate - 250, Ordering::Release);
+				fees.get(&ConfirmationTarget::AnchorChannelFee)
+					.unwrap()
+					.store(background_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::NonAnchorChannelFee)
+					.unwrap()
+					.store(normal_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::ChannelCloseMinimum)
+					.unwrap()
+					.store(background_estimate, Ordering::Release);
+
 				tokio::time::sleep(Duration::from_secs(60)).await;
 			}
 		});
@@ -203,7 +226,8 @@ impl BitcoindClient {
 			// LDK gives us feerates in satoshis per KW but Bitcoin Core here expects fees
 			// denominated in satoshis per vB. First we need to multiply by 4 to convert weight
 			// units to virtual bytes, then divide by 1000 to convert KvB to vB.
-			"fee_rate": self.get_est_sat_per_1000_weight(ConfirmationTarget::Normal) as f64 / 250.0,
+			"fee_rate": self
+				.get_est_sat_per_1000_weight(ConfirmationTarget::NonAnchorChannelFee) as f64 / 250.0,
 			// While users could "cancel" a channel open by RBF-bumping and paying back to
 			// themselves, we don't allow it here as its easy to have users accidentally RBF bump
 			// and pay to the channel funding address, which results in loss of funds. Real

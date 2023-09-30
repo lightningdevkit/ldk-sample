@@ -8,13 +8,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lightning = { version = "0.0.117", features = ["max_level_trace"] }
-lightning-block-sync = { version = "0.0.117", features = [ "rpc-client", "tokio" ] }
-lightning-invoice = { version = "0.25.0" }
-lightning-net-tokio = { version = "0.0.117" }
-lightning-persister = { version = "0.0.117" }
-lightning-background-processor = { version = "0.0.117", features = [ "futures" ] }
-lightning-rapid-gossip-sync = { version = "0.0.117" }
+lightning = { version = "0.0.118", features = ["max_level_trace"] }
+lightning-block-sync = { version = "0.0.118", features = [ "rpc-client", "tokio" ] }
+lightning-invoice = { version = "0.26.0" }
+lightning-net-tokio = { version = "0.0.118" }
+lightning-persister = { version = "0.0.118" }
+lightning-background-processor = { version = "0.0.118", features = [ "futures" ] }
+lightning-rapid-gossip-sync = { version = "0.0.118" }
 
 base64 = "0.13.0"
 bitcoin = "0.29.0"
