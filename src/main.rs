@@ -133,12 +133,23 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	>,
 >;
 
+pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
+	lightning_block_sync::gossip::TokioSpawner,
+	Arc<lightning_block_sync::rpc::RpcClient>,
+	Arc<FilesystemLogger>,
+	SocketDescriptor,
+	Arc<ChannelManager>,
+	Arc<SimpleArcOnionMessenger<FilesystemLogger>>,
+	IgnoringMessageHandler,
+	Arc<KeysManager>,
+>;
+
 pub(crate) type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
 	BitcoindClient,
 	BitcoindClient,
-	Arc<BitcoindClient>,
+	GossipVerifier,
 	FilesystemLogger,
 >;
 
@@ -733,11 +744,8 @@ async fn start_ldk() {
 	}
 
 	// Step 14: Optional: Initialize the P2PGossipSync
-	let gossip_sync = Arc::new(P2PGossipSync::new(
-		Arc::clone(&network_graph),
-		None::<Arc<BitcoindClient>>,
-		logger.clone(),
-	));
+	let gossip_sync =
+		Arc::new(P2PGossipSync::new(Arc::clone(&network_graph), None, Arc::clone(&logger)));
 
 	// Step 15: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
@@ -765,6 +773,15 @@ async fn start_ldk() {
 		logger.clone(),
 		Arc::clone(&keys_manager),
 	));
+
+	// Install a GossipVerifier in in the P2PGossipSync
+	let utxo_lookup = GossipVerifier::new(
+		Arc::clone(&bitcoind_client.bitcoind_rpc_client),
+		lightning_block_sync::gossip::TokioSpawner,
+		Arc::clone(&gossip_sync),
+		Arc::clone(&peer_manager),
+	);
+	gossip_sync.add_utxo_lookup(Some(utxo_lookup));
 
 	// ## Running LDK
 	// Step 16: Initialize networking
