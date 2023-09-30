@@ -65,7 +65,7 @@ pub(crate) fn poll_for_user_input(
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
 	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, ldk_data_dir: String, network: Network,
-	logger: Arc<disk::FilesystemLogger>, persister: Arc<FilesystemStore>,
+	logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -172,7 +172,7 @@ pub(crate) fn poll_for_user_input(
 						&channel_manager,
 						&invoice,
 						&mut outbound_payments.lock().unwrap(),
-						persister.clone(),
+						Arc::clone(&fs_store),
 					);
 				}
 				"keysend" => {
@@ -209,7 +209,7 @@ pub(crate) fn poll_for_user_input(
 						amt_msat,
 						&*keys_manager,
 						&mut outbound_payments.lock().unwrap(),
-						persister.clone(),
+						Arc::clone(&fs_store),
 					);
 				}
 				"getinvoice" => {
@@ -247,7 +247,7 @@ pub(crate) fn poll_for_user_input(
 						expiry_secs.unwrap(),
 						Arc::clone(&logger),
 					);
-					persister
+					fs_store
 						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
 						.unwrap();
 				}
@@ -684,7 +684,7 @@ fn open_channel(
 
 fn send_payment(
 	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
-	outbound_payments: &mut PaymentInfoStorage, persister: Arc<FilesystemStore>,
+	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
 	let payment_secret = Some(*invoice.payment_secret());
@@ -697,7 +697,7 @@ fn send_payment(
 			amt_msat: MillisatAmount(invoice.amount_milli_satoshis()),
 		},
 	);
-	persister.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 	match pay_invoice(invoice, Retry::Timeout(Duration::from_secs(10)), channel_manager) {
 		Ok(_payment_id) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
@@ -709,14 +709,14 @@ fn send_payment(
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
-			persister.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		}
 	};
 }
 
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	outbound_payments: &mut PaymentInfoStorage, persister: Arc<FilesystemStore>,
+	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
 	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
@@ -734,7 +734,7 @@ fn keysend<E: EntropySource>(
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
 	);
-	persister.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 	match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
@@ -750,7 +750,7 @@ fn keysend<E: EntropySource>(
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
-			persister.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		}
 	};
 }

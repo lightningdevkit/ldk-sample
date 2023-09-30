@@ -160,7 +160,7 @@ async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
 	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemStore>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
 	network: Network, event: Event,
 ) {
 	match event {
@@ -272,7 +272,7 @@ async fn handle_ldk_events(
 					});
 				}
 			}
-			persister.write("", "", INBOUND_PAYMENTS_FNAME, &inbound.encode()).unwrap();
+			fs_store.write("", "", INBOUND_PAYMENTS_FNAME, &inbound.encode()).unwrap();
 		}
 		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 			let mut outbound = outbound_payments.lock().unwrap();
@@ -296,7 +296,7 @@ async fn handle_ldk_events(
 					io::stdout().flush().unwrap();
 				}
 			}
-			persister.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
 		}
 		Event::OpenChannelRequest {
 			ref temporary_channel_id, ref counterparty_node_id, ..
@@ -345,7 +345,7 @@ async fn handle_ldk_events(
 				let payment = outbound.payments.get_mut(&payment_hash).unwrap();
 				payment.status = HTLCStatus::Failed;
 			}
-			persister.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
 		}
 		Event::PaymentForwarded {
 			prev_channel_id,
@@ -433,7 +433,7 @@ async fn handle_ldk_events(
 				let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
 				// Note that if the type here changes our read code needs to change as well.
 				let output: SpendableOutputDescriptor = output;
-				persister.write(PENDING_SPENDABLE_OUTPUT_DIR, "", &key, &output.encode()).unwrap();
+				fs_store.write(PENDING_SPENDABLE_OUTPUT_DIR, "", &key, &output.encode()).unwrap();
 			}
 		}
 		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
