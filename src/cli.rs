@@ -14,7 +14,12 @@ use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::onion_message::OnionMessagePath;
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::routing::router::{
+	find_route, DefaultRouter, InFlightHtlcs, PaymentParameters, RouteParameters,
+};
+use lightning::routing::scoring::{
+	ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
+};
 use lightning::sign::{EntropySource, KeysManager};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStorePersister;
@@ -173,6 +178,43 @@ pub(crate) fn poll_for_user_input(
 						&invoice,
 						&mut outbound_payments.lock().unwrap(),
 						persister.clone(),
+					);
+				}
+				"sendprobe" => {
+					let dest_pubkey = match words.next() {
+						Some(dest) => match hex_utils::to_compressed_pubkey(dest) {
+							Some(pk) => pk,
+							None => {
+								println!("ERROR: couldn't parse destination pubkey");
+								continue;
+							}
+						},
+						None => {
+							println!("ERROR: sendprobe requires a destination pubkey: `sendprobe <dest_pubkey> <amt_msat>`");
+							continue;
+						}
+					};
+					let amt_msat_str = match words.next() {
+						Some(amt) => amt,
+						None => {
+							println!("ERROR: sendprobe requires an amount in millisatoshis: `sendprobe <dest_pubkey> <amt_msat>`");
+							continue;
+						}
+					};
+					let amt_msat: u64 = match amt_msat_str.parse() {
+						Ok(amt) => amt,
+						Err(e) => {
+							println!("ERROR: couldn't parse amount_msat: {}", e);
+							continue;
+						}
+					};
+					send_probe(
+						&channel_manager,
+						dest_pubkey,
+						amt_msat,
+						&network_graph,
+						Arc::clone(&logger),
+						&*keys_manager,
 					);
 				}
 				"keysend" => {
@@ -479,6 +521,7 @@ fn help() {
 	println!("\n  Payments:");
 	println!("      sendpayment <invoice>");
 	println!("      keysend <dest_pubkey> <amt_msats>");
+	println!("      sendprobe <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
 	println!("      getinvoice <amt_msats> <expiry_secs>");
@@ -711,7 +754,63 @@ fn send_payment(
 		}
 	};
 }
+fn send_probe<E: EntropySource>(
+	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64,
+	network_graph: &NetworkGraph, logger: Arc<disk::FilesystemLogger>, entropy_source: &E,
+) {
+	let max_retries = 5;
+	let decay_params = ProbabilisticScoringDecayParameters::default();
+	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scorer = ProbabilisticScorer::new(decay_params, network_graph, Arc::clone(&logger));
 
+	let random_seed_bytes = entropy_source.get_secure_random_bytes();
+
+	let payment_params = PaymentParameters::from_node_id(payee_pubkey, 144);
+
+	let route_params = RouteParameters { payment_params, final_value_msat: amt_msat };
+
+	let route = find_route(
+		&channel_manager.get_our_node_id(),
+		&route_params,
+		&network_graph,
+		None,
+		Arc::clone(&logger),
+		&scorer,
+		&scoring_fee_params,
+		&random_seed_bytes,
+	);
+
+	let mut attempts = 0;
+	match route {
+		Ok(route) => {
+			for path in route.paths {
+				if attempts > max_retries {
+					break;
+				}
+				match channel_manager.send_probe(path) {
+					Ok((payment_hash, payment_id)) => {
+						println!(
+							"EVENT: initiated probe of {} msats to {}",
+							amt_msat, payee_pubkey
+						);
+						print!("> ");
+					}
+					Err(payment_send_failure) => {
+						println!("ERROR: failed probe of {} msats to {}", amt_msat, payee_pubkey);
+						print!("> ");
+						// outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+						// persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments).unwrap();
+					}
+				}
+
+				attempts += 1;
+			}
+		}
+		Err(error) => {
+			println!("Could not generate route of {} msats to {}", amt_msat, payee_pubkey);
+		}
+	}
+}
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
 	outbound_payments: &mut PaymentInfoStorage, persister: Arc<FilesystemPersister>,
