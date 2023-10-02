@@ -798,8 +798,6 @@ fn send_probe<E: EntropySource>(
 					Err(payment_send_failure) => {
 						println!("ERROR: failed probe of {} msats to {}", amt_msat, payee_pubkey);
 						print!("> ");
-						// outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
-						// persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments).unwrap();
 					}
 				}
 
