@@ -41,6 +41,8 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_listen_addr: Vec<NetAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
+	pub(crate) priv_key: String,
+	pub(crate) channel_secrets: String,
 }
 
 struct UserOnionMessageContents {

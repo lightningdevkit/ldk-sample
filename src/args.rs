@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	if env::args().len() < 3 {
-		println!("ldk-tutorial-node requires at least 2 arguments: `cargo run [<bitcoind-rpc-username>:<bitcoind-rpc-password>@]<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*]`");
+		println!("ldk-tutorial-node requires at least 2 arguments: `cargo run [<bitcoind-rpc-username>:<bitcoind-rpc-password>@]<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [custom-private-key] [custom-channel-secrets] [announced-node-name announced-listen-addr*]`");
 		return Err(());
 	}
 	let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
@@ -69,6 +69,28 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		println!("ERROR: bad bitcoind RPC URL provided");
 		return Err(());
 	};
+	
+	let priv_key = match env::args().skip(arg_idx + 1).next() {
+		Some(s) => {
+			if s.len() != 64 {
+				panic!("Private key should be equal to 64 bytes");
+			}
+			arg_idx += 1;
+			s
+		}
+		None => "".to_owned(),
+	};
+
+	let channel_secrets = match env::args().skip(arg_idx + 1).next() {
+		Some(s) => {
+			if s.len() != 389 {
+				panic!("Channel secrets should be seperated by '/' and total string length should be 389");
+			}
+			arg_idx += 1;
+			s
+		}
+		None => "".to_owned(),
+	};
 
 	let ldk_announced_node_name = match env::args().skip(arg_idx + 1).next().as_ref() {
 		Some(s) => {
@@ -113,6 +135,9 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		ldk_announced_listen_addr,
 		ldk_announced_node_name,
 		network,
+		priv_key,
+		channel_secrets,
+
 	})
 }
 

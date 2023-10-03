@@ -33,6 +33,7 @@ use core::sync::atomic::AtomicUsize;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::sign::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
 	SpendableOutputDescriptor, SignerProvider, NodeSigner};
+use lightning::chain;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
@@ -280,6 +281,16 @@ pub fn sign_with_aux_rand<C: Signing, ES: Deref>(
 	sig
 }
 
+fn convert_to_array<T>(v: Vec<T>) -> [T; 32] {
+    let boxed_slice = v.into_boxed_slice();
+    let boxed_array: Box<[T; 32]> = match boxed_slice.try_into() {
+        Ok(ba) => ba,
+        Err(o) => panic!("Expected a Vec of length {} but it was {}", 32, o.len()),
+    };
+    *boxed_array
+}
+
+
 ////////////////////////////////////////////MyKeysManager////////////////////////////////
 
 pub struct MyKeysManager {
@@ -298,20 +309,24 @@ pub struct MyKeysManager {
 	seed: [u8; 32],
 	starting_time_secs: u64,
 	starting_time_nanos: u32,
+	channel_secrets: String,
 }
 
 impl MyKeysManager {
 	/// Constructs a [`KeysManager`] using custom channel secrets
-	pub fn new(seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32) -> Self {
+	pub fn new(seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, priv_key: String, channel_secrets: String) -> Self {
 		let secp_ctx = Secp256k1::new();
 		// Note that when we aren't serializing the key, network doesn't matter
 		match ExtendedPrivKey::new_master(Network::Testnet, seed) {
 			Ok(master_key) => {
-				//let node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
-				// **private key
-                let node_secret= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
-                // **public key
-				// 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+				let node_secret;
+				if priv_key.len() != 0 {
+                	node_secret= SecretKey::from_str(&priv_key).unwrap();
+				}
+				else {
+					node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
+				}
+
                 let node_id = PublicKey::from_secret_key(&secp_ctx, &node_secret);
 				let destination_script = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap()) {
 					Ok(destination_key) => {
@@ -356,6 +371,7 @@ impl MyKeysManager {
 					seed: *seed,
 					starting_time_secs,
 					starting_time_nanos,
+					channel_secrets,
 				};
 				let secp_seed = res.get_secure_random_bytes();
 				res.secp_ctx.seeded_randomize(&secp_seed);
@@ -372,14 +388,53 @@ impl MyKeysManager {
 
 	/// Derive an old [`WriteableEcdsaChannelSigner`] containing per-channel secrets.
 	pub fn derive_channel_keys(&self, channel_value_satoshis: u64, params: &[u8; 32]) -> InMemorySigner {
+		let chan_id = u64::from_be_bytes(params[0..8].try_into().unwrap());
+		let mut unique_start = Sha256::engine();
+		unique_start.input(params);
+		unique_start.input(&self.seed);
 
-		let commitment_seed: [u8;32] = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
-		let funding_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000010").unwrap();
-		let revocation_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000011").unwrap();
-		let payment_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000012").unwrap();
-		let delayed_payment_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000013").unwrap();
-		let htlc_base_key= SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000014").unwrap();
-		let prng_seed = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+		// We only seriously intend to rely on the channel_master_key for true secure
+		// entropy, everything else just ensures uniqueness. We rely on the unique_start (ie
+		// starting_time provided in the constructor) to be unique.
+		let child_privkey = self.channel_master_key.ckd_priv(&self.secp_ctx,
+				ChildNumber::from_hardened_idx((chan_id as u32) % (1 << 31)).expect("key space exhausted")
+			).expect("Your RNG is busted");
+		unique_start.input(&child_privkey.private_key[..]);
+
+		let seed = Sha256::from_engine(unique_start).into_inner();
+
+		let mut commitment_seed = {
+			let mut sha = Sha256::engine();
+			sha.input(&seed);
+			sha.input(&b"commitment seed"[..]);
+			Sha256::from_engine(sha).into_inner()
+		};
+		macro_rules! key_step {
+			($info: expr, $prev_key: expr) => {{
+				let mut sha = Sha256::engine();
+				sha.input(&seed);
+				sha.input(&$prev_key[..]);
+				sha.input(&$info[..]);
+				SecretKey::from_slice(&Sha256::from_engine(sha).into_inner()).expect("SHA-256 is busted")
+			}}
+		}
+		let mut funding_key = key_step!(b"funding key", commitment_seed);
+		let mut revocation_base_key = key_step!(b"revocation base key", funding_key);
+		let mut payment_key = key_step!(b"payment key", revocation_base_key);
+		let mut delayed_payment_base_key = key_step!(b"delayed payment base key", payment_key);
+		let mut htlc_base_key = key_step!(b"HTLC base key", delayed_payment_base_key);
+		let prng_seed = self.get_secure_random_bytes();
+
+		if self.channel_secrets.len() != 0 {
+			let keys:Vec<&str>=self.channel_secrets.split('/').collect();
+			commitment_seed = convert_to_array(hex_utils::to_vec(keys[5]).unwrap());
+			funding_key = SecretKey::from_str(keys[0]).unwrap();
+			revocation_base_key= SecretKey::from_str(keys[1]).unwrap();
+			payment_key= SecretKey::from_str(keys[2]).unwrap();
+			delayed_payment_base_key= SecretKey::from_str(keys[3]).unwrap();
+			htlc_base_key= SecretKey::from_str(keys[4]).unwrap();
+		}
+
 
 		InMemorySigner::new(
 			&self.secp_ctx,
@@ -591,7 +646,7 @@ type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 	Arc<BitcoindClient>,
 	Arc<Wallet<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
-	Arc<KeysManager>,
+	Arc<MyKeysManager>,
 	Arc<FilesystemLogger>,
 >;
 
@@ -1012,7 +1067,7 @@ async fn start_ldk() {
 	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 
 	//println!("{}",keys_manager.get_node_secret_key().display_secret());
-	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
+	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos(), args.priv_key.clone(), args.channel_secrets.clone()));
 
 	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 		Arc::clone(&broadcaster),
