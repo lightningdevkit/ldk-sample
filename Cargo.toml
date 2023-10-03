@@ -20,7 +20,6 @@ base64 = "0.13.0"
 bitcoin = "0.29.0"
 bitcoin-bech32 = "0.12"
 bech32 = "0.8"
-hex = "0.3"
 libc = "0.2"
 
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

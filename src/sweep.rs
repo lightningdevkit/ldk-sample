@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{fs, io};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::sign::{EntropySource, KeysManager, SpendableOutputDescriptor};
+use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Readable, WithoutLength};
@@ -18,6 +18,7 @@ use crate::BitcoindClient;
 use crate::ChannelManager;
 use crate::FilesystemLogger;
 use crate::FilesystemPersister;
+use crate::MyKeysManager;
 
 /// If we have any pending claimable outputs, we should slowly sweep them to our Bitcoin Core
 /// wallet. We technically don't need to do this - they're ours to spend when we want and can just
@@ -28,7 +29,7 @@ use crate::FilesystemPersister;
 /// an associated secret key we could simply import into Bitcoin Core's wallet, but for consistency
 /// we don't do that here either.
 pub(crate) async fn periodic_sweep(
-	ldk_data_dir: String, keys_manager: Arc<KeysManager>, logger: Arc<FilesystemLogger>,
+	ldk_data_dir: String, keys_manager: Arc<MyKeysManager>, logger: Arc<FilesystemLogger>,
 	persister: Arc<FilesystemPersister>, bitcoind_client: Arc<BitcoindClient>,
 	channel_manager: Arc<ChannelManager>,
 ) {

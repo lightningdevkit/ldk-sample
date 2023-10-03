@@ -2,7 +2,7 @@ use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
 	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	PaymentInfoStorage, PeerManager, MyKeysManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -15,7 +15,7 @@ use lightning::onion_message::OnionMessagePath;
 use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
-use lightning::sign::{EntropySource, KeysManager};
+use lightning::sign::EntropySource;
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Writeable, Writer};
@@ -41,12 +41,15 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_listen_addr: Vec<NetAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
+	pub(crate) priv_key: String,
+	pub(crate) channel_secrets: String,
 }
 
 struct UserOnionMessageContents {
 	tlv_type: u64,
 	data: Vec<u8>,
 }
+
 
 impl CustomOnionMessageContents for UserOnionMessageContents {
 	fn tlv_type(&self) -> u64 {
@@ -62,7 +65,7 @@ impl Writeable for UserOnionMessageContents {
 
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
-	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
+	keys_manager: Arc<MyKeysManager>, network_graph: Arc<NetworkGraph>,
 	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, ldk_data_dir: String, network: Network,
 	logger: Arc<disk::FilesystemLogger>, persister: Arc<FilesystemPersister>,
@@ -88,7 +91,48 @@ pub(crate) fn poll_for_user_input(
 		let mut words = line.split_whitespace();
 		if let Some(word) = words.next() {
 			match word {
-				"help" => help(),
+				"help" => help(),				
+				"openchannel_without_peer_addr" => {
+					// opens a channel with a connected node
+					let peer_pubkey = words.next();
+					let channel_value_sat = words.next();
+					if peer_pubkey.is_none() || channel_value_sat.is_none() {
+						println!("ERROR: openchannel_without_peer_addr has 2 required arguments: `openchannel_test pubkey channel_amt_satoshis` [--public]");
+						continue;
+					}
+					let peer_pubkey = peer_pubkey.unwrap();
+					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
+					if chan_amt_sat.is_err() {
+						println!("ERROR: channel amount must be a number");
+						continue;
+					}
+
+					let announce_channel = match words.next() {
+						Some("--public") | Some("--public=true") => true,
+						Some("--public=false") => false,
+						Some(_) => {
+							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
+							continue;
+						}
+						None => false,
+					};
+					let pubkey = peer_pubkey;
+					let pubkey = hex_utils::to_compressed_pubkey(pubkey);
+					if open_channel_without_addr(
+						pubkey.unwrap(),
+						chan_amt_sat.unwrap(),
+						announce_channel,
+						channel_manager.clone(),
+					)
+					.is_ok()
+					{
+						// let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+						// let _ = disk::persist_channel_peer(
+						// 	Path::new(&peer_data_path),
+						// 	peer_pubkey,
+						// );
+					}
+				},
 				"openchannel" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
@@ -488,6 +532,7 @@ fn help() {
 		"      sendonionmessage <node_id_1,node_id_2,..,destination_node_id> <type> <hex_bytes>"
 	);
 	println!("      nodeinfo");
+	println!("exit");
 }
 
 fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
@@ -650,6 +695,35 @@ fn do_disconnect_peer(
 	Ok(())
 }
 
+fn open_channel_without_addr(
+	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool,
+	channel_manager: Arc<ChannelManager>,
+) -> Result<(), ()> {
+	let config = UserConfig {
+		channel_handshake_limits: ChannelHandshakeLimits {
+			// lnd's max to_self_delay is 2016, so we want to be compatible.
+			their_to_self_delay: 2016,
+			..Default::default()
+		},
+		channel_handshake_config: ChannelHandshakeConfig {
+			announced_channel,
+			..Default::default()
+		},
+		..Default::default()
+	};
+
+	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, Some(config)) {
+		Ok(_) => {
+			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
+			return Ok(());
+		}
+		Err(e) => {
+			println!("ERROR: failed to open channel: {:?}", e);
+			return Err(());
+		}
+	}
+}
+
 fn open_channel(
 	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool, with_anchors: bool,
 	channel_manager: Arc<ChannelManager>,
@@ -755,7 +829,7 @@ fn keysend<E: EntropySource>(
 
 fn get_invoice(
 	amt_msat: u64, inbound_payments: &mut PaymentInfoStorage, channel_manager: &ChannelManager,
-	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32,
+	keys_manager: Arc<MyKeysManager>, network: Network, expiry_secs: u32,
 	logger: Arc<disk::FilesystemLogger>,
 ) {
 	let currency = match network {
@@ -845,3 +919,9 @@ pub(crate) fn parse_peer_info(
 
 	Ok((pubkey.unwrap(), peer_addr.unwrap().unwrap()))
 }
+
+// fn exit()
+// {
+// 	println!("Exiting LDK-Sample Node");
+// 	std::process::exit(0);
+// }

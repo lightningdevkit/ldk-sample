@@ -1,5 +1,6 @@
 mod args;
 pub mod bitcoind_client;
+mod chacha20;
 mod cli;
 mod convert;
 mod disk;
@@ -7,34 +8,56 @@ mod hex_utils;
 mod sweep;
 
 use crate::bitcoind_client::BitcoindClient;
+use crate::chacha20::ChaCha20;
 use crate::disk::FilesystemLogger;
-use bitcoin::blockdata::transaction::Transaction;
+use bitcoin::bech32::u5;
+use bitcoin::{BlockHash, PackedLockTime};
+use bitcoin::blockdata::opcodes;
+use bitcoin::blockdata::script::{Script, Builder};
+use bitcoin::blockdata::transaction::{Transaction, TxOut, EcdsaSighashType};
 use bitcoin::consensus::encode;
+use bitcoin::hashes::{Hash, HashEngine};
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::hash_types::WPubkeyHash;
 use bitcoin::network::constants::Network;
-use bitcoin::BlockHash;
+use bitcoin::psbt::PartiallySignedTransaction;
+use bitcoin::PublicKey as OtherPublicKey;
+use bitcoin::secp256k1::{ecdh::SharedSecret, ecdsa::RecoverableSignature, ecdsa::Signature, Message, PublicKey, Scalar, Secp256k1, SecretKey, Signing};
+use bitcoin::{secp256k1, Witness};
+use bitcoin::util::bip32::{ExtendedPrivKey, ExtendedPubKey, ChildNumber};
+use bitcoin::util::sighash;
 use bitcoin_bech32::WitnessProgram;
+use core::ops::Deref;
+use core::sync::atomic::AtomicUsize;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
+use lightning::sign::{InMemorySigner, EntropySource, Recipient, KeyMaterial, 
+	SpendableOutputDescriptor, SignerProvider, NodeSigner};
+use lightning::chain;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
-use lightning::ln::channelmanager::{self, RecentPaymentDetails};
-use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
-};
-use lightning::ln::msgs::DecodeError;
-use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
+use lightning::ln::channelmanager;
+use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
+use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
+use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
+use lightning::ln::peer_handler;
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
+use lightning::ln::script::ShutdownScript;
+use lightning::onion_message;
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
+use lightning::routing::scoring::ProbabilisticScorer;
+use lightning::ln::channelmanager::RecentPaymentDetails;
+use lightning::onion_message::DefaultMessageRouter;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
-use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
+use lightning::util::invoice::construct_invoice_preimage;
 use lightning::util::persist::KVStorePersister;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{ impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
@@ -52,10 +75,13 @@ use std::fs::File;
 use std::io;
 use std::io::Write;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+
+const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
 
 #[derive(Copy, Clone)]
@@ -126,6 +152,7 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<FilesystemPersister>,
 >;
 
+pub type SimpleArcPeerManager<SD, M, T, F, C, L> = peer_handler::PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<P2PGossipSync<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<C>, Arc<L>>>, Arc<SimpleArcOnionMessenger<L>>, Arc<L>, IgnoringMessageHandler, Arc<MyKeysManager>>;
 pub(crate) type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
@@ -134,24 +161,498 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	BitcoindClient,
 	FilesystemLogger,
 >;
-
+pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<
+	Arc<M>,
+	Arc<T>,
+	Arc<MyKeysManager>,
+	Arc<MyKeysManager>,
+	Arc<MyKeysManager>,
+	Arc<F>,
+	Arc<DefaultRouter<
+		Arc<gossip::NetworkGraph<Arc<L>>>,
+		Arc<L>,
+		Arc<Mutex<ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>>>,
+		ProbabilisticScoringFeeParameters,
+		ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>,
+	>>,
+	Arc<L>
+>;
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
+//////////////////////////////////////////////////Methods and structs required for MyKeysManager/////////////////////////////////////////////////////////////
+
+macro_rules! hash_to_message {
+	($slice: expr) => {
+		{
+			#[cfg(not(fuzzing))]
+			{
+				::bitcoin::secp256k1::Message::from_slice($slice).unwrap()
+			}
+			#[cfg(fuzzing)]
+			{
+				match ::bitcoin::secp256k1::Message::from_slice($slice) {
+					Ok(msg) => msg,
+					Err(_) => ::bitcoin::secp256k1::Message::from_slice(&[1; 32]).unwrap()
+				}
+			}
+		}
+	}
+}
+pub fn sign<C: Signing>(ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey) -> Signature {
+	#[cfg(feature = "grind_signatures")]
+	let sig = ctx.sign_ecdsa_low_r(msg, sk);
+	#[cfg(not(feature = "grind_signatures"))]
+	let sig = ctx.sign_ecdsa(msg, sk);
+	sig
+}
+
+pub fn be64_to_array(u: u64) -> [u8; 8] {
+	let mut v = [0; 8];
+	v[0] = ((u >> 8*7) & 0xff) as u8;
+	v[1] = ((u >> 8*6) & 0xff) as u8;
+	v[2] = ((u >> 8*5) & 0xff) as u8;
+	v[3] = ((u >> 8*4) & 0xff) as u8;
+	v[4] = ((u >> 8*3) & 0xff) as u8;
+	v[5] = ((u >> 8*2) & 0xff) as u8;
+	v[6] = ((u >> 8*1) & 0xff) as u8;
+	v[7] = ((u >> 8*0) & 0xff) as u8;
+	v
+}
+pub fn be32_to_array(u: u32) -> [u8; 4] {
+	let mut v = [0; 4];
+	v[0] = ((u >> 8*3) & 0xff) as u8;
+	v[1] = ((u >> 8*2) & 0xff) as u8;
+	v[2] = ((u >> 8*1) & 0xff) as u8;
+	v[3] = ((u >> 8*0) & 0xff) as u8;
+	v
+}
+pub fn slice_to_be64(v: &[u8]) -> u64 {
+	((v[0] as u64) << 8*7) |
+	((v[1] as u64) << 8*6) |
+	((v[2] as u64) << 8*5) |
+	((v[3] as u64) << 8*4) |
+	((v[4] as u64) << 8*3) |
+	((v[5] as u64) << 8*2) |
+	((v[6] as u64) << 8*1) |
+	((v[7] as u64) << 8*0)
+}
+pub(crate) struct AtomicCounter {
+	// Usize needs to be at least 32 bits to avoid overflowing both low and high. If usize is 64
+	// bits we will never realistically count into high:
+	counter_low: AtomicUsize,
+	counter_high: AtomicUsize,
+}
+
+impl AtomicCounter {
+	pub(crate) fn new() -> Self {
+		Self {
+			counter_low: AtomicUsize::new(0),
+			counter_high: AtomicUsize::new(0),
+		}
+	}
+	pub(crate) fn get_increment(&self) -> u64 {
+		let low = self.counter_low.fetch_add(1, Ordering::AcqRel) as u64;
+		let high = if low == 0 {
+			self.counter_high.fetch_add(1, Ordering::AcqRel) as u64
+		} else {
+			self.counter_high.load(Ordering::Acquire) as u64
+		};
+		(high << 32) | low
+	}
+}
+
+pub fn sign_with_aux_rand<C: Signing, ES: Deref>(
+	ctx: &Secp256k1<C>, msg: &Message, sk: &SecretKey, entropy_source: &ES
+) -> Signature where ES::Target: EntropySource {
+	#[cfg(feature = "grind_signatures")]
+	let sig = loop {
+		let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
+		if sig.serialize_compact()[0] < 0x80 {
+			break sig;
+		}
+	};
+	#[cfg(all(not(feature = "grind_signatures"), not(feature = "_test_vectors")))]
+	let sig = ctx.sign_ecdsa_with_noncedata(msg, sk, &entropy_source.get_secure_random_bytes());
+	#[cfg(all(not(feature = "grind_signatures"), feature = "_test_vectors"))]
+	let sig = sign(ctx, msg, sk);
+	sig
+}
+
+fn convert_to_array<T>(v: Vec<T>) -> [T; 32] {
+    let boxed_slice = v.into_boxed_slice();
+    let boxed_array: Box<[T; 32]> = match boxed_slice.try_into() {
+        Ok(ba) => ba,
+        Err(o) => panic!("Expected a Vec of length {} but it was {}", 32, o.len()),
+    };
+    *boxed_array
+}
+
+
+////////////////////////////////////////////MyKeysManager////////////////////////////////
+
+pub struct MyKeysManager {
+	secp_ctx: Secp256k1<secp256k1::All>,
+	node_secret: SecretKey,
+	node_id: PublicKey,
+	inbound_payment_key: KeyMaterial,
+	destination_script: Script,
+	shutdown_pubkey: PublicKey,
+	channel_master_key: ExtendedPrivKey,
+	channel_child_index: AtomicUsize,
+
+	rand_bytes_unique_start: [u8; 32],
+	rand_bytes_index: AtomicCounter,
+
+	seed: [u8; 32],
+	starting_time_secs: u64,
+	starting_time_nanos: u32,
+	channel_secrets: String,
+}
+
+impl MyKeysManager {
+	/// Constructs a [`KeysManager`] using custom channel secrets
+	pub fn new(seed: &[u8; 32], starting_time_secs: u64, starting_time_nanos: u32, priv_key: String, channel_secrets: String) -> Self {
+		let secp_ctx = Secp256k1::new();
+		// Note that when we aren't serializing the key, network doesn't matter
+		match ExtendedPrivKey::new_master(Network::Testnet, seed) {
+			Ok(master_key) => {
+				let node_secret;
+				if priv_key.len() != 0 {
+                	node_secret= SecretKey::from_str(&priv_key).unwrap();
+				}
+				else {
+					node_secret = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(0).unwrap()).expect("Your RNG is busted").private_key;
+				}
+
+                let node_id = PublicKey::from_secret_key(&secp_ctx, &node_secret);
+				let destination_script = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(1).unwrap()) {
+					Ok(destination_key) => {
+						let wpubkey_hash = WPubkeyHash::hash(&ExtendedPubKey::from_priv(&secp_ctx, &destination_key).to_pub().to_bytes());
+						Builder::new().push_opcode(opcodes::all::OP_PUSHBYTES_0)
+							.push_slice(&wpubkey_hash.into_inner())
+							.into_script()
+					},
+					Err(_) => panic!("Your RNG is busted"),
+				};
+				let shutdown_pubkey = match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(2).unwrap()) {
+					Ok(shutdown_key) => ExtendedPubKey::from_priv(&secp_ctx, &shutdown_key).public_key,
+					Err(_) => panic!("Your RNG is busted"),
+				};
+				let channel_master_key = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(3).unwrap()).expect("Your RNG is busted");
+				let inbound_payment_key: SecretKey = master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(5).unwrap()).expect("Your RNG is busted").private_key;
+				let mut inbound_pmt_key_bytes = [0; 32];
+				inbound_pmt_key_bytes.copy_from_slice(&inbound_payment_key[..]);
+
+				let mut rand_bytes_engine = Sha256::engine();
+				rand_bytes_engine.input(&starting_time_secs.to_be_bytes());
+				rand_bytes_engine.input(&starting_time_nanos.to_be_bytes());
+				rand_bytes_engine.input(seed);
+				rand_bytes_engine.input(b"LDK PRNG Seed");
+				let rand_bytes_unique_start = Sha256::from_engine(rand_bytes_engine).into_inner();
+
+				let mut res = MyKeysManager {
+					secp_ctx,
+					node_secret,
+					node_id,
+					inbound_payment_key: KeyMaterial(inbound_pmt_key_bytes),
+
+					destination_script,
+					shutdown_pubkey,
+
+					channel_master_key,
+					channel_child_index: AtomicUsize::new(0),
+
+					rand_bytes_unique_start,
+					rand_bytes_index: AtomicCounter::new(),
+
+					seed: *seed,
+					starting_time_secs,
+					starting_time_nanos,
+					channel_secrets,
+				};
+				let secp_seed = res.get_secure_random_bytes();
+				res.secp_ctx.seeded_randomize(&secp_seed);
+				res
+			},
+			Err(_) => panic!("Your rng is busted"),
+		}
+	}
+
+	/// Gets the "node_id" secret key used to sign gossip announcements, decode onion data, etc.
+	pub fn get_node_secret_key(&self) -> SecretKey {
+		self.node_secret
+	}
+
+	/// Derive an old [`WriteableEcdsaChannelSigner`] containing per-channel secrets.
+	pub fn derive_channel_keys(&self, channel_value_satoshis: u64, params: &[u8; 32]) -> InMemorySigner {
+		let chan_id = u64::from_be_bytes(params[0..8].try_into().unwrap());
+		let mut unique_start = Sha256::engine();
+		unique_start.input(params);
+		unique_start.input(&self.seed);
+
+		// We only seriously intend to rely on the channel_master_key for true secure
+		// entropy, everything else just ensures uniqueness. We rely on the unique_start (ie
+		// starting_time provided in the constructor) to be unique.
+		let child_privkey = self.channel_master_key.ckd_priv(&self.secp_ctx,
+				ChildNumber::from_hardened_idx((chan_id as u32) % (1 << 31)).expect("key space exhausted")
+			).expect("Your RNG is busted");
+		unique_start.input(&child_privkey.private_key[..]);
+
+		let seed = Sha256::from_engine(unique_start).into_inner();
+
+		let mut commitment_seed = {
+			let mut sha = Sha256::engine();
+			sha.input(&seed);
+			sha.input(&b"commitment seed"[..]);
+			Sha256::from_engine(sha).into_inner()
+		};
+		macro_rules! key_step {
+			($info: expr, $prev_key: expr) => {{
+				let mut sha = Sha256::engine();
+				sha.input(&seed);
+				sha.input(&$prev_key[..]);
+				sha.input(&$info[..]);
+				SecretKey::from_slice(&Sha256::from_engine(sha).into_inner()).expect("SHA-256 is busted")
+			}}
+		}
+		let mut funding_key = key_step!(b"funding key", commitment_seed);
+		let mut revocation_base_key = key_step!(b"revocation base key", funding_key);
+		let mut payment_key = key_step!(b"payment key", revocation_base_key);
+		let mut delayed_payment_base_key = key_step!(b"delayed payment base key", payment_key);
+		let mut htlc_base_key = key_step!(b"HTLC base key", delayed_payment_base_key);
+		let prng_seed = self.get_secure_random_bytes();
+
+		if self.channel_secrets.len() != 0 {
+			let keys:Vec<&str>=self.channel_secrets.split('/').collect();
+			commitment_seed = convert_to_array(hex_utils::to_vec(keys[5]).unwrap());
+			funding_key = SecretKey::from_str(keys[0]).unwrap();
+			revocation_base_key= SecretKey::from_str(keys[1]).unwrap();
+			payment_key= SecretKey::from_str(keys[2]).unwrap();
+			delayed_payment_base_key= SecretKey::from_str(keys[3]).unwrap();
+			htlc_base_key= SecretKey::from_str(keys[4]).unwrap();
+		}
+
+
+		InMemorySigner::new(
+			&self.secp_ctx,
+			funding_key,
+			revocation_base_key,
+			payment_key,
+			delayed_payment_base_key,
+			htlc_base_key,
+			commitment_seed,
+			channel_value_satoshis,
+			params.clone(),
+			prng_seed,
+		)
+	}
+
+	/// Signs the given [`PartiallySignedTransaction`] which spends the given [`SpendableOutputDescriptor`]s.
+	/// The resulting inputs will be finalized and the PSBT will be ready for broadcast if there
+	/// are no other inputs that need signing.
+	///
+	/// Returns `Err(())` if the PSBT is missing a descriptor or if we fail to sign.
+	///
+	/// May panic if the [`SpendableOutputDescriptor`]s were not generated by channels which used
+	/// this [`KeysManager`] or one of the [`InMemorySigner`] created by this [`KeysManager`].
+	pub fn sign_spendable_outputs_psbt<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], mut psbt: PartiallySignedTransaction, secp_ctx: &Secp256k1<C>) -> Result<PartiallySignedTransaction, ()> {
+		let mut keys_cache: Option<(InMemorySigner, [u8; 32])> = None;
+		for outp in descriptors {
+			match outp {
+				SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
+					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == descriptor.outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
+						keys_cache = Some((
+							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
+							descriptor.channel_keys_id));
+					}
+					let witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_counterparty_payment_input(&psbt.unsigned_tx, input_idx, &descriptor, &secp_ctx)?);
+					psbt.inputs[input_idx].final_script_witness = Some(witness);
+				},
+				SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
+					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == descriptor.outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					if keys_cache.is_none() || keys_cache.as_ref().unwrap().1 != descriptor.channel_keys_id {
+						keys_cache = Some((
+							self.derive_channel_keys(descriptor.channel_value_satoshis, &descriptor.channel_keys_id),
+							descriptor.channel_keys_id));
+					}
+					let witness = Witness::from_vec(keys_cache.as_ref().unwrap().0.sign_dynamic_p2wsh_input(&psbt.unsigned_tx, input_idx, &descriptor, &secp_ctx)?);
+					psbt.inputs[input_idx].final_script_witness = Some(witness);
+				},
+				SpendableOutputDescriptor::StaticOutput { ref outpoint, ref output } => {
+					let input_idx = psbt.unsigned_tx.input.iter().position(|i| i.previous_output == outpoint.into_bitcoin_outpoint()).ok_or(())?;
+					let derivation_idx = if output.script_pubkey == self.destination_script {
+						1
+					} else {
+						2
+					};
+					let secret = {
+						// Note that when we aren't serializing the key, network doesn't matter
+						match ExtendedPrivKey::new_master(Network::Testnet, &self.seed) {
+							Ok(master_key) => {
+								match master_key.ckd_priv(&secp_ctx, ChildNumber::from_hardened_idx(derivation_idx).expect("key space exhausted")) {
+									Ok(key) => key,
+									Err(_) => panic!("Your RNG is busted"),
+								}
+							}
+							Err(_) => panic!("Your rng is busted"),
+						}
+					};
+					let pubkey = ExtendedPubKey::from_priv(&secp_ctx, &secret).to_pub();
+					if derivation_idx == 2 {
+						assert_eq!(pubkey.inner, self.shutdown_pubkey);
+					}
+					let witness_script = bitcoin::Address::p2pkh(&pubkey, Network::Testnet).script_pubkey();
+					let payment_script = bitcoin::Address::p2wpkh(&pubkey, Network::Testnet).expect("uncompressed key found").script_pubkey();
+
+					if payment_script != output.script_pubkey { return Err(()); };
+
+					let sighash = hash_to_message!(&sighash::SighashCache::new(&psbt.unsigned_tx).segwit_signature_hash(input_idx, &witness_script, output.value, EcdsaSighashType::All).unwrap()[..]);
+					let sig = sign_with_aux_rand(secp_ctx, &sighash, &secret.private_key, &self);
+					let mut sig_ser = sig.serialize_der().to_vec();
+					sig_ser.push(EcdsaSighashType::All as u8);
+					let witness = Witness::from_vec(vec![sig_ser, pubkey.inner.serialize().to_vec()]);
+					psbt.inputs[input_idx].final_script_witness = Some(witness);
+				},
+			}
+		}
+
+		Ok(psbt)
+	}
+
+	/// Creates a [`Transaction`] which spends the given descriptors to the given outputs, plus an
+	/// output to the given change destination (if sufficient change value remains). The
+	/// transaction will have a feerate, at least, of the given value.
+	///
+	/// Returns `Err(())` if the output value is greater than the input value minus required fee,
+	/// if a descriptor was duplicated, or if an output descriptor `script_pubkey`
+	/// does not match the one we can spend.
+	///
+	/// We do not enforce that outputs meet the dust limit or that any output scripts are standard.
+	///
+	/// May panic if the [`SpendableOutputDescriptor`]s were not generated by channels which used
+	/// this [`KeysManager`] or one of the [`InMemorySigner`] created by this [`KeysManager`].
+	pub fn spend_spendable_outputs<C: Signing>(&self, descriptors: &[&SpendableOutputDescriptor], outputs: Vec<TxOut>, change_destination_script: Script, feerate_sat_per_1000_weight: u32, locktime: Option<PackedLockTime>, secp_ctx: &Secp256k1<C>) -> Result<Transaction, ()> {
+		let (mut psbt, expected_max_weight) = SpendableOutputDescriptor::create_spendable_outputs_psbt(descriptors, outputs, change_destination_script, feerate_sat_per_1000_weight, locktime)?;
+		psbt = self.sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)?;
+
+		let spend_tx = psbt.extract_tx();
+
+		debug_assert!(expected_max_weight >= spend_tx.weight());
+		// Note that witnesses with a signature vary somewhat in size, so allow
+		// `expected_max_weight` to overshoot by up to 3 bytes per input.
+		debug_assert!(expected_max_weight <= spend_tx.weight() + descriptors.len() * 3);
+
+		Ok(spend_tx)
+	}
+
+}
+
+impl EntropySource for MyKeysManager {
+	fn get_secure_random_bytes(&self) -> [u8; 32] {
+		let index = self.rand_bytes_index.get_increment();
+		let mut nonce = [0u8; 16];
+		nonce[..8].copy_from_slice(&index.to_be_bytes());
+		ChaCha20::get_single_block(&self.rand_bytes_unique_start, &nonce)
+	}
+}
+
+impl NodeSigner for MyKeysManager {
+	fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
+		match recipient {
+			Recipient::Node => Ok(self.node_id.clone()),
+			Recipient::PhantomNode => Err(())
+		}
+	}
+
+	fn ecdh(&self, recipient: Recipient, other_key: &PublicKey, tweak: Option<&Scalar>) -> Result<SharedSecret, ()> {
+		let mut node_secret = match recipient {
+			Recipient::Node => Ok(self.node_secret.clone()),
+			Recipient::PhantomNode => Err(())
+		}?;
+		if let Some(tweak) = tweak {
+			node_secret = node_secret.mul_tweak(tweak).map_err(|_| ())?;
+		}
+		Ok(SharedSecret::new(other_key, &node_secret))
+	}
+
+	fn get_inbound_payment_key_material(&self) -> KeyMaterial {
+		self.inbound_payment_key.clone()
+	}
+
+	fn sign_invoice(&self, hrp_bytes: &[u8], invoice_data: &[u5], recipient: Recipient) -> Result<RecoverableSignature, ()> {
+		let preimage = construct_invoice_preimage(&hrp_bytes, &invoice_data);
+		let secret = match recipient {
+			Recipient::Node => Ok(&self.node_secret),
+			Recipient::PhantomNode => Err(())
+		}?;
+		Ok(self.secp_ctx.sign_ecdsa_recoverable(&hash_to_message!(&Sha256::hash(&preimage)), secret))
+	}
+
+	fn sign_gossip_message(&self, msg: UnsignedGossipMessage) -> Result<Signature, ()> {
+		let msg_hash = hash_to_message!(&Sha256dHash::hash(&msg.encode()[..])[..]);
+		Ok(self.secp_ctx.sign_ecdsa(&msg_hash, &self.node_secret))
+	}
+}
+
+impl SignerProvider for MyKeysManager {
+	type Signer = InMemorySigner;
+
+	fn generate_channel_keys_id(&self, _inbound: bool, _channel_value_satoshis: u64, user_channel_id: u128) -> [u8; 32] {
+		let child_idx = self.channel_child_index.fetch_add(1, Ordering::AcqRel);
+		// `child_idx` is the only thing guaranteed to make each channel unique without a restart
+		// (though `user_channel_id` should help, depending on user behavior). If it manages to
+		// roll over, we may generate duplicate keys for two different channels, which could result
+		// in loss of funds. Because we only support 32-bit+ systems, assert that our `AtomicUsize`
+		// doesn't reach `u32::MAX`.
+		assert!(child_idx < core::u32::MAX as usize, "2^32 channels opened without restart");
+		let mut id = [0; 32];
+		id[0..4].copy_from_slice(&(child_idx as u32).to_be_bytes());
+		id[4..8].copy_from_slice(&self.starting_time_nanos.to_be_bytes());
+		id[8..16].copy_from_slice(&self.starting_time_secs.to_be_bytes());
+		id[16..32].copy_from_slice(&user_channel_id.to_be_bytes());
+		id
+	}
+
+	fn derive_channel_signer(&self, channel_value_satoshis: u64, channel_keys_id: [u8; 32]) -> Self::Signer {
+		self.derive_channel_keys(channel_value_satoshis, &channel_keys_id)
+	}
+
+	fn read_chan_signer(&self, reader: &[u8]) -> Result<Self::Signer, DecodeError> {
+		InMemorySigner::read(&mut io::Cursor::new(reader), self)
+	}
+
+	fn get_destination_script(&self) -> Result<Script, ()> {
+		Ok(self.destination_script.clone())
+	}
+
+	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
+		let other_publickey=OtherPublicKey::new(self.shutdown_pubkey.clone());
+		let other_wpubkeyhash=other_publickey.wpubkey_hash().unwrap();
+		Ok(ShutdownScript::new_p2wpkh(&other_wpubkeyhash))
+	}
+}
+
+pub type SimpleArcOnionMessenger<L> = onion_message::OnionMessenger<Arc<MyKeysManager>, Arc<MyKeysManager>,
+Arc<L>,
+Arc<DefaultMessageRouter>,
+IgnoringMessageHandler,
+IgnoringMessageHandler>;
 type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
 
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 	Arc<BitcoindClient>,
 	Arc<Wallet<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
-	Arc<KeysManager>,
+	Arc<MyKeysManager>,
 	Arc<FilesystemLogger>,
 >;
 
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
-	network_graph: &NetworkGraph, keys_manager: &KeysManager,
+	network_graph: &NetworkGraph, keys_manager: &MyKeysManager,
 	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
 	network: Network, event: Event,
@@ -564,7 +1065,9 @@ async fn start_ldk() {
 		key
 	};
 	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-	let keys_manager = Arc::new(KeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos()));
+
+	//println!("{}",keys_manager.get_node_secret_key().display_secret());
+	let keys_manager = Arc::new(MyKeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos(), args.priv_key.clone(), args.channel_secrets.clone()));
 
 	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 		Arc::clone(&broadcaster),
@@ -727,6 +1230,8 @@ async fn start_ldk() {
 		onion_message_handler: onion_messenger.clone(),
 		custom_message_handler: IgnoringMessageHandler {},
 	};
+	// println!("{}",lightning_msg_handler.chan_handler.provided_init_features(&keys_manager.get_node_id(Recipient::Node).unwrap()));
+	
 	let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
 		lightning_msg_handler,
 		current_time.try_into().unwrap(),
@@ -734,7 +1239,7 @@ async fn start_ldk() {
 		logger.clone(),
 		Arc::clone(&keys_manager),
 	));
-
+	
 	// ## Running LDK
 	// Step 16: Initialize networking
 
