@@ -12,6 +12,7 @@ use lightning::util::ser::{Readable, WithoutLength};
 
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{LockTime, PackedLockTime};
+use rand::{thread_rng, Rng};
 
 use crate::hex_utils;
 use crate::BitcoindClient;
@@ -111,7 +112,19 @@ pub(crate) async fn periodic_sweep(
 					bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Background);
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = channel_manager.current_best_block().height();
+				// Occasionally randomly pick a nLockTime even further back, so
+				// that transactions that are delayed after signing for whatever reason,
+				// e.g. high-latency mix networks and some CoinJoin implementations, have
+				// better privacy.
+				// Logic copied from core: https://github.com/bitcoin/bitcoin/blob/1d4846a8443be901b8a5deb0e357481af22838d0/src/wallet/spend.cpp#L936
+				let mut cur_height = channel_manager.current_best_block().height();
+
+				// 10% of the time
+				if thread_rng().gen_range(0, 10) == 0 {
+					// subtract random number between 0 and 100
+					cur_height = cur_height.saturating_sub(thread_rng().gen_range(0, 100));
+				}
+
 				let locktime: PackedLockTime =
 					LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
 
