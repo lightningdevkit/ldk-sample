@@ -24,7 +24,7 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
-use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
@@ -32,7 +32,7 @@ use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
 use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
-use lightning::util::persist::KVStorePersister;
+use lightning::util::persist::{self, KVStore, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync};
@@ -41,7 +41,7 @@ use lightning_block_sync::poll;
 use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
 use lightning_net_tokio::SocketDescriptor;
-use lightning_persister::FilesystemPersister;
+use lightning_persister::fs_store::FilesystemStore;
 use rand::{thread_rng, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
@@ -123,7 +123,25 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<BitcoindClient>,
 	Arc<BitcoindClient>,
 	Arc<FilesystemLogger>,
-	Arc<FilesystemPersister>,
+	Arc<
+		MonitorUpdatingPersister<
+			Arc<FilesystemStore>,
+			Arc<FilesystemLogger>,
+			Arc<KeysManager>,
+			Arc<KeysManager>,
+		>,
+	>,
+>;
+
+pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
+	lightning_block_sync::gossip::TokioSpawner,
+	Arc<lightning_block_sync::rpc::RpcClient>,
+	Arc<FilesystemLogger>,
+	SocketDescriptor,
+	Arc<ChannelManager>,
+	Arc<SimpleArcOnionMessenger<FilesystemLogger>>,
+	IgnoringMessageHandler,
+	Arc<KeysManager>,
 >;
 
 pub(crate) type PeerManager = SimpleArcPeerManager<
@@ -131,7 +149,7 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	ChainMonitor,
 	BitcoindClient,
 	BitcoindClient,
-	BitcoindClient,
+	GossipVerifier,
 	FilesystemLogger,
 >;
 
@@ -153,7 +171,7 @@ async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
 	bump_tx_event_handler: &BumpTxEventHandler, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, persister: &Arc<FilesystemPersister>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
 	network: Network, event: Event,
 ) {
 	match event {
@@ -218,8 +236,7 @@ async fn handle_ldk_events(
 		} => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
-				hex_utils::hex_str(&payment_hash.0),
-				amount_msat,
+				payment_hash, amount_msat,
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -229,11 +246,17 @@ async fn handle_ldk_events(
 			};
 			channel_manager.claim_funds(payment_preimage.unwrap());
 		}
-		Event::PaymentClaimed { payment_hash, purpose, amount_msat, receiver_node_id: _ } => {
+		Event::PaymentClaimed {
+			payment_hash,
+			purpose,
+			amount_msat,
+			receiver_node_id: _,
+			htlcs: _,
+			sender_intended_total_msat: _,
+		} => {
 			println!(
 				"\nEVENT: claimed payment from payment hash {} of {} millisatoshis",
-				hex_utils::hex_str(&payment_hash.0),
-				amount_msat,
+				payment_hash, amount_msat,
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
@@ -260,7 +283,7 @@ async fn handle_ldk_events(
 					});
 				}
 			}
-			persister.persist(INBOUND_PAYMENTS_FNAME, &*inbound).unwrap();
+			fs_store.write("", "", INBOUND_PAYMENTS_FNAME, &inbound.encode()).unwrap();
 		}
 		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 			let mut outbound = outbound_payments.lock().unwrap();
@@ -270,21 +293,21 @@ async fn handle_ldk_events(
 					payment.status = HTLCStatus::Succeeded;
 					println!(
 						"\nEVENT: successfully sent payment of {} millisatoshis{} from \
-								 payment hash {:?} with preimage {:?}",
+								 payment hash {} with preimage {}",
 						payment.amt_msat,
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
 						} else {
 							"".to_string()
 						},
-						hex_utils::hex_str(&payment_hash.0),
-						hex_utils::hex_str(&payment_preimage.0)
+						payment_hash,
+						payment_preimage
 					);
 					print!("> ");
 					io::stdout().flush().unwrap();
 				}
 			}
-			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
 		}
 		Event::OpenChannelRequest {
 			ref temporary_channel_id, ref counterparty_node_id, ..
@@ -301,14 +324,14 @@ async fn handle_ldk_events(
 			if let Err(e) = res {
 				print!(
 					"\nEVENT: Failed to accept inbound channel ({}) from {}: {:?}",
-					hex_utils::hex_str(&temporary_channel_id[..]),
+					temporary_channel_id,
 					hex_utils::hex_str(&counterparty_node_id.serialize()),
 					e,
 				);
 			} else {
 				print!(
 					"\nEVENT: Accepted inbound channel ({}) from {}",
-					hex_utils::hex_str(&temporary_channel_id[..]),
+					temporary_channel_id,
 					hex_utils::hex_str(&counterparty_node_id.serialize()),
 				);
 			}
@@ -321,8 +344,8 @@ async fn handle_ldk_events(
 		Event::ProbeFailed { .. } => {}
 		Event::PaymentFailed { payment_hash, reason, .. } => {
 			print!(
-				"\nEVENT: Failed to send payment to payment hash {:?}: {:?}",
-				hex_utils::hex_str(&payment_hash.0),
+				"\nEVENT: Failed to send payment to payment hash {}: {:?}",
+				payment_hash,
 				if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
 			);
 			print!("> ");
@@ -333,7 +356,7 @@ async fn handle_ldk_events(
 				let payment = outbound.payments.get_mut(&payment_hash).unwrap();
 				payment.status = HTLCStatus::Failed;
 			}
-			persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
 		}
 		Event::PaymentForwarded {
 			prev_channel_id,
@@ -346,7 +369,7 @@ async fn handle_ldk_events(
 			let nodes = read_only_network_graph.nodes();
 			let channels = channel_manager.list_channels();
 
-			let node_str = |channel_id: &Option<[u8; 32]>| match channel_id {
+			let node_str = |channel_id: &Option<ChannelId>| match channel_id {
 				None => String::new(),
 				Some(channel_id) => match channels.iter().find(|c| c.channel_id == *channel_id) {
 					None => String::new(),
@@ -363,9 +386,9 @@ async fn handle_ldk_events(
 					}
 				},
 			};
-			let channel_str = |channel_id: &Option<[u8; 32]>| {
+			let channel_str = |channel_id: &Option<ChannelId>| {
 				channel_id
-					.map(|channel_id| format!(" with channel {}", hex_utils::hex_str(&channel_id)))
+					.map(|channel_id| format!(" with channel {}", channel_id))
 					.unwrap_or_default()
 			};
 			let from_prev_str =
@@ -407,7 +430,7 @@ async fn handle_ldk_events(
 				forwarding_channel_manager.process_pending_htlc_forwards();
 			});
 		}
-		Event::SpendableOutputs { outputs } => {
+		Event::SpendableOutputs { outputs, channel_id: _ } => {
 			// SpendableOutputDescriptors, of which outputs is a vec of, are critical to keep track
 			// of! While a `StaticOutput` descriptor is just an output to a static, well-known key,
 			// other descriptors are not currently ever regenerated for you by LDK. Once we return
@@ -421,15 +444,13 @@ async fn handle_ldk_events(
 				let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
 				// Note that if the type here changes our read code needs to change as well.
 				let output: SpendableOutputDescriptor = output;
-				persister
-					.persist(&format!("{}/{}", PENDING_SPENDABLE_OUTPUT_DIR, key), &output)
-					.unwrap();
+				fs_store.write(PENDING_SPENDABLE_OUTPUT_DIR, "", &key, &output.encode()).unwrap();
 			}
 		}
 		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
 			println!(
 				"\nEVENT: Channel {} with peer {} is pending awaiting funding lock-in!",
-				hex_utils::hex_str(&channel_id),
+				channel_id,
 				hex_utils::hex_str(&counterparty_node_id.serialize()),
 			);
 			print!("> ");
@@ -443,16 +464,23 @@ async fn handle_ldk_events(
 		} => {
 			println!(
 				"\nEVENT: Channel {} with peer {} is ready to be used!",
-				hex_utils::hex_str(channel_id),
+				channel_id,
 				hex_utils::hex_str(&counterparty_node_id.serialize()),
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
 		}
-		Event::ChannelClosed { channel_id, reason, user_channel_id: _ } => {
+		Event::ChannelClosed {
+			channel_id,
+			reason,
+			user_channel_id: _,
+			counterparty_node_id,
+			channel_capacity_sats: _,
+		} => {
 			println!(
-				"\nEVENT: Channel {} closed due to: {:?}",
-				hex_utils::hex_str(&channel_id),
+				"\nEVENT: Channel {} with counterparty {} closed due to: {:?}",
+				channel_id,
+				counterparty_node_id.map(|id| format!("{}", id)).unwrap_or("".to_owned()),
 				reason
 			);
 			print!("> ");
@@ -526,19 +554,7 @@ async fn start_ldk() {
 	// broadcaster.
 	let broadcaster = bitcoind_client.clone();
 
-	// Step 4: Initialize Persist
-	let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
-
-	// Step 5: Initialize the ChainMonitor
-	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
-		None,
-		broadcaster.clone(),
-		logger.clone(),
-		fee_estimator.clone(),
-		persister.clone(),
-	));
-
-	// Step 6: Initialize the KeysManager
+	// Step 4: Initialize the KeysManager
 
 	// The key seed that we use to derive the node privkey (that corresponds to the node pubkey) and
 	// other secret key material.
@@ -573,9 +589,35 @@ async fn start_ldk() {
 		Arc::clone(&logger),
 	));
 
+	// Step 5: Initialize Persistence
+	let fs_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
+	let persister = Arc::new(MonitorUpdatingPersister::new(
+		Arc::clone(&fs_store),
+		Arc::clone(&logger),
+		1000,
+		Arc::clone(&keys_manager),
+		Arc::clone(&keys_manager),
+	));
+	// Alternatively, you can use the `FilesystemStore` as a `Persist` directly, at the cost of
+	// larger `ChannelMonitor` update writes (but no deletion or cleanup):
+	//let persister = Arc::clone(&fs_store);
+
+	// Step 6: Initialize the ChainMonitor
+	let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+		None,
+		Arc::clone(&broadcaster),
+		Arc::clone(&logger),
+		Arc::clone(&fee_estimator),
+		Arc::clone(&persister),
+	));
+
 	// Step 7: Read ChannelMonitor state from disk
-	let mut channelmonitors =
-		persister.read_channelmonitors(keys_manager.clone(), keys_manager.clone()).unwrap();
+	let mut channelmonitors = persister
+		.read_all_channel_monitors_with_updates(&bitcoind_client, &bitcoind_client)
+		.unwrap();
+	// If you are using the `FilesystemStore` as a `Persist` directly, use
+	// `lightning::util::persist::read_channel_monitors` like this:
+	//read_channel_monitors(Arc::clone(&persister), Arc::clone(&keys_manager), Arc::clone(&keys_manager)).unwrap();
 
 	// Step 8: Poll for the best chain tip, which may be used by the channel manager & spv client
 	let polled_chain_tip = init::validate_best_block_header(bitcoind_client.as_ref())
@@ -588,7 +630,7 @@ async fn start_ldk() {
 		Arc::new(disk::read_network(Path::new(&network_graph_path), args.network, logger.clone()));
 
 	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
-	let scorer = Arc::new(Mutex::new(disk::read_scorer(
+	let scorer = Arc::new(RwLock::new(disk::read_scorer(
 		Path::new(&scorer_path),
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
@@ -697,16 +739,13 @@ async fn start_ldk() {
 		let funding_outpoint = item.2;
 		assert_eq!(
 			chain_monitor.watch_channel(funding_outpoint, channel_monitor),
-			ChannelMonitorUpdateStatus::Completed
+			Ok(ChannelMonitorUpdateStatus::Completed)
 		);
 	}
 
 	// Step 14: Optional: Initialize the P2PGossipSync
-	let gossip_sync = Arc::new(P2PGossipSync::new(
-		Arc::clone(&network_graph),
-		None::<Arc<BitcoindClient>>,
-		logger.clone(),
-	));
+	let gossip_sync =
+		Arc::new(P2PGossipSync::new(Arc::clone(&network_graph), None, Arc::clone(&logger)));
 
 	// Step 15: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
@@ -734,6 +773,15 @@ async fn start_ldk() {
 		logger.clone(),
 		Arc::clone(&keys_manager),
 	));
+
+	// Install a GossipVerifier in in the P2PGossipSync
+	let utxo_lookup = GossipVerifier::new(
+		Arc::clone(&bitcoind_client.bitcoind_rpc_client),
+		lightning_block_sync::gossip::TokioSpawner,
+		Arc::clone(&gossip_sync),
+		Arc::clone(&peer_manager),
+	);
+	gossip_sync.add_utxo_lookup(Some(utxo_lookup));
 
 	// ## Running LDK
 	// Step 16: Initialize networking
@@ -790,8 +838,9 @@ async fn start_ldk() {
 		.into_iter()
 		.filter_map(|p| match p {
 			RecentPaymentDetails::Pending { payment_hash, .. } => Some(payment_hash),
-			RecentPaymentDetails::Fulfilled { payment_hash } => payment_hash,
-			RecentPaymentDetails::Abandoned { payment_hash } => Some(payment_hash),
+			RecentPaymentDetails::Fulfilled { payment_hash, .. } => payment_hash,
+			RecentPaymentDetails::Abandoned { payment_hash, .. } => Some(payment_hash),
+			RecentPaymentDetails::AwaitingInvoice { payment_id: _ } => todo!(),
 		})
 		.collect::<Vec<PaymentHash>>();
 	for (payment_hash, payment_info) in outbound_payments
@@ -805,7 +854,9 @@ async fn start_ldk() {
 			payment_info.status = HTLCStatus::Failed;
 		}
 	}
-	persister.persist(OUTBOUND_PAYMENTS_FNAME, &*outbound_payments.lock().unwrap()).unwrap();
+	fs_store
+		.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.lock().unwrap().encode())
+		.unwrap();
 
 	// Step 18: Handle LDK Events
 	let channel_manager_event_listener = Arc::clone(&channel_manager);
@@ -814,7 +865,7 @@ async fn start_ldk() {
 	let keys_manager_event_listener = Arc::clone(&keys_manager);
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
 	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
-	let persister_event_listener = Arc::clone(&persister);
+	let fs_store_event_listener = Arc::clone(&fs_store);
 	let network = args.network;
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
@@ -824,7 +875,7 @@ async fn start_ldk() {
 		let bump_tx_event_handler = Arc::clone(&bump_tx_event_handler);
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
-		let persister_event_listener = Arc::clone(&persister_event_listener);
+		let fs_store_event_listener = Arc::clone(&fs_store_event_listener);
 		async move {
 			handle_ldk_events(
 				&channel_manager_event_listener,
@@ -834,7 +885,7 @@ async fn start_ldk() {
 				&bump_tx_event_handler,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
-				&persister_event_listener,
+				&fs_store_event_listener,
 				network,
 				event,
 			)
@@ -843,7 +894,7 @@ async fn start_ldk() {
 	};
 
 	// Step 19: Persist ChannelManager and NetworkGraph
-	let persister = Arc::new(FilesystemPersister::new(ldk_data_dir.clone()));
+	let persister = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
 
 	// Step 20: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
@@ -871,7 +922,7 @@ async fn start_ldk() {
 	// Regularly reconnect to channel peers.
 	let connect_cm = Arc::clone(&channel_manager);
 	let connect_pm = Arc::clone(&peer_manager);
-	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir);
 	let stop_connect = Arc::clone(&stop_listen_connect);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -979,7 +1030,14 @@ async fn start_ldk() {
 	peer_manager.disconnect_all_peers();
 
 	if let Err(e) = bg_res {
-		let persist_res = persister.persist("manager", &*channel_manager).unwrap();
+		let persist_res = persister
+			.write(
+				persist::CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				persist::CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				persist::CHANNEL_MANAGER_PERSISTENCE_KEY,
+				&channel_manager.encode(),
+			)
+			.unwrap();
 		use lightning::util::logger::Logger;
 		lightning::log_error!(
 			&*logger,

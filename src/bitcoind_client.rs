@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub struct BitcoindClient {
-	bitcoind_rpc_client: Arc<RpcClient>,
+	pub(crate) bitcoind_rpc_client: Arc<RpcClient>,
 	host: String,
 	port: u16,
 	rpc_user: String,

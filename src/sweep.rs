@@ -7,8 +7,10 @@ use std::{fs, io};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::sign::{EntropySource, KeysManager, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
-use lightning::util::persist::KVStorePersister;
-use lightning::util::ser::{Readable, WithoutLength};
+use lightning::util::persist::KVStore;
+use lightning::util::ser::{Readable, WithoutLength, Writeable};
+
+use lightning_persister::fs_store::FilesystemStore;
 
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{LockTime, PackedLockTime};
@@ -18,7 +20,6 @@ use crate::hex_utils;
 use crate::BitcoindClient;
 use crate::ChannelManager;
 use crate::FilesystemLogger;
-use crate::FilesystemPersister;
 
 /// If we have any pending claimable outputs, we should slowly sweep them to our Bitcoin Core
 /// wallet. We technically don't need to do this - they're ours to spend when we want and can just
@@ -30,7 +31,7 @@ use crate::FilesystemPersister;
 /// we don't do that here either.
 pub(crate) async fn periodic_sweep(
 	ldk_data_dir: String, keys_manager: Arc<KeysManager>, logger: Arc<FilesystemLogger>,
-	persister: Arc<FilesystemPersister>, bitcoind_client: Arc<BitcoindClient>,
+	persister: Arc<FilesystemStore>, bitcoind_client: Arc<BitcoindClient>,
 	channel_manager: Arc<ChannelManager>,
 ) {
 	// Regularly claim outputs which are exclusively spendable by us and send them to Bitcoin Core.
@@ -79,7 +80,7 @@ pub(crate) async fn periodic_sweep(
 			if !outputs.is_empty() {
 				let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
 				persister
-					.persist(&format!("spendable_outputs/{}", key), &WithoutLength(&outputs))
+					.write("spendable_outputs", "", &key, &WithoutLength(&outputs).encode())
 					.unwrap();
 				fs::remove_dir_all(&processing_spendables_dir).unwrap();
 			}
