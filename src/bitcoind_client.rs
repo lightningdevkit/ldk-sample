@@ -15,7 +15,6 @@ use bitcoin::{OutPoint, Script, TxOut, WPubkeyHash, XOnlyPublicKey};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::log_error;
-use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::Logger;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
@@ -293,13 +292,6 @@ impl BroadcasterInterface for BitcoindClient {
 					}
 			});
 		}
-	}
-}
-
-impl UtxoLookup for BitcoindClient {
-	fn get_utxo(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
-		// P2PGossipSync takes None for a UtxoLookup, so this will never be called.
-		todo!();
 	}
 }
 
