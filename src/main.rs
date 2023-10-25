@@ -203,7 +203,7 @@ async fn handle_ldk_events(
 			// satisfied.
 			let funded_tx = bitcoind_client.fund_raw_transaction(raw_tx).await;
 
-			// Sign the final funding transaction and broadcast it.
+			// Sign the final funding transaction and give it to LDK, who will eventually broadcast it.
 			let signed_tx = bitcoind_client.sign_raw_transaction_with_wallet(funded_tx.hex).await;
 			assert_eq!(signed_tx.complete, true);
 			let final_tx: Transaction =
