@@ -109,8 +109,8 @@ pub(crate) async fn periodic_sweep(
 				}
 				let destination_address = bitcoind_client.get_new_address().await;
 				let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
-				let tx_feerate =
-					bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Background);
+				let tx_feerate = bitcoind_client
+					.get_est_sat_per_1000_weight(ConfirmationTarget::ChannelCloseMinimum);
 
 				// We set nLockTime to the current height to discourage fee sniping.
 				// Occasionally randomly pick a nLockTime even further back, so

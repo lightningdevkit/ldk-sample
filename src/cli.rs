@@ -1,8 +1,8 @@
 use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount, NetworkGraph,
+	OnionMessenger, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -12,7 +12,7 @@ use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
 use lightning::onion_message::OnionMessagePath;
-use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
+use lightning::onion_message::{Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
@@ -48,7 +48,7 @@ struct UserOnionMessageContents {
 	data: Vec<u8>,
 }
 
-impl CustomOnionMessageContents for UserOnionMessageContents {
+impl OnionMessageContents for UserOnionMessageContents {
 	fn tlv_type(&self) -> u64 {
 		self.tlv_type
 	}
@@ -63,9 +63,9 @@ impl Writeable for UserOnionMessageContents {
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
-	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, ldk_data_dir: String, network: Network,
-	logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
+	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
+	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -445,7 +445,7 @@ pub(crate) fn poll_for_user_input(
 					let message_path = OnionMessagePath { intermediate_nodes, destination };
 					match onion_messenger.send_onion_message(
 						message_path,
-						OnionMessageContents::Custom(UserOnionMessageContents { tlv_type, data }),
+						UserOnionMessageContents { tlv_type, data },
 						None,
 					) {
 						Ok(()) => println!("SUCCESS: forwarded onion message to first hop"),
@@ -553,7 +553,9 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 	println!("]");
 }
 
-fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage) {
+fn list_payments(
+	inbound_payments: &InboundPaymentInfoStorage, outbound_payments: &OutboundPaymentInfoStorage,
+) {
 	print!("[");
 	for (payment_hash, payment_info) in &inbound_payments.payments {
 		println!("");
@@ -684,12 +686,12 @@ fn open_channel(
 
 fn send_payment(
 	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
-	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
-	let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+	let payment_id = PaymentId((*invoice.payment_hash()).into_inner());
 	let payment_secret = Some(*invoice.payment_secret());
 	outbound_payments.payments.insert(
-		payment_hash,
+		payment_id,
 		PaymentInfo {
 			preimage: None,
 			secret: payment_secret,
@@ -708,7 +710,7 @@ fn send_payment(
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
-			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		}
 	};
@@ -716,17 +718,17 @@ fn send_payment(
 
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
-	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
+	let payment_id = PaymentId(Sha256::hash(&payment_preimage.0[..]).into_inner());
 
 	let route_params = RouteParameters::from_payment_params_and_value(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false),
 		amt_msat,
 	);
 	outbound_payments.payments.insert(
-		payment_hash,
+		payment_id,
 		PaymentInfo {
 			preimage: None,
 			secret: None,
@@ -738,7 +740,7 @@ fn keysend<E: EntropySource>(
 	match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
-		PaymentId(payment_hash.0),
+		payment_id,
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
@@ -749,16 +751,16 @@ fn keysend<E: EntropySource>(
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
-			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		}
 	};
 }
 
 fn get_invoice(
-	amt_msat: u64, inbound_payments: &mut PaymentInfoStorage, channel_manager: &ChannelManager,
-	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32,
-	logger: Arc<disk::FilesystemLogger>,
+	amt_msat: u64, inbound_payments: &mut InboundPaymentInfoStorage,
+	channel_manager: &ChannelManager, keys_manager: Arc<KeysManager>, network: Network,
+	expiry_secs: u32, logger: Arc<disk::FilesystemLogger>,
 ) {
 	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,
