@@ -27,7 +27,7 @@ impl FilesystemLogger {
 	}
 }
 impl Logger for FilesystemLogger {
-	fn log(&self, record: &Record) {
+	fn log(&self, record: Record) {
 		let raw_log = record.args.to_string();
 		let log = format!(
 			"{} {:<5} [{}:{}] {}\n",

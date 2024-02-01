@@ -25,7 +25,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
+use lightning::onion_message::messenger::{DefaultMessageRouter, SimpleArcOnionMessenger};
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
@@ -145,11 +145,6 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 	lightning_block_sync::gossip::TokioSpawner,
 	Arc<lightning_block_sync::rpc::RpcClient>,
 	Arc<FilesystemLogger>,
-	SocketDescriptor,
-	Arc<ChannelManager>,
-	Arc<OnionMessenger>,
-	IgnoringMessageHandler,
-	Arc<KeysManager>,
 >;
 
 pub(crate) type PeerManager = SimpleArcPeerManager<
@@ -195,12 +190,12 @@ async fn handle_ldk_events(
 			// Construct the raw transaction with one output, that is paid the amount of the
 			// channel.
 			let addr = WitnessProgram::from_scriptpubkey(
-				&output_script[..],
+				&output_script.as_bytes(),
 				match network {
 					Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
-					Network::Testnet => bitcoin_bech32::constants::Network::Testnet,
 					Network::Regtest => bitcoin_bech32::constants::Network::Regtest,
 					Network::Signet => bitcoin_bech32::constants::Network::Signet,
+					Network::Testnet | _ => bitcoin_bech32::constants::Network::Testnet,
 				},
 			)
 			.expect("Lightning funding tx should always be to a SegWit output")
@@ -500,6 +495,7 @@ async fn handle_ldk_events(
 			user_channel_id: _,
 			counterparty_node_id,
 			channel_capacity_sats: _,
+			channel_funding_txo: _,
 		} => {
 			println!(
 				"\nEVENT: Channel {} with counterparty {} closed due to: {:?}",
@@ -516,6 +512,7 @@ async fn handle_ldk_events(
 		}
 		Event::HTLCIntercepted { .. } => {}
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
+		Event::ConnectionNeeded { .. } => {}
 	}
 }
 
@@ -539,6 +536,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_port,
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
+		args.network,
 		tokio::runtime::Handle::current(),
 		Arc::clone(&logger),
 	)
@@ -556,9 +554,9 @@ async fn start_ldk() {
 	if bitcoind_chain
 		!= match args.network {
 			bitcoin::Network::Bitcoin => "main",
-			bitcoin::Network::Testnet => "test",
 			bitcoin::Network::Regtest => "regtest",
 			bitcoin::Network::Signet => "signet",
+			bitcoin::Network::Testnet | _ => "test",
 		} {
 		println!(
 			"Chain argument ({}) didn't match bitcoind chain ({})",
@@ -777,7 +775,7 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
-		Arc::new(DefaultMessageRouter {}),
+		Arc::new(DefaultMessageRouter::new(Arc::clone(&network_graph))),
 		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 	));
@@ -939,6 +937,7 @@ async fn start_ldk() {
 			})
 		},
 		false,
+		|| Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap()),
 	));
 
 	// Regularly reconnect to channel peers.

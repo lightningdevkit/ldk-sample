@@ -12,8 +12,8 @@ use lightning::util::ser::{Readable, WithoutLength, Writeable};
 
 use lightning_persister::fs_store::FilesystemStore;
 
+use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{LockTime, PackedLockTime};
 use rand::{thread_rng, Rng};
 
 use crate::hex_utils;
@@ -126,8 +126,8 @@ pub(crate) async fn periodic_sweep(
 					cur_height = cur_height.saturating_sub(thread_rng().gen_range(0, 100));
 				}
 
-				let locktime: PackedLockTime =
-					LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
+				let locktime =
+					LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l.into());
 
 				if let Ok(spending_tx) = keys_manager.spend_spendable_outputs(
 					output_descriptors,
