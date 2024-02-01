@@ -5,13 +5,16 @@ use crate::convert::{
 use crate::disk::FilesystemLogger;
 use crate::hex_utils;
 use base64;
+use bitcoin::address::{Address, Payload, WitnessVersion};
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
+use bitcoin::blockdata::script::ScriptBuf;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::{encode, Decodable, Encodable};
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::Hash;
-use bitcoin::util::address::{Address, Payload, WitnessVersion};
-use bitcoin::{OutPoint, Script, TxOut, WPubkeyHash, XOnlyPublicKey};
+use bitcoin::key::XOnlyPublicKey;
+use bitcoin::psbt::PartiallySignedTransaction;
+use bitcoin::{Network, OutPoint, TxOut, WPubkeyHash};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::log_error;
@@ -28,6 +31,7 @@ use std::time::Duration;
 
 pub struct BitcoindClient {
 	pub(crate) bitcoind_rpc_client: Arc<RpcClient>,
+	network: Network,
 	host: String,
 	port: u16,
 	rpc_user: String,
@@ -60,7 +64,7 @@ const MIN_FEERATE: u32 = 253;
 
 impl BitcoindClient {
 	pub(crate) async fn new(
-		host: String, port: u16, rpc_user: String, rpc_password: String,
+		host: String, port: u16, rpc_user: String, rpc_password: String, network: Network,
 		handle: tokio::runtime::Handle, logger: Arc<FilesystemLogger>,
 	) -> std::io::Result<Self> {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
@@ -76,10 +80,6 @@ impl BitcoindClient {
 			})?;
 		let mut fees: HashMap<ConfirmationTarget, AtomicU32> = HashMap::new();
 		fees.insert(ConfirmationTarget::OnChainSweep, AtomicU32::new(5000));
-		fees.insert(
-			ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee,
-			AtomicU32::new(25 * 250),
-		);
 		fees.insert(
 			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
 			AtomicU32::new(MIN_FEERATE),
@@ -98,6 +98,7 @@ impl BitcoindClient {
 			port,
 			rpc_user,
 			rpc_password,
+			network,
 			fees: Arc::new(fees),
 			handle: handle.clone(),
 			logger,
@@ -178,9 +179,6 @@ impl BitcoindClient {
 				fees.get(&ConfirmationTarget::OnChainSweep)
 					.unwrap()
 					.store(high_prio_estimate, Ordering::Release);
-				fees.get(&ConfirmationTarget::MaxAllowedNonAnchorChannelRemoteFee)
-					.unwrap()
-					.store(std::cmp::max(25 * 250, high_prio_estimate * 10), Ordering::Release);
 				fees.get(&ConfirmationTarget::MinAllowedAnchorChannelRemoteFee)
 					.unwrap()
 					.store(mempoolmin_estimate, Ordering::Release);
@@ -264,7 +262,7 @@ impl BitcoindClient {
 			.call_method::<NewAddress>("getnewaddress", &addr_args)
 			.await
 			.unwrap();
-		Address::from_str(addr.0.as_str()).unwrap()
+		Address::from_str(addr.0.as_str()).unwrap().require_network(self.network).unwrap()
 	}
 
 	pub async fn get_blockchain_info(&self) -> BlockchainInfo {
@@ -328,18 +326,18 @@ impl WalletSource for BitcoindClient {
 			.into_iter()
 			.filter_map(|utxo| {
 				let outpoint = OutPoint { txid: utxo.txid, vout: utxo.vout };
-				match utxo.address.payload {
-					Payload::WitnessProgram { version, ref program } => match version {
-						WitnessVersion::V0 => WPubkeyHash::from_slice(program)
+				match utxo.address.payload.clone() {
+					Payload::WitnessProgram(wp) => match wp.version() {
+						WitnessVersion::V0 => WPubkeyHash::from_slice(wp.program().as_bytes())
 							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
 							.ok(),
 						// TODO: Add `Utxo::new_v1_p2tr` upstream.
-						WitnessVersion::V1 => XOnlyPublicKey::from_slice(program)
+						WitnessVersion::V1 => XOnlyPublicKey::from_slice(wp.program().as_bytes())
 							.map(|_| Utxo {
 								outpoint,
 								output: TxOut {
 									value: utxo.amount,
-									script_pubkey: Script::new_witness_program(version, program),
+									script_pubkey: ScriptBuf::new_witness_program(&wp),
 								},
 								satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
 									1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
@@ -353,15 +351,15 @@ impl WalletSource for BitcoindClient {
 			.collect())
 	}
 
-	fn get_change_script(&self) -> Result<Script, ()> {
+	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
 		tokio::task::block_in_place(move || {
 			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
 		})
 	}
 
-	fn sign_tx(&self, tx: Transaction) -> Result<Transaction, ()> {
+	fn sign_psbt(&self, tx: PartiallySignedTransaction) -> Result<Transaction, ()> {
 		let mut tx_bytes = Vec::new();
-		let _ = tx.consensus_encode(&mut tx_bytes).map_err(|_| ());
+		let _ = tx.unsigned_tx.consensus_encode(&mut tx_bytes).map_err(|_| ());
 		let tx_hex = hex_utils::hex_str(&tx_bytes);
 		let signed_tx = tokio::task::block_in_place(move || {
 			self.handle.block_on(async move { self.sign_raw_transaction_with_wallet(tx_hex).await })

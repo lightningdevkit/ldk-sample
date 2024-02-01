@@ -7,13 +7,13 @@ jobs:
     strategy:
       matrix:
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
-        toolchain: [ stable, 1.48.0 ]
+        toolchain: [ stable, 1.63.0 ]
         include:
           - toolchain: stable
             check-fmt: true
         exclude:
           - platform: macos-latest
-            toolchain: 1.48.0
+            toolchain: 1.63.0
           - platform: windows-latest
             toolchain: stable
     runs-on: ${{ matrix.platform }}
