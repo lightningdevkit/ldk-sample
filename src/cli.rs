@@ -11,6 +11,7 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
+use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
 use lightning::onion_message::packet::OnionMessageContents;
 use lightning::routing::gossip::NodeId;
@@ -73,7 +74,7 @@ pub(crate) fn poll_for_user_input(
 	);
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
-	loop {
+	'read_command: loop {
 		print!("> ");
 		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
 		let mut line = String::new();
@@ -161,20 +162,73 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 
-					let invoice = match Bolt11Invoice::from_str(invoice_str.unwrap()) {
-						Ok(inv) => inv,
-						Err(e) => {
-							println!("ERROR: invalid invoice: {:?}", e);
-							continue;
-						}
-					};
+					if let Ok(offer) = Offer::from_str(invoice_str.unwrap()) {
+						let offer_hash = Sha256::hash(invoice_str.unwrap().as_bytes());
+						let payment_id = PaymentId(*offer_hash.as_ref());
 
-					send_payment(
-						&channel_manager,
-						&invoice,
-						&mut outbound_payments.lock().unwrap(),
-						Arc::clone(&fs_store),
-					);
+						let amt_msat =
+							match offer.amount() {
+								Some(offer::Amount::Bitcoin { amount_msats }) => *amount_msats,
+								amt => {
+									println!("ERROR: Cannot process non-Bitcoin-denominated offer value {:?}", amt);
+									continue;
+								}
+							};
+
+						loop {
+							print!("Paying offer for {} msat. Continue (Y/N)? >", amt_msat);
+							io::stdout().flush().unwrap();
+
+							if let Err(e) = io::stdin().read_line(&mut line) {
+								println!("ERROR: {}", e);
+								break 'read_command;
+							}
+
+							if line.len() == 0 {
+								// We hit EOF / Ctrl-D
+								break 'read_command;
+							}
+
+							if line.starts_with("Y") {
+								break;
+							}
+							if line.starts_with("N") {
+								continue 'read_command;
+							}
+						}
+
+						outbound_payments.lock().unwrap().payments.insert(
+							payment_id,
+							PaymentInfo {
+								preimage: None,
+								secret: None,
+								status: HTLCStatus::Pending,
+								amt_msat: MillisatAmount(Some(amt_msat)),
+							},
+						);
+						fs_store
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.unwrap();
+
+						let retry = Retry::Timeout(Duration::from_secs(10));
+						let pay = channel_manager
+							.pay_for_offer(&offer, None, None, None, payment_id, retry, None);
+						if pay.is_err() {
+							println!("ERROR: Failed to pay: {:?}", pay);
+						}
+					} else {
+						match Bolt11Invoice::from_str(invoice_str.unwrap()) {
+							Ok(invoice) => send_payment(
+								&channel_manager,
+								&invoice,
+								&mut outbound_payments.lock().unwrap(),
+								Arc::clone(&fs_store),
+							),
+							Err(e) => {
+								println!("ERROR: invalid invoice: {:?}", e);
+							}
+						}
+					}
 				}
 				"keysend" => {
 					let dest_pubkey = match words.next() {
@@ -212,6 +266,34 @@ pub(crate) fn poll_for_user_input(
 						&mut outbound_payments.lock().unwrap(),
 						Arc::clone(&fs_store),
 					);
+				}
+				"getoffer" => {
+					let offer_builder = channel_manager.create_offer_builder(String::new());
+					if let Err(e) = offer_builder {
+						println!("ERROR: Failed to initiate offer building: {:?}", e);
+						continue;
+					}
+
+					let amt_str = words.next();
+					let offer = if amt_str.is_some() {
+						let amt_msat: Result<u64, _> = amt_str.unwrap().parse();
+						if amt_msat.is_err() {
+							println!("ERROR: getoffer provided payment amount was not a number");
+							continue;
+						}
+						offer_builder.unwrap().amount_msats(amt_msat.unwrap()).build()
+					} else {
+						offer_builder.unwrap().build()
+					};
+
+					if offer.is_err() {
+						println!("ERROR: Failed to build offer: {:?}", offer.unwrap_err());
+					} else {
+						// Note that unlike BOLT11 invoice creation we don't bother to add a
+						// pending inbound payment here, as offers can be reused and don't
+						// correspond with individual payments.
+						println!("{}", offer.unwrap());
+					}
 				}
 				"getinvoice" => {
 					let amt_str = words.next();
@@ -481,11 +563,12 @@ fn help() {
 	println!("      disconnectpeer <peer_pubkey>");
 	println!("      listpeers");
 	println!("\n  Payments:");
-	println!("      sendpayment <invoice>");
+	println!("      sendpayment <invoice|offer>");
 	println!("      keysend <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
 	println!("      getinvoice <amt_msats> <expiry_secs>");
+	println!("      getoffer [<amt_msats>]");
 	println!("\n  Other:");
 	println!("      signmessage <message>");
 	println!(
