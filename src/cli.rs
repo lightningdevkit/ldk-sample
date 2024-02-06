@@ -21,6 +21,7 @@ use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, Us
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Writeable, Writer};
 use lightning_invoice::payment::payment_parameters_from_invoice;
+use lightning_invoice::payment::payment_parameters_from_zero_amount_invoice;
 use lightning_invoice::{utils, Bolt11Invoice, Currency};
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
@@ -162,20 +163,35 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 
+					let mut user_provided_amt: Option<u64> = None;
+					if let Some(amt_msat_str) = words.next() {
+						match amt_msat_str.parse() {
+							Ok(amt) => user_provided_amt = Some(amt),
+							Err(e) => {
+								println!("ERROR: couldn't parse amount_msat: {}", e);
+								continue;
+							}
+						};
+					}
+
 					if let Ok(offer) = Offer::from_str(invoice_str.unwrap()) {
 						let offer_hash = Sha256::hash(invoice_str.unwrap().as_bytes());
 						let payment_id = PaymentId(*offer_hash.as_ref());
 
-						let amt_msat =
-							match offer.amount() {
-								Some(offer::Amount::Bitcoin { amount_msats }) => *amount_msats,
-								amt => {
-									println!("ERROR: Cannot process non-Bitcoin-denominated offer value {:?}", amt);
-									continue;
-								}
-							};
+						let amt_msat = match (offer.amount(), user_provided_amt) {
+							(Some(offer::Amount::Bitcoin { amount_msats }), _) => *amount_msats,
+							(_, Some(amt)) => amt,
+							(amt, _) => {
+								println!("ERROR: Cannot process non-Bitcoin-denominated offer value {:?}", amt);
+								continue;
+							}
+						};
+						if user_provided_amt.is_some() && user_provided_amt != Some(amt_msat) {
+							println!("Amount didn't match offer of {}msat", amt_msat);
+							continue;
+						}
 
-						loop {
+						while user_provided_amt.is_none() {
 							print!("Paying offer for {} msat. Continue (Y/N)? >", amt_msat);
 							io::stdout().flush().unwrap();
 
@@ -211,8 +227,9 @@ pub(crate) fn poll_for_user_input(
 							.unwrap();
 
 						let retry = Retry::Timeout(Duration::from_secs(10));
+						let amt = Some(amt_msat);
 						let pay = channel_manager
-							.pay_for_offer(&offer, None, None, None, payment_id, retry, None);
+							.pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
 						if pay.is_err() {
 							println!("ERROR: Failed to pay: {:?}", pay);
 						}
@@ -221,6 +238,7 @@ pub(crate) fn poll_for_user_input(
 							Ok(invoice) => send_payment(
 								&channel_manager,
 								&invoice,
+								user_provided_amt,
 								&mut outbound_payments.lock().unwrap(),
 								Arc::clone(&fs_store),
 							),
@@ -563,7 +581,7 @@ fn help() {
 	println!("      disconnectpeer <peer_pubkey>");
 	println!("      listpeers");
 	println!("\n  Payments:");
-	println!("      sendpayment <invoice|offer>");
+	println!("      sendpayment <invoice|offer> [<amount_msat>]");
 	println!("      keysend <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
@@ -770,20 +788,41 @@ fn open_channel(
 }
 
 fn send_payment(
-	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
+	channel_manager: &ChannelManager, invoice: &Bolt11Invoice, required_amount_msat: Option<u64>,
 	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
-	let (payment_hash, recipient_onion, route_params) =
-		match payment_parameters_from_invoice(invoice) {
-			Ok(res) => res,
-			Err(e) => {
-				println!("Failed to parse invoice");
-				print!("> ");
-				return;
-			}
-		};
+	let zero_amt_invoice =
+		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
+	let pay_params_opt = if zero_amt_invoice {
+		if let Some(amt_msat) = required_amount_msat {
+			payment_parameters_from_zero_amount_invoice(invoice, amt_msat)
+		} else {
+			println!("Need an amount for the given 0-value invoice");
+			print!("> ");
+			return;
+		}
+	} else {
+		if required_amount_msat.is_some() && invoice.amount_milli_satoshis() != required_amount_msat
+		{
+			println!(
+				"Amount didn't match invoice value of {}msat",
+				invoice.amount_milli_satoshis().unwrap_or(0)
+			);
+			print!("> ");
+			return;
+		}
+		payment_parameters_from_invoice(invoice)
+	};
+	let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
+		Ok(res) => res,
+		Err(e) => {
+			println!("Failed to parse invoice");
+			print!("> ");
+			return;
+		}
+	};
 	outbound_payments.payments.insert(
 		payment_id,
 		PaymentInfo {
