@@ -51,6 +51,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -172,11 +173,11 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 >;
 
 async fn handle_ldk_events(
-	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
+	channel_manager: Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	bump_tx_event_handler: &BumpTxEventHandler,
+	bump_tx_event_handler: &BumpTxEventHandler, peer_manager: Arc<PeerManager>,
 	inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: Arc<FilesystemStore>,
 	network: Network, event: Event,
 ) {
 	match event {
@@ -512,7 +513,20 @@ async fn handle_ldk_events(
 		}
 		Event::HTLCIntercepted { .. } => {}
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
-		Event::ConnectionNeeded { .. } => {}
+		Event::ConnectionNeeded { node_id, addresses } => {
+			tokio::spawn(async move {
+				for address in addresses {
+					if let Ok(sockaddrs) = address.to_socket_addrs() {
+						for addr in sockaddrs {
+							let pm = Arc::clone(&peer_manager);
+							if cli::connect_peer_if_necessary(node_id, addr, pm).await.is_ok() {
+								return;
+							}
+						}
+					}
+				}
+			});
+		}
 	}
 }
 
@@ -886,6 +900,7 @@ async fn start_ldk() {
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
 	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
 	let fs_store_event_listener = Arc::clone(&fs_store);
+	let peer_manager_event_listener = Arc::clone(&peer_manager);
 	let network = args.network;
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
@@ -896,16 +911,18 @@ async fn start_ldk() {
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
 		let fs_store_event_listener = Arc::clone(&fs_store_event_listener);
+		let peer_manager_event_listener = Arc::clone(&peer_manager_event_listener);
 		async move {
 			handle_ldk_events(
-				&channel_manager_event_listener,
+				channel_manager_event_listener,
 				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
 				&bump_tx_event_handler,
+				peer_manager_event_listener,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
-				&fs_store_event_listener,
+				fs_store_event_listener,
 				network,
 				event,
 			)
