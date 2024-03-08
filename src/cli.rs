@@ -175,8 +175,8 @@ pub(crate) fn poll_for_user_input(
 					}
 
 					if let Ok(offer) = Offer::from_str(invoice_str.unwrap()) {
-						let offer_hash = Sha256::hash(invoice_str.unwrap().as_bytes());
-						let payment_id = PaymentId(*offer_hash.as_ref());
+						let random_bytes = keys_manager.get_secure_random_bytes();
+						let payment_id = PaymentId(random_bytes);
 
 						let amt_msat = match (offer.amount(), user_provided_amt) {
 							(Some(offer::Amount::Bitcoin { amount_msats }), _) => *amount_msats,
