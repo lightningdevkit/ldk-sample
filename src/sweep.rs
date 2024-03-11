@@ -101,7 +101,7 @@ pub(crate) async fn periodic_sweep(
 					match file.read_exact(&mut [0; 1]) {
 						Ok(_) => {
 							file.seek(SeekFrom::Current(-1)).unwrap();
-						}
+						},
 						Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
 						Err(e) => Err(e).unwrap(),
 					}
