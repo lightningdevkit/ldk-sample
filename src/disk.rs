@@ -68,7 +68,7 @@ pub(crate) fn read_channel_peer_data(
 		match cli::parse_peer_info(line.unwrap()) {
 			Ok((pubkey, socket_addr)) => {
 				peer_data.insert(pubkey, socket_addr);
-			}
+			},
 			Err(e) => return Err(e),
 		}
 	}

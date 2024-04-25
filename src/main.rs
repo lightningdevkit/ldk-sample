@@ -228,7 +228,7 @@ async fn handle_ldk_events(
 				print!("> ");
 				io::stdout().flush().unwrap();
 			}
-		}
+		},
 		Event::PaymentClaimable {
 			payment_hash,
 			purpose,
@@ -251,7 +251,7 @@ async fn handle_ldk_events(
 				PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
 			};
 			channel_manager.claim_funds(payment_preimage.unwrap());
-		}
+		},
 		Event::PaymentClaimed {
 			payment_hash,
 			purpose,
@@ -269,7 +269,7 @@ async fn handle_ldk_events(
 			let (payment_preimage, payment_secret) = match purpose {
 				PaymentPurpose::InvoicePayment { payment_preimage, payment_secret, .. } => {
 					(payment_preimage, Some(payment_secret))
-				}
+				},
 				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
 			};
 			let mut inbound = inbound_payments.lock().unwrap();
@@ -279,7 +279,7 @@ async fn handle_ldk_events(
 					payment.status = HTLCStatus::Succeeded;
 					payment.preimage = payment_preimage;
 					payment.secret = payment_secret;
-				}
+				},
 				Entry::Vacant(e) => {
 					e.insert(PaymentInfo {
 						preimage: payment_preimage,
@@ -287,10 +287,10 @@ async fn handle_ldk_events(
 						status: HTLCStatus::Succeeded,
 						amt_msat: MillisatAmount(Some(amount_msat)),
 					});
-				}
+				},
 			}
 			fs_store.write("", "", INBOUND_PAYMENTS_FNAME, &inbound.encode()).unwrap();
-		}
+		},
 		Event::PaymentSent {
 			payment_preimage, payment_hash, fee_paid_msat, payment_id, ..
 		} => {
@@ -316,7 +316,7 @@ async fn handle_ldk_events(
 				}
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
-		}
+		},
 		Event::OpenChannelRequest {
 			ref temporary_channel_id, ref counterparty_node_id, ..
 		} => {
@@ -345,11 +345,11 @@ async fn handle_ldk_events(
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
-		}
-		Event::PaymentPathSuccessful { .. } => {}
-		Event::PaymentPathFailed { .. } => {}
-		Event::ProbeSuccessful { .. } => {}
-		Event::ProbeFailed { .. } => {}
+		},
+		Event::PaymentPathSuccessful { .. } => {},
+		Event::PaymentPathFailed { .. } => {},
+		Event::ProbeSuccessful { .. } => {},
+		Event::ProbeFailed { .. } => {},
 		Event::PaymentFailed { payment_hash, reason, payment_id, .. } => {
 			print!(
 				"\nEVENT: Failed to send payment to payment hash {}: {:?}",
@@ -365,7 +365,7 @@ async fn handle_ldk_events(
 				payment.status = HTLCStatus::Failed;
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
-		}
+		},
 		Event::InvoiceRequestFailed { payment_id } => {
 			print!("\nEVENT: Failed to request invoice to send payment with id {}", payment_id);
 			print!("> ");
@@ -377,7 +377,7 @@ async fn handle_ldk_events(
 				payment.status = HTLCStatus::Failed;
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
-		}
+		},
 		Event::PaymentForwarded {
 			prev_channel_id,
 			next_channel_id,
@@ -400,10 +400,10 @@ async fn handle_ldk_events(
 								None => "unnamed node".to_string(),
 								Some(announcement) => {
 									format!("node {}", announcement.alias)
-								}
+								},
 							},
 						}
-					}
+					},
 				},
 			};
 			let channel_str = |channel_id: &Option<ChannelId>| {
@@ -439,8 +439,8 @@ async fn handle_ldk_events(
 			}
 			print!("> ");
 			io::stdout().flush().unwrap();
-		}
-		Event::HTLCHandlingFailed { .. } => {}
+		},
+		Event::HTLCHandlingFailed { .. } => {},
 		Event::PendingHTLCsForwardable { time_forwardable } => {
 			let forwarding_channel_manager = channel_manager.clone();
 			let min = time_forwardable.as_millis() as u64;
@@ -449,7 +449,7 @@ async fn handle_ldk_events(
 				tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
 				forwarding_channel_manager.process_pending_htlc_forwards();
 			});
-		}
+		},
 		Event::SpendableOutputs { outputs, channel_id: _ } => {
 			// SpendableOutputDescriptors, of which outputs is a vec of, are critical to keep track
 			// of! While a `StaticOutput` descriptor is just an output to a static, well-known key,
@@ -466,7 +466,7 @@ async fn handle_ldk_events(
 				let output: SpendableOutputDescriptor = output;
 				fs_store.write(PENDING_SPENDABLE_OUTPUT_DIR, "", &key, &output.encode()).unwrap();
 			}
-		}
+		},
 		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
 			println!(
 				"\nEVENT: Channel {} with peer {} is pending awaiting funding lock-in!",
@@ -475,7 +475,7 @@ async fn handle_ldk_events(
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
-		}
+		},
 		Event::ChannelReady {
 			ref channel_id,
 			user_channel_id: _,
@@ -489,7 +489,7 @@ async fn handle_ldk_events(
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
-		}
+		},
 		Event::ChannelClosed {
 			channel_id,
 			reason,
@@ -506,12 +506,12 @@ async fn handle_ldk_events(
 			);
 			print!("> ");
 			io::stdout().flush().unwrap();
-		}
+		},
 		Event::DiscardFunding { .. } => {
 			// A "real" node should probably "lock" the UTXOs spent in funding transactions until
 			// the funding transaction either confirms, or this event is generated.
-		}
-		Event::HTLCIntercepted { .. } => {}
+		},
+		Event::HTLCIntercepted { .. } => {},
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
 		Event::ConnectionNeeded { node_id, addresses } => {
 			tokio::spawn(async move {
@@ -526,7 +526,7 @@ async fn handle_ldk_events(
 					}
 				}
 			});
-		}
+		},
 	}
 }
 
@@ -560,7 +560,7 @@ async fn start_ldk() {
 		Err(e) => {
 			println!("Failed to connect to bitcoind client: {}", e);
 			return;
-		}
+		},
 	};
 
 	// Check that the bitcoind we've connected to is running the network we expect
@@ -607,11 +607,11 @@ async fn start_ldk() {
 			Ok(mut f) => {
 				Write::write_all(&mut f, &key).expect("Failed to write node keys seed to disk");
 				f.sync_all().expect("Failed to sync node keys seed to disk");
-			}
+			},
 			Err(e) => {
 				println!("ERROR: Unable to create keys seed file {}: {}", keys_seed_path, e);
 				return;
-			}
+			},
 		}
 		key
 	};
@@ -990,7 +990,7 @@ async fn start_ldk() {
 							}
 						}
 					}
-				}
+				},
 				Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
 			}
 		}
