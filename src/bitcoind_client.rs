@@ -18,6 +18,7 @@ use bitcoin::{Network, OutPoint, TxOut, WPubkeyHash};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::log_error;
+use lightning::sign::ChangeDestinationSource;
 use lightning::util::logger::Logger;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
@@ -314,6 +315,14 @@ impl BroadcasterInterface for BitcoindClient {
 					}
 			});
 		}
+	}
+}
+
+impl ChangeDestinationSource for BitcoindClient {
+	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
+		tokio::task::block_in_place(move || {
+			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
+		})
 	}
 }
 

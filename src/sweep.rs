@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{fs, io};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::sign::{EntropySource, KeysManager, SpendableOutputDescriptor};
+use lightning::sign::{EntropySource, KeysManager, OutputSpender, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, WithoutLength, Writeable};
@@ -118,7 +118,7 @@ pub(crate) async fn periodic_sweep(
 				// e.g. high-latency mix networks and some CoinJoin implementations, have
 				// better privacy.
 				// Logic copied from core: https://github.com/bitcoin/bitcoin/blob/1d4846a8443be901b8a5deb0e357481af22838d0/src/wallet/spend.cpp#L936
-				let mut cur_height = channel_manager.current_best_block().height();
+				let mut cur_height = channel_manager.current_best_block().height;
 
 				// 10% of the time
 				if thread_rng().gen_range(0, 10) == 0 {
