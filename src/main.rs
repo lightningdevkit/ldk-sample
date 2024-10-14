@@ -1093,6 +1093,7 @@ async fn start_ldk() {
 
 	// Start the CLI.
 	let cli_channel_manager = Arc::clone(&channel_manager);
+	let cli_chain_monitor = Arc::clone(&chain_monitor);
 	let cli_persister = Arc::clone(&persister);
 	let cli_logger = Arc::clone(&logger);
 	let cli_peer_manager = Arc::clone(&peer_manager);
@@ -1100,6 +1101,7 @@ async fn start_ldk() {
 		cli::poll_for_user_input(
 			cli_peer_manager,
 			cli_channel_manager,
+			cli_chain_monitor,
 			keys_manager,
 			network_graph,
 			inbound_payments,

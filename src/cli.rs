@@ -1,13 +1,14 @@
 use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount, NetworkGraph,
-	OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
+	ChainMonitor, ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount,
+	NetworkGraph, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
+use lightning::chain::channelmonitor::Balance;
 use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
 use lightning::ln::bolt11_payment::payment_parameters_from_zero_amount_invoice;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
@@ -46,8 +47,8 @@ pub(crate) struct LdkUserInfo {
 
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
-	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
-	inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<KeysManager>,
+	network_graph: Arc<NetworkGraph>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
 	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
 ) {
@@ -461,7 +462,7 @@ pub(crate) fn poll_for_user_input(
 
 					force_close_channel(channel_id, peer_pubkey, channel_manager.clone());
 				},
-				"nodeinfo" => node_info(&channel_manager, &peer_manager),
+				"nodeinfo" => node_info(&channel_manager, &chain_monitor, &peer_manager),
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
 					const MSG_STARTPOS: usize = "signmessage".len() + 1;
@@ -515,14 +516,38 @@ fn help() {
 	println!("      nodeinfo");
 }
 
-fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManager>) {
+fn node_info(
+	channel_manager: &Arc<ChannelManager>, chain_monitor: &Arc<ChainMonitor>,
+	peer_manager: &Arc<PeerManager>,
+) {
 	println!("\t{{");
 	println!("\t\t node_pubkey: {}", channel_manager.get_our_node_id());
 	let chans = channel_manager.list_channels();
 	println!("\t\t num_channels: {}", chans.len());
 	println!("\t\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
-	let local_balance_msat = chans.iter().map(|c| c.balance_msat).sum::<u64>();
-	println!("\t\t local_balance_msat: {}", local_balance_msat);
+	let balances = chain_monitor.get_claimable_balances(&[]);
+	let local_balance_sat = balances.iter().map(|b| b.claimable_amount_satoshis()).sum::<u64>();
+	println!("\t\t local_balance_sats: {}", local_balance_sat);
+	let close_fees_map = |b| match b {
+		&Balance::ClaimableOnChannelClose { transaction_fee_satoshis, .. } => {
+			transaction_fee_satoshis
+		},
+		_ => 0,
+	};
+	let close_fees_sats = balances.iter().map(close_fees_map).sum::<u64>();
+	println!("\t\t eventual_close_fees_sats: {}", close_fees_sats);
+	let pending_payments_map = |b| match b {
+		&Balance::MaybeTimeoutClaimableHTLC { amount_satoshis, outbound_payment, .. } => {
+			if outbound_payment {
+				amount_satoshis
+			} else {
+				0
+			}
+		},
+		_ => 0,
+	};
+	let pending_payments = balances.iter().map(pending_payments_map).sum::<u64>();
+	println!("\t\t pending_outbound_payments_sats: {}", pending_payments);
 	println!("\t\t num_peers: {}", peer_manager.list_peers().len());
 	println!("\t}},");
 }
