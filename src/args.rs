@@ -1,5 +1,5 @@
 use crate::cli::LdkUserInfo;
-use bitcoin::network::constants::Network;
+use bitcoin::network::Network;
 use lightning::ln::msgs::SocketAddress;
 use std::collections::HashMap;
 use std::env;

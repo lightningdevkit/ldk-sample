@@ -5,7 +5,7 @@ use crate::convert::{
 use crate::disk::FilesystemLogger;
 use crate::hex_utils;
 use base64;
-use bitcoin::address::{Address, Payload, WitnessVersion};
+use bitcoin::address::Address;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::script::ScriptBuf;
 use bitcoin::blockdata::transaction::Transaction;
@@ -13,7 +13,7 @@ use bitcoin::consensus::{encode, Decodable, Encodable};
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::key::XOnlyPublicKey;
-use bitcoin::psbt::PartiallySignedTransaction;
+use bitcoin::psbt::Psbt;
 use bitcoin::{Network, OutPoint, TxOut, WPubkeyHash};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::events::bump_transaction::{Utxo, WalletSource};
@@ -80,7 +80,8 @@ impl BitcoindClient {
 				"Failed to make initial call to bitcoind - please check your RPC user/password and access settings")
 			})?;
 		let mut fees: HashMap<ConfirmationTarget, AtomicU32> = HashMap::new();
-		fees.insert(ConfirmationTarget::OnChainSweep, AtomicU32::new(5000));
+		fees.insert(ConfirmationTarget::MaximumFeeEstimate, AtomicU32::new(50000));
+		fees.insert(ConfirmationTarget::UrgentOnChainSweep, AtomicU32::new(5000));
 		fees.insert(
 			ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
 			AtomicU32::new(MIN_FEERATE),
@@ -92,6 +93,7 @@ impl BitcoindClient {
 		fees.insert(ConfirmationTarget::AnchorChannelFee, AtomicU32::new(MIN_FEERATE));
 		fees.insert(ConfirmationTarget::NonAnchorChannelFee, AtomicU32::new(2000));
 		fees.insert(ConfirmationTarget::ChannelCloseMinimum, AtomicU32::new(MIN_FEERATE));
+		fees.insert(ConfirmationTarget::OutputSpendingFee, AtomicU32::new(MIN_FEERATE));
 
 		let client = Self {
 			bitcoind_rpc_client: Arc::new(bitcoind_rpc_client),
@@ -177,7 +179,27 @@ impl BitcoindClient {
 					}
 				};
 
-				fees.get(&ConfirmationTarget::OnChainSweep)
+				let very_high_prio_estimate = {
+					let high_prio_conf_target = serde_json::json!(2);
+					let high_prio_estimate_mode = serde_json::json!("CONSERVATIVE");
+					let resp = rpc_client
+						.call_method::<FeeResponse>(
+							"estimatesmartfee",
+							&vec![high_prio_conf_target, high_prio_estimate_mode],
+						)
+						.await
+						.unwrap();
+
+					match resp.feerate_sat_per_kw {
+						Some(feerate) => std::cmp::max(feerate, MIN_FEERATE),
+						None => 50000,
+					}
+				};
+
+				fees.get(&ConfirmationTarget::MaximumFeeEstimate)
+					.unwrap()
+					.store(very_high_prio_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::UrgentOnChainSweep)
 					.unwrap()
 					.store(high_prio_estimate, Ordering::Release);
 				fees.get(&ConfirmationTarget::MinAllowedAnchorChannelRemoteFee)
@@ -193,6 +215,9 @@ impl BitcoindClient {
 					.unwrap()
 					.store(normal_estimate, Ordering::Release);
 				fees.get(&ConfirmationTarget::ChannelCloseMinimum)
+					.unwrap()
+					.store(background_estimate, Ordering::Release);
+				fees.get(&ConfirmationTarget::OutputSpendingFee)
 					.unwrap()
 					.store(background_estimate, Ordering::Release);
 
@@ -335,24 +360,26 @@ impl WalletSource for BitcoindClient {
 			.into_iter()
 			.filter_map(|utxo| {
 				let outpoint = OutPoint { txid: utxo.txid, vout: utxo.vout };
-				match utxo.address.payload.clone() {
-					Payload::WitnessProgram(wp) => match wp.version() {
-						WitnessVersion::V0 => WPubkeyHash::from_slice(wp.program().as_bytes())
-							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
-							.ok(),
+				let value = bitcoin::Amount::from_sat(utxo.amount);
+				match utxo.address.witness_program() {
+					Some(prog) if prog.is_p2wpkh() => {
+						WPubkeyHash::from_slice(prog.program().as_bytes())
+							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, value, &wpkh))
+							.ok()
+					},
+					Some(prog) if prog.is_p2tr() => {
 						// TODO: Add `Utxo::new_v1_p2tr` upstream.
-						WitnessVersion::V1 => XOnlyPublicKey::from_slice(wp.program().as_bytes())
+						XOnlyPublicKey::from_slice(prog.program().as_bytes())
 							.map(|_| Utxo {
 								outpoint,
 								output: TxOut {
-									value: utxo.amount,
-									script_pubkey: ScriptBuf::new_witness_program(&wp),
+									value,
+									script_pubkey: utxo.address.script_pubkey(),
 								},
 								satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
 									1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
 							})
-							.ok(),
-						_ => None,
+							.ok()
 					},
 					_ => None,
 				}
@@ -366,7 +393,7 @@ impl WalletSource for BitcoindClient {
 		})
 	}
 
-	fn sign_psbt(&self, tx: PartiallySignedTransaction) -> Result<Transaction, ()> {
+	fn sign_psbt(&self, tx: Psbt) -> Result<Transaction, ()> {
 		let mut tx_bytes = Vec::new();
 		let _ = tx.unsigned_tx.consensus_encode(&mut tx_bytes).map_err(|_| ());
 		let tx_hex = hex_utils::hex_str(&tx_bytes);

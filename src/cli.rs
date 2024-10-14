@@ -2,28 +2,29 @@ use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
 	ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount, NetworkGraph,
-	OnionMessenger, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
+	OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-use bitcoin::network::constants::Network;
+use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
+use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
+use lightning::ln::bolt11_payment::payment_parameters_from_zero_amount_invoice;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
+use lightning::ln::invoice_utils as utils;
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
+use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
+use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStore;
-use lightning::util::ser::{Writeable, Writer};
-use lightning_invoice::payment::payment_parameters_from_invoice;
-use lightning_invoice::payment::payment_parameters_from_zero_amount_invoice;
-use lightning_invoice::{utils, Bolt11Invoice, Currency};
+use lightning::util::ser::Writeable;
+use lightning_invoice::{Bolt11Invoice, Currency};
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
-use std::io;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
@@ -46,7 +47,7 @@ pub(crate) struct LdkUserInfo {
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
-	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+	inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
 	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
 ) {
@@ -57,9 +58,9 @@ pub(crate) fn poll_for_user_input(
 	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
 	'read_command: loop {
 		print!("> ");
-		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
+		std::io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
 		let mut line = String::new();
-		if let Err(e) = io::stdin().read_line(&mut line) {
+		if let Err(e) = std::io::stdin().read_line(&mut line) {
 			break println!("ERROR: {}", e);
 		}
 
@@ -159,7 +160,7 @@ pub(crate) fn poll_for_user_input(
 						let payment_id = PaymentId(random_bytes);
 
 						let amt_msat = match (offer.amount(), user_provided_amt) {
-							(Some(offer::Amount::Bitcoin { amount_msats }), _) => *amount_msats,
+							(Some(offer::Amount::Bitcoin { amount_msats }), _) => amount_msats,
 							(_, Some(amt)) => amt,
 							(amt, _) => {
 								println!("ERROR: Cannot process non-Bitcoin-denominated offer value {:?}", amt);
@@ -173,9 +174,9 @@ pub(crate) fn poll_for_user_input(
 
 						while user_provided_amt.is_none() {
 							print!("Paying offer for {} msat. Continue (Y/N)? >", amt_msat);
-							io::stdout().flush().unwrap();
+							std::io::stdout().flush().unwrap();
 
-							if let Err(e) = io::stdin().read_line(&mut line) {
+							if let Err(e) = std::io::stdin().read_line(&mut line) {
 								println!("ERROR: {}", e);
 								break 'read_command;
 							}
@@ -266,7 +267,7 @@ pub(crate) fn poll_for_user_input(
 					);
 				},
 				"getoffer" => {
-					let offer_builder = channel_manager.create_offer_builder();
+					let offer_builder = channel_manager.create_offer_builder(None);
 					if let Err(e) = offer_builder {
 						println!("ERROR: Failed to initiate offer building: {:?}", e);
 						continue;
@@ -554,7 +555,7 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 			.get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
 		{
 			if let Some(announcement) = &node_info.announcement_info {
-				println!("\t\tpeer_alias: {}", announcement.alias);
+				println!("\t\tpeer_alias: {}", announcement.alias());
 			}
 		}
 
@@ -569,7 +570,7 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 			println!("\t\tavailable_balance_for_recv_msat: {},", chan_info.inbound_capacity_msat);
 		}
 		println!("\t\tchannel_can_send_payments: {},", chan_info.is_usable);
-		println!("\t\tpublic: {},", chan_info.is_public);
+		println!("\t\tpublic: {},", chan_info.is_announced);
 		println!("\t}},");
 	}
 	println!("]");
@@ -676,8 +677,8 @@ fn do_disconnect_peer(
 }
 
 fn open_channel(
-	peer_pubkey: PublicKey, channel_amt_sat: u64, announced_channel: bool, with_anchors: bool,
-	channel_manager: Arc<ChannelManager>,
+	peer_pubkey: PublicKey, channel_amt_sat: u64, announce_for_forwarding: bool,
+	with_anchors: bool, channel_manager: Arc<ChannelManager>,
 ) -> Result<(), ()> {
 	let config = UserConfig {
 		channel_handshake_limits: ChannelHandshakeLimits {
@@ -686,7 +687,7 @@ fn open_channel(
 			..Default::default()
 		},
 		channel_handshake_config: ChannelHandshakeConfig {
-			announced_channel,
+			announce_for_forwarding,
 			negotiate_anchors_zero_fee_htlc_tx: with_anchors,
 			..Default::default()
 		},
@@ -870,9 +871,11 @@ fn close_channel(
 fn force_close_channel(
 	channel_id: [u8; 32], counterparty_node_id: PublicKey, channel_manager: Arc<ChannelManager>,
 ) {
-	match channel_manager
-		.force_close_broadcasting_latest_txn(&ChannelId(channel_id), &counterparty_node_id)
-	{
+	match channel_manager.force_close_broadcasting_latest_txn(
+		&ChannelId(channel_id),
+		&counterparty_node_id,
+		"Manually force-closed".to_string(),
+	) {
 		Ok(()) => println!("EVENT: initiating channel force-close"),
 		Err(e) => println!("ERROR: failed to force-close channel: {:?}", e),
 	}
