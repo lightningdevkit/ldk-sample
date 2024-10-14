@@ -314,32 +314,42 @@ impl FeeEstimator for BitcoindClient {
 
 impl BroadcasterInterface for BitcoindClient {
 	fn broadcast_transactions(&self, txs: &[&Transaction]) {
-		// TODO: Rather than calling `sendrawtransaction` in a a loop, we should probably use
-		// `submitpackage` once it becomes available.
-		for tx in txs {
-			let bitcoind_rpc_client = Arc::clone(&self.bitcoind_rpc_client);
-			let tx_serialized = encode::serialize_hex(tx);
-			let tx_json = serde_json::json!(tx_serialized);
-			let logger = Arc::clone(&self.logger);
-			self.handle.spawn(async move {
-				// This may error due to RL calling `broadcast_transactions` with the same transaction
-				// multiple times, but the error is safe to ignore.
-				match bitcoind_rpc_client
-					.call_method::<Txid>("sendrawtransaction", &vec![tx_json])
+		// As of Bitcoin Core 28, using `submitpackage` allows us to broadcast multiple
+		// transactions at once and have them propagate through the network as a whole, avoiding
+		// some pitfalls with anchor channels where the first transaction doesn't make it into the
+		// mempool at all. Several older versions of Bitcoin Core also support `submitpackage`,
+		// however, so we just use it unconditionally here.
+		// Sadly, Bitcoin Core has an arbitrary restriction on `submitpackage` - it must actually
+		// contain a package (see https://github.com/bitcoin/bitcoin/issues/31085).
+		let txn = txs.iter().map(|tx| encode::serialize_hex(tx)).collect::<Vec<_>>();
+		let bitcoind_rpc_client = Arc::clone(&self.bitcoind_rpc_client);
+		let logger = Arc::clone(&self.logger);
+		self.handle.spawn(async move {
+			let res = if txn.len() == 1 {
+				let tx_json = serde_json::json!(txn[0]);
+				bitcoind_rpc_client
+					.call_method::<serde_json::Value>("sendrawtransaction", &[tx_json])
 					.await
-					{
-						Ok(_) => {}
-						Err(e) => {
-							let err_str = e.get_ref().unwrap().to_string();
-							log_error!(logger,
-									   "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransaction: {}",
-									   err_str,
-									   tx_serialized);
-							print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
-						}
-					}
-			});
-		}
+			} else {
+				let tx_json = serde_json::json!(txn);
+				bitcoind_rpc_client
+					.call_method::<serde_json::Value>("submitpackage", &[tx_json])
+					.await
+			};
+			// This may error due to RL calling `broadcast_transactions` with the same transaction
+			// multiple times, but the error is safe to ignore.
+			match res {
+				Ok(_) => {}
+				Err(e) => {
+					let err_str = e.get_ref().unwrap().to_string();
+					log_error!(logger,
+						"Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransactions: {:?}",
+						err_str,
+						txn);
+					print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
+				}
+			}
+		});
 	}
 }
 
