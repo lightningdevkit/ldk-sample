@@ -12,8 +12,6 @@ use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
 use lightning::offers::offer::{self, Offer};
-use lightning::onion_message::messenger::Destination;
-use lightning::onion_message::packet::OnionMessageContents;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
@@ -43,24 +41,6 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
-}
-
-#[derive(Debug)]
-struct UserOnionMessageContents {
-	tlv_type: u64,
-	data: Vec<u8>,
-}
-
-impl OnionMessageContents for UserOnionMessageContents {
-	fn tlv_type(&self) -> u64 {
-		self.tlv_type
-	}
-}
-
-impl Writeable for UserOnionMessageContents {
-	fn write<W: Writer>(&self, w: &mut W) -> Result<(), std::io::Error> {
-		w.write_all(&self.data)
-	}
 }
 
 pub(crate) fn poll_for_user_input(
@@ -496,64 +476,6 @@ pub(crate) fn poll_for_user_input(
 						)
 					);
 				},
-				"sendonionmessage" => {
-					let path_pks_str = words.next();
-					if path_pks_str.is_none() {
-						println!(
-							"ERROR: sendonionmessage requires at least one node id for the path"
-						);
-						continue;
-					}
-					let mut intermediate_nodes = Vec::new();
-					let mut errored = false;
-					for pk_str in path_pks_str.unwrap().split(",") {
-						let node_pubkey_vec = match hex_utils::to_vec(pk_str) {
-							Some(peer_pubkey_vec) => peer_pubkey_vec,
-							None => {
-								println!("ERROR: couldn't parse peer_pubkey");
-								errored = true;
-								break;
-							},
-						};
-						let node_pubkey = match PublicKey::from_slice(&node_pubkey_vec) {
-							Ok(peer_pubkey) => peer_pubkey,
-							Err(_) => {
-								println!("ERROR: couldn't parse peer_pubkey");
-								errored = true;
-								break;
-							},
-						};
-						intermediate_nodes.push(node_pubkey);
-					}
-					if errored {
-						continue;
-					}
-					let tlv_type = match words.next().map(|ty_str| ty_str.parse()) {
-						Some(Ok(ty)) if ty >= 64 => ty,
-						_ => {
-							println!("Need an integral message type above 64");
-							continue;
-						},
-					};
-					let data = match words.next().map(|s| hex_utils::to_vec(s)) {
-						Some(Some(data)) => data,
-						_ => {
-							println!("Need a hex data string");
-							continue;
-						},
-					};
-					let destination = Destination::Node(intermediate_nodes.pop().unwrap());
-					match onion_messenger.send_onion_message(
-						UserOnionMessageContents { tlv_type, data },
-						destination,
-						None,
-					) {
-						Ok(success) => {
-							println!("SUCCESS: forwarded onion message to first hop {:?}", success)
-						},
-						Err(e) => println!("ERROR: failed to send onion message: {:?}", e),
-					}
-				},
 				"quit" | "exit" => break,
 				_ => println!("Unknown command. See `\"help\" for available commands."),
 			}
@@ -589,9 +511,6 @@ fn help() {
 	println!("      getoffer [<amt_msats>]");
 	println!("\n  Other:");
 	println!("      signmessage <message>");
-	println!(
-		"      sendonionmessage <node_id_1,node_id_2,..,destination_node_id> <type> <hex_bytes>"
-	);
 	println!("      nodeinfo");
 }
 
