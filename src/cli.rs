@@ -462,7 +462,9 @@ pub(crate) fn poll_for_user_input(
 
 					force_close_channel(channel_id, peer_pubkey, channel_manager.clone());
 				},
-				"nodeinfo" => node_info(&channel_manager, &chain_monitor, &peer_manager),
+				"nodeinfo" => {
+					node_info(&channel_manager, &chain_monitor, &peer_manager, &network_graph)
+				},
 				"listpeers" => list_peers(peer_manager.clone()),
 				"signmessage" => {
 					const MSG_STARTPOS: usize = "signmessage".len() + 1;
@@ -518,7 +520,7 @@ fn help() {
 
 fn node_info(
 	channel_manager: &Arc<ChannelManager>, chain_monitor: &Arc<ChainMonitor>,
-	peer_manager: &Arc<PeerManager>,
+	peer_manager: &Arc<PeerManager>, network_graph: &Arc<NetworkGraph>,
 ) {
 	println!("\t{{");
 	println!("\t\t node_pubkey: {}", channel_manager.get_our_node_id());
@@ -549,6 +551,9 @@ fn node_info(
 	let pending_payments = balances.iter().map(pending_payments_map).sum::<u64>();
 	println!("\t\t pending_outbound_payments_sats: {}", pending_payments);
 	println!("\t\t num_peers: {}", peer_manager.list_peers().len());
+	let graph_lock = network_graph.read_only();
+	println!("\t\t network_nodes: {}", graph_lock.nodes().len());
+	println!("\t\t network_channels: {}", graph_lock.channels().len());
 	println!("\t}},");
 }
 
