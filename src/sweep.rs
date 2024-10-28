@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
@@ -73,17 +73,18 @@ pub(crate) async fn migrate_deprecated_spendable_outputs(
 	let mut outputs: Vec<SpendableOutputDescriptor> = Vec::new();
 	if let Ok(dir_iter) = fs::read_dir(&spendables_dir) {
 		for file_res in dir_iter {
-			let mut file = fs::File::open(file_res.unwrap().path()).unwrap();
+			let file = fs::File::open(file_res.unwrap().path()).unwrap();
+			let mut reader = BufReader::new(file);
 			loop {
 				// Check if there are any bytes left to read, and if so read a descriptor.
-				match file.read_exact(&mut [0; 1]) {
+				match reader.read_exact(&mut [0; 1]) {
 					Ok(_) => {
-						file.seek(SeekFrom::Current(-1)).unwrap();
+						reader.seek(SeekFrom::Current(-1)).unwrap();
 					},
 					Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
 					Err(e) => Err(e).unwrap(),
 				}
-				outputs.push(Readable::read(&mut file).unwrap());
+				outputs.push(Readable::read(&mut reader).unwrap());
 			}
 		}
 	}
