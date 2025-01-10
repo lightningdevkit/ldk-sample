@@ -4,7 +4,7 @@ use bitcoin::Network;
 use chrono::Utc;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::hash_tables::{new_hash_map, HashMap};
-use lightning::util::logger::{Logger, Record};
+use lightning::util::logger::{Level, Logger, Record};
 use lightning::util::ser::{Readable, ReadableArgs};
 use std::fs;
 use std::fs::File;
@@ -28,6 +28,10 @@ impl FilesystemLogger {
 }
 impl Logger for FilesystemLogger {
 	fn log(&self, record: Record) {
+		if record.level == Level::Gossip {
+			// Gossip-level logs are incredibly verbose, and thus we skip them by default.
+			return;
+		}
 		let raw_log = record.args.to_string();
 		let log = format!(
 			"{} {:<5} [{}:{}] {}\n",
