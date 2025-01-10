@@ -71,7 +71,7 @@ impl BitcoindClient {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
 		let rpc_credentials =
 			base64::encode(format!("{}:{}", rpc_user.clone(), rpc_password.clone()));
-		let bitcoind_rpc_client = RpcClient::new(&rpc_credentials, http_endpoint)?;
+		let bitcoind_rpc_client = RpcClient::new(&rpc_credentials, http_endpoint);
 		let _dummy = bitcoind_rpc_client
 			.call_method::<BlockchainInfo>("getblockchaininfo", &vec![])
 			.await
@@ -226,7 +226,7 @@ impl BitcoindClient {
 		});
 	}
 
-	pub fn get_new_rpc_client(&self) -> std::io::Result<RpcClient> {
+	pub fn get_new_rpc_client(&self) -> RpcClient {
 		let http_endpoint = HttpEndpoint::for_host(self.host.clone()).with_port(self.port);
 		let rpc_credentials =
 			base64::encode(format!("{}:{}", self.rpc_user.clone(), self.rpc_password.clone()));

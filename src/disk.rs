@@ -3,9 +3,9 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use chrono::Utc;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
+use lightning::util::hash_tables::{new_hash_map, HashMap};
 use lightning::util::logger::{Logger, Record};
 use lightning::util::ser::{Readable, ReadableArgs};
-use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -58,9 +58,9 @@ pub(crate) fn persist_channel_peer(path: &Path, peer_info: &str) -> std::io::Res
 pub(crate) fn read_channel_peer_data(
 	path: &Path,
 ) -> Result<HashMap<PublicKey, SocketAddr>, std::io::Error> {
-	let mut peer_data = HashMap::new();
+	let mut peer_data = new_hash_map();
 	if !Path::new(&path).exists() {
-		return Ok(HashMap::new());
+		return Ok(new_hash_map());
 	}
 	let file = File::open(path)?;
 	let reader = BufReader::new(file);
@@ -92,7 +92,7 @@ pub(crate) fn read_inbound_payment_info(path: &Path) -> InboundPaymentInfoStorag
 			return info;
 		}
 	}
-	InboundPaymentInfoStorage { payments: HashMap::new() }
+	InboundPaymentInfoStorage { payments: new_hash_map() }
 }
 
 pub(crate) fn read_outbound_payment_info(path: &Path) -> OutboundPaymentInfoStorage {
@@ -101,7 +101,7 @@ pub(crate) fn read_outbound_payment_info(path: &Path) -> OutboundPaymentInfoStor
 			return info;
 		}
 	}
-	OutboundPaymentInfoStorage { payments: HashMap::new() }
+	OutboundPaymentInfoStorage { payments: new_hash_map() }
 }
 
 pub(crate) fn read_scorer(

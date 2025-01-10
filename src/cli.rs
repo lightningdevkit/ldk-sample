@@ -10,7 +10,7 @@ use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance;
 use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
-use lightning::ln::bolt11_payment::payment_parameters_from_zero_amount_invoice;
+use lightning::ln::bolt11_payment::payment_parameters_from_variable_amount_invoice;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::invoice_utils as utils;
 use lightning::ln::msgs::SocketAddress;
@@ -746,7 +746,7 @@ fn send_payment(
 		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
 	let pay_params_opt = if zero_amt_invoice {
 		if let Some(amt_msat) = required_amount_msat {
-			payment_parameters_from_zero_amount_invoice(invoice, amt_msat)
+			payment_parameters_from_variable_amount_invoice(invoice, amt_msat)
 		} else {
 			println!("Need an amount for the given 0-value invoice");
 			print!("> ");
@@ -826,7 +826,7 @@ fn keysend<E: EntropySource>(
 		},
 	);
 	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-	match channel_manager.send_spontaneous_payment_with_retry(
+	match channel_manager.send_spontaneous_payment(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
 		payment_id,
@@ -859,9 +859,6 @@ fn get_invoice(
 	};
 	let invoice = match utils::create_invoice_from_channelmanager(
 		channel_manager,
-		keys_manager,
-		logger,
-		currency,
 		Some(amt_msat),
 		"ldk-tutorial-node".to_string(),
 		expiry_secs,

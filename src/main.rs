@@ -34,6 +34,8 @@ use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
 use lightning::sign::{EntropySource, InMemorySigner, KeysManager};
 use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::util::config::UserConfig;
+use lightning::util::hash_tables::hash_map::Entry;
+use lightning::util::hash_tables::HashMap;
 use lightning::util::persist::{
 	self, KVStore, MonitorUpdatingPersister, OUTPUT_SWEEPER_PERSISTENCE_KEY,
 	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -49,8 +51,7 @@ use lightning_block_sync::UnboundedCache;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
 use rand::{thread_rng, Rng};
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::HashMap as StdHashMap;
 use std::convert::TryInto;
 use std::fmt;
 use std::fs;
@@ -158,7 +159,7 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	ChainMonitor,
 	BitcoindClient,
 	BitcoindClient,
-	GossipVerifier,
+	Arc<GossipVerifier>,
 	FilesystemLogger,
 >;
 
@@ -219,7 +220,7 @@ async fn handle_ldk_events(
 			)
 			.expect("Lightning funding tx should always be to a SegWit output")
 			.to_address();
-			let mut outputs = vec![HashMap::with_capacity(1)];
+			let mut outputs = vec![StdHashMap::new()];
 			outputs[0].insert(addr, channel_value_satoshis as f64 / 100_000_000.0);
 			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
 
@@ -246,17 +247,7 @@ async fn handle_ldk_events(
 		Event::FundingTxBroadcastSafe { .. } => {
 			// We don't use the manual broadcasting feature, so this event should never be seen.
 		},
-		Event::PaymentClaimable {
-			payment_hash,
-			purpose,
-			amount_msat,
-			receiver_node_id: _,
-			via_channel_id: _,
-			via_user_channel_id: _,
-			claim_deadline: _,
-			onion_fields: _,
-			counterparty_skimmed_fee_msat: _,
-		} => {
+		Event::PaymentClaimable { payment_hash, purpose, amount_msat, .. } => {
 			println!(
 				"\nEVENT: received payment from payment hash {} of {} millisatoshis",
 				payment_hash, amount_msat,
@@ -402,9 +393,7 @@ async fn handle_ldk_events(
 			total_fee_earned_msat,
 			claim_from_onchain_tx,
 			outbound_amount_forwarded_msat,
-			skimmed_fee_msat: _,
-			prev_user_channel_id: _,
-			next_user_channel_id: _,
+			..
 		} => {
 			let read_only_network_graph = network_graph.read_only();
 			let nodes = read_only_network_graph.nodes();
@@ -497,14 +486,7 @@ async fn handle_ldk_events(
 			print!("> ");
 			std::io::stdout().flush().unwrap();
 		},
-		Event::ChannelClosed {
-			channel_id,
-			reason,
-			user_channel_id: _,
-			counterparty_node_id,
-			channel_capacity_sats: _,
-			channel_funding_txo: _,
-		} => {
+		Event::ChannelClosed { channel_id, reason, counterparty_node_id, .. } => {
 			println!(
 				"\nEVENT: Channel {} with counterparty {} closed due to: {:?}",
 				channel_id,
@@ -688,7 +670,7 @@ async fn start_ldk() {
 		Arc::clone(&logger),
 	)));
 
-	// Step 10: Create Router
+	// Step 10: Create Routers
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
 		network_graph.clone(),
@@ -698,6 +680,9 @@ async fn start_ldk() {
 		scoring_fee_params,
 	));
 
+	let message_router =
+		Arc::new(DefaultMessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
+
 	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
@@ -706,9 +691,9 @@ async fn start_ldk() {
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
-			let mut channel_monitor_mut_references = Vec::new();
-			for (_, channel_monitor) in channelmonitors.iter_mut() {
-				channel_monitor_mut_references.push(channel_monitor);
+			let mut channel_monitor_references = Vec::new();
+			for (_, channel_monitor) in channelmonitors.iter() {
+				channel_monitor_references.push(channel_monitor);
 			}
 			let read_args = ChannelManagerReadArgs::new(
 				keys_manager.clone(),
@@ -718,9 +703,10 @@ async fn start_ldk() {
 				chain_monitor.clone(),
 				broadcaster.clone(),
 				router,
+				Arc::clone(&message_router),
 				logger.clone(),
 				user_config,
-				channel_monitor_mut_references,
+				channel_monitor_references,
 			);
 			<(BlockHash, ChannelManager)>::read(&mut BufReader::new(f), read_args).unwrap()
 		} else {
@@ -736,6 +722,7 @@ async fn start_ldk() {
 				chain_monitor.clone(),
 				broadcaster.clone(),
 				router,
+				Arc::clone(&message_router),
 				logger.clone(),
 				keys_manager.clone(),
 				keys_manager.clone(),
@@ -842,7 +829,8 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 		Arc::clone(&channel_manager),
-		Arc::new(DefaultMessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager))),
+		Arc::clone(&message_router),
+		Arc::clone(&channel_manager),
 		Arc::clone(&channel_manager),
 		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
@@ -871,7 +859,7 @@ async fn start_ldk() {
 		Arc::clone(&gossip_sync),
 		Arc::clone(&peer_manager),
 	);
-	gossip_sync.add_utxo_lookup(Some(utxo_lookup));
+	gossip_sync.add_utxo_lookup(Some(Arc::new(utxo_lookup)));
 
 	// ## Running LDK
 	// Step 17: Initialize networking
