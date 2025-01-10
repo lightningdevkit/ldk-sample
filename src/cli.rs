@@ -11,8 +11,9 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance;
 use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
 use lightning::ln::bolt11_payment::payment_parameters_from_variable_amount_invoice;
-use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
-use lightning::ln::invoice_utils as utils;
+use lightning::ln::channelmanager::{
+	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry,
+};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
@@ -23,7 +24,7 @@ use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStore;
 use lightning::util::ser::Writeable;
-use lightning_invoice::{Bolt11Invoice, Currency};
+use lightning_invoice::Bolt11Invoice;
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
 use std::io::Write;
@@ -50,7 +51,7 @@ pub(crate) fn poll_for_user_input(
 	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
-	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
+	fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -325,10 +326,7 @@ pub(crate) fn poll_for_user_input(
 						amt_msat.unwrap(),
 						&mut inbound_payments,
 						&channel_manager,
-						Arc::clone(&keys_manager),
-						network,
 						expiry_secs.unwrap(),
-						Arc::clone(&logger),
 					);
 					fs_store
 						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
@@ -848,22 +846,12 @@ fn keysend<E: EntropySource>(
 
 fn get_invoice(
 	amt_msat: u64, inbound_payments: &mut InboundPaymentInfoStorage,
-	channel_manager: &ChannelManager, keys_manager: Arc<KeysManager>, network: Network,
-	expiry_secs: u32, logger: Arc<disk::FilesystemLogger>,
+	channel_manager: &ChannelManager, expiry_secs: u32,
 ) {
-	let currency = match network {
-		Network::Bitcoin => Currency::Bitcoin,
-		Network::Regtest => Currency::Regtest,
-		Network::Signet => Currency::Signet,
-		Network::Testnet | _ => Currency::BitcoinTestnet,
-	};
-	let invoice = match utils::create_invoice_from_channelmanager(
-		channel_manager,
-		Some(amt_msat),
-		"ldk-tutorial-node".to_string(),
-		expiry_secs,
-		None,
-	) {
+	let mut invoice_params: Bolt11InvoiceParameters = Default::default();
+	invoice_params.amount_msats = Some(amt_msat);
+	invoice_params.invoice_expiry_delta_secs = Some(expiry_secs);
+	let invoice = match channel_manager.create_bolt11_invoice(invoice_params) {
 		Ok(inv) => {
 			println!("SUCCESS: generated invoice: {}", inv);
 			inv
