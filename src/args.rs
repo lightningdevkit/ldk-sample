@@ -76,7 +76,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 			}
 			arg_idx += 1;
 			Some(s)
-		}
+		},
 		None => None,
 	};
 

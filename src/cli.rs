@@ -91,7 +91,6 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 
-					
 					let (mut announce_channel, mut with_anchors) = (false, false);
 					while let Some(word) = words.next() {
 						match word {

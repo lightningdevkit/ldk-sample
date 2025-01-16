@@ -4,13 +4,13 @@ mod cli;
 mod convert;
 mod disk;
 mod hex_utils;
-mod sweep;
 mod keys;
+mod sweep;
 
 use crate::bitcoind_client::BitcoindClient;
 use crate::disk::FilesystemLogger;
-use crate::keys::MyKeysManager;
 use crate::keys::MyKeys;
+use crate::keys::MyKeysManager;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::io;
@@ -23,9 +23,7 @@ use lightning::chain::{BestBlock, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager::{self, RecentPaymentDetails};
-use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, PaymentId
-};
+use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs, PaymentId};
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
@@ -166,7 +164,7 @@ pub type SimpleArcPeerManager<SD, M, T, F, C, L> = peer_handler::PeerManager<
 	Arc<SimpleArcOnionMessenger<M, T, F, L>>,
 	Arc<L>,
 	IgnoringMessageHandler,
-	Arc<MyKeysManager>
+	Arc<MyKeysManager>,
 >;
 
 pub(crate) type PeerManager = SimpleArcPeerManager<
@@ -185,15 +183,17 @@ pub type SimpleArcChannelManager<M, T, F, L> = channelmanager::ChannelManager<
 	Arc<MyKeysManager>,
 	Arc<MyKeysManager>,
 	Arc<F>,
-	Arc<DefaultRouter<
-		Arc<gossip::NetworkGraph<Arc<L>>>,
-		Arc<L>,
-		Arc<MyKeysManager>,
-		Arc<RwLock<ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>>>,
-		ProbabilisticScoringFeeParameters,
-		ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>,
-	>>,
-	Arc<L>
+	Arc<
+		DefaultRouter<
+			Arc<gossip::NetworkGraph<Arc<L>>>,
+			Arc<L>,
+			Arc<MyKeysManager>,
+			Arc<RwLock<ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>>>,
+			ProbabilisticScoringFeeParameters,
+			ProbabilisticScorer<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>>,
+		>,
+	>,
+	Arc<L>,
 >;
 
 pub(crate) type ChannelManager =
@@ -209,7 +209,7 @@ pub type SimpleArcOnionMessenger<M, T, F, L> = messenger::OnionMessenger<
 	Arc<DefaultMessageRouter<Arc<gossip::NetworkGraph<Arc<L>>>, Arc<L>, Arc<MyKeysManager>>>,
 	Arc<SimpleArcChannelManager<M, T, F, L>>,
 	Arc<SimpleArcChannelManager<M, T, F, L>>,
-	IgnoringMessageHandler
+	IgnoringMessageHandler,
 >;
 
 type OnionMessenger =
@@ -679,13 +679,15 @@ async fn start_ldk() {
 	let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
 
 	let keys_manager = match args.channel_secrets {
-        Some(ref secrets) => {
-			MyKeys::with_channel_keys(keys_seed, cur.as_secs(), cur.subsec_nanos(), secrets.to_string()).inner()
-        }
-        None => {
-			MyKeys::new(keys_seed, cur.as_secs(), cur.subsec_nanos()).inner()
-		}
-    };
+		Some(ref secrets) => MyKeys::with_channel_keys(
+			keys_seed,
+			cur.as_secs(),
+			cur.subsec_nanos(),
+			secrets.to_string(),
+		)
+		.inner(),
+		None => MyKeys::new(keys_seed, cur.as_secs(), cur.subsec_nanos()).inner(),
+	};
 	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 		Arc::clone(&broadcaster),
 		Arc::new(Wallet::new(Arc::clone(&bitcoind_client), Arc::clone(&logger))),
