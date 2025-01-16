@@ -1,5 +1,6 @@
 use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
+use crate::keys::MyKeysManager;
 use crate::{
 	ChainMonitor, ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount,
 	NetworkGraph, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
@@ -18,7 +19,7 @@ use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
-use lightning::sign::{EntropySource, KeysManager};
+use lightning::sign::EntropySource;
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStore;
@@ -43,11 +44,12 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
 	pub(crate) ldk_announced_node_name: [u8; 32],
 	pub(crate) network: Network,
+	pub(crate) channel_secrets: Option<String>,
 }
 
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
-	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<KeysManager>,
+	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<MyKeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
 	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
@@ -74,6 +76,54 @@ pub(crate) fn poll_for_user_input(
 		if let Some(word) = words.next() {
 			match word {
 				"help" => help(),
+				"openchannel_without_peer_addr" => {
+					// opens a channel with a connected node
+					let peer_pubkey = words.next();
+					let channel_value_sat = words.next();
+					if peer_pubkey.is_none() || channel_value_sat.is_none() {
+						println!("ERROR: openchannel_without_peer_addr has 2 required arguments: `openchannel_without_peer_addr pubkey channel_amt_satoshis` [--public]");
+						continue;
+					}
+					let peer_pubkey = peer_pubkey.unwrap();
+					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
+					if chan_amt_sat.is_err() {
+						println!("ERROR: channel amount must be a number");
+						continue;
+					}
+
+					
+					let (mut announce_channel, mut with_anchors) = (false, false);
+					while let Some(word) = words.next() {
+						match word {
+							"--public" | "--public=true" => announce_channel = true,
+							"--public=false" => announce_channel = false,
+							"--with-anchors" | "--with-anchors=true" => with_anchors = true,
+							"--with-anchors=false" => with_anchors = false,
+							_ => {
+								println!("ERROR: invalid boolean flag format. Valid formats: `--option`, `--option=true` `--option=false`");
+								continue;
+							},
+						}
+					}
+					let pubkey = peer_pubkey;
+					let pubkey = hex_utils::to_compressed_pubkey(pubkey);
+					if open_channel(
+						pubkey.unwrap(),
+						chan_amt_sat.unwrap(),
+						announce_channel,
+						with_anchors,
+						channel_manager.clone(),
+					)
+					.is_ok()
+					{
+						// let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+						// let _ = disk::persist_channel_peer(
+						// 	Path::new(&peer_data_path),
+						// 	peer_pubkey_and_ip_addr,
+						// );
+					}
+				},
+
 				"openchannel" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
@@ -848,7 +898,7 @@ fn keysend<E: EntropySource>(
 
 fn get_invoice(
 	amt_msat: u64, inbound_payments: &mut InboundPaymentInfoStorage,
-	channel_manager: &ChannelManager, keys_manager: Arc<KeysManager>, network: Network,
+	channel_manager: &ChannelManager, keys_manager: Arc<MyKeysManager>, network: Network,
 	expiry_secs: u32, logger: Arc<disk::FilesystemLogger>,
 ) {
 	let currency = match network {
