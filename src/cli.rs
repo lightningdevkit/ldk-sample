@@ -17,6 +17,8 @@ use lightning::ln::channelmanager::{
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
+use lightning::onion_message::dns_resolution::HumanReadableName;
+use lightning::onion_message::messenger::Destination;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
@@ -142,9 +144,10 @@ pub(crate) fn poll_for_user_input(
 				"sendpayment" => {
 					let invoice_str = words.next();
 					if invoice_str.is_none() {
-						println!("ERROR: sendpayment requires an invoice: `sendpayment <invoice>`");
+						println!("ERROR: sendpayment requires an invoice: `sendpayment <invoice> [amount_msat]`");
 						continue;
 					}
+					let invoice_str = invoice_str.unwrap();
 
 					let mut user_provided_amt: Option<u64> = None;
 					if let Some(amt_msat_str) = words.next() {
@@ -157,7 +160,7 @@ pub(crate) fn poll_for_user_input(
 						};
 					}
 
-					if let Ok(offer) = Offer::from_str(invoice_str.unwrap()) {
+					if let Ok(offer) = Offer::from_str(invoice_str) {
 						let random_bytes = keys_manager.get_secure_random_bytes();
 						let payment_id = PaymentId(random_bytes);
 
@@ -213,11 +216,77 @@ pub(crate) fn poll_for_user_input(
 						let amt = Some(amt_msat);
 						let pay = channel_manager
 							.pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
-						if pay.is_err() {
+						if pay.is_ok() {
+							println!("Payment in flight");
+						} else {
 							println!("ERROR: Failed to pay: {:?}", pay);
 						}
+					} else if let Ok(hrn) = HumanReadableName::from_encoded(invoice_str) {
+						let random_bytes = keys_manager.get_secure_random_bytes();
+						let payment_id = PaymentId(random_bytes);
+
+						if user_provided_amt.is_none() {
+							println!("Can't pay to a human-readable-name without an amount");
+							continue;
+						}
+
+						// We need some nodes that will resolve DNS for us in order to pay a Human
+						// Readable Name. They don't need to be trusted, but until onion message
+						// forwarding is widespread we'll directly connect to them, revealing who
+						// we intend to pay.
+						let mut dns_resolvers = Vec::new();
+						for (node_id, node) in network_graph.read_only().nodes().unordered_iter() {
+							if let Some(info) = &node.announcement_info {
+								// Sadly, 31 nodes currently squat on the DNS Resolver feature bit
+								// without speaking it.
+								// Its unclear why they're doing so, but none of them currently
+								// also have the onion messaging feature bit set, so here we check
+								// for both.
+								let supports_dns = info.features().supports_dns_resolution();
+								let supports_om = info.features().supports_onion_messages();
+								if supports_dns && supports_om {
+									if let Ok(pubkey) = node_id.as_pubkey() {
+										dns_resolvers.push(Destination::Node(pubkey));
+									}
+								}
+							}
+							if dns_resolvers.len() > 5 {
+								break;
+							}
+						}
+						if dns_resolvers.is_empty() {
+							println!(
+								"Failed to find any DNS resolving nodes, check your network graph is synced"
+							);
+							continue;
+						}
+
+						let amt_msat = user_provided_amt.unwrap();
+						outbound_payments.lock().unwrap().payments.insert(
+							payment_id,
+							PaymentInfo {
+								preimage: None,
+								secret: None,
+								status: HTLCStatus::Pending,
+								amt_msat: MillisatAmount(Some(amt_msat)),
+							},
+						);
+						fs_store
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.unwrap();
+
+						let retry = Retry::Timeout(Duration::from_secs(10));
+						let pay = |a, b, c, d, e, f| {
+							channel_manager.pay_for_offer_from_human_readable_name(a, b, c, d, e, f)
+						};
+						let pay = pay(hrn, amt_msat, payment_id, retry, None, dns_resolvers);
+						if pay.is_ok() {
+							println!("Payment in flight");
+						} else {
+							println!("ERROR: Failed to pay");
+						}
 					} else {
-						match Bolt11Invoice::from_str(invoice_str.unwrap()) {
+						match Bolt11Invoice::from_str(invoice_str) {
 							Ok(invoice) => send_payment(
 								&channel_manager,
 								&invoice,
@@ -505,7 +574,7 @@ fn help() {
 	println!("      disconnectpeer <peer_pubkey>");
 	println!("      listpeers");
 	println!("\n  Payments:");
-	println!("      sendpayment <invoice|offer> [<amount_msat>]");
+	println!("      sendpayment <invoice|offer|human readable name> [<amount_msat>]");
 	println!("      keysend <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
