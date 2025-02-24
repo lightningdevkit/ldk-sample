@@ -82,32 +82,49 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
-					let (pubkey, peer_addr) =
-						match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
-							Ok(info) => info,
-							Err(e) => {
-								println!("{:?}", e.into_inner().unwrap());
-								continue;
-							},
+
+					let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split("@");
+					let pubkey = pubkey_and_addr.next();
+					let peer_addr_str = pubkey_and_addr.next();
+					let pubkey = hex_utils::to_compressed_pubkey(pubkey.unwrap());
+					if pubkey.is_none() {
+						println!("ERROR: unable to parse given pubkey for node");
+						continue;
+					}
+					let pubkey = pubkey.unwrap();
+
+					if peer_addr_str.is_none() {
+						if peer_manager.peer_by_node_id(&pubkey).is_none() {
+							println!("ERROR: Peer address not provided and peer is not connected");
+							continue;
+						}
+					} else {
+						let (pubkey, peer_addr) =
+							match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
+								Ok(info) => info,
+								Err(e) => {
+									println!("{:?}", e.into_inner().unwrap());
+									continue;
+								},
+							};
+
+						if tokio::runtime::Handle::current()
+							.block_on(connect_peer_if_necessary(
+								pubkey,
+								peer_addr,
+								peer_manager.clone(),
+							))
+							.is_err()
+						{
+							continue;
 						};
+					}
 
 					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
 					if chan_amt_sat.is_err() {
 						println!("ERROR: channel amount must be a number");
 						continue;
 					}
-
-					if tokio::runtime::Handle::current()
-						.block_on(connect_peer_if_necessary(
-							pubkey,
-							peer_addr,
-							peer_manager.clone(),
-						))
-						.is_err()
-					{
-						continue;
-					};
-
 					let (mut announce_channel, mut with_anchors) = (false, false);
 					while let Some(word) = words.next() {
 						match word {
@@ -131,11 +148,14 @@ pub(crate) fn poll_for_user_input(
 					)
 					.is_ok()
 					{
-						let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
-						let _ = disk::persist_channel_peer(
-							Path::new(&peer_data_path),
-							peer_pubkey_and_ip_addr,
-						);
+						if peer_addr_str.is_some() {
+							let peer_data_path =
+								format!("{}/channel_peer_data", ldk_data_dir.clone());
+							let _ = disk::persist_channel_peer(
+								Path::new(&peer_data_path),
+								peer_pubkey_and_ip_addr,
+							);
+						}
 					}
 				},
 				"sendpayment" => {
@@ -498,7 +518,7 @@ fn help() {
 	println!("  help\tShows a list of commands.");
 	println!("  quit\tClose the application.");
 	println!("\n  Channels:");
-	println!("      openchannel pubkey@host:port <amt_satoshis> [--public] [--with-anchors]");
+	println!("      openchannel pubkey@[host:port] <amt_satoshis> [--public] [--with-anchors]");
 	println!("      closechannel <channel_id> <peer_pubkey>");
 	println!("      forceclosechannel <channel_id> <peer_pubkey>");
 	println!("      listchannels");
