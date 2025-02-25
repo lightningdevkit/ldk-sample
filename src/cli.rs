@@ -10,12 +10,15 @@ use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance;
 use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
-use lightning::ln::bolt11_payment::payment_parameters_from_zero_amount_invoice;
-use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
-use lightning::ln::invoice_utils as utils;
+use lightning::ln::bolt11_payment::payment_parameters_from_variable_amount_invoice;
+use lightning::ln::channelmanager::{
+	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry,
+};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
+use lightning::onion_message::dns_resolution::HumanReadableName;
+use lightning::onion_message::messenger::Destination;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
@@ -23,7 +26,7 @@ use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::persist::KVStore;
 use lightning::util::ser::Writeable;
-use lightning_invoice::{Bolt11Invoice, Currency};
+use lightning_invoice::Bolt11Invoice;
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
 use std::io::Write;
@@ -50,7 +53,7 @@ pub(crate) fn poll_for_user_input(
 	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
 	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
-	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
+	fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -141,9 +144,10 @@ pub(crate) fn poll_for_user_input(
 				"sendpayment" => {
 					let invoice_str = words.next();
 					if invoice_str.is_none() {
-						println!("ERROR: sendpayment requires an invoice: `sendpayment <invoice>`");
+						println!("ERROR: sendpayment requires an invoice: `sendpayment <invoice> [amount_msat]`");
 						continue;
 					}
+					let invoice_str = invoice_str.unwrap();
 
 					let mut user_provided_amt: Option<u64> = None;
 					if let Some(amt_msat_str) = words.next() {
@@ -156,7 +160,7 @@ pub(crate) fn poll_for_user_input(
 						};
 					}
 
-					if let Ok(offer) = Offer::from_str(invoice_str.unwrap()) {
+					if let Ok(offer) = Offer::from_str(invoice_str) {
 						let random_bytes = keys_manager.get_secure_random_bytes();
 						let payment_id = PaymentId(random_bytes);
 
@@ -212,11 +216,77 @@ pub(crate) fn poll_for_user_input(
 						let amt = Some(amt_msat);
 						let pay = channel_manager
 							.pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
-						if pay.is_err() {
+						if pay.is_ok() {
+							println!("Payment in flight");
+						} else {
 							println!("ERROR: Failed to pay: {:?}", pay);
 						}
+					} else if let Ok(hrn) = HumanReadableName::from_encoded(invoice_str) {
+						let random_bytes = keys_manager.get_secure_random_bytes();
+						let payment_id = PaymentId(random_bytes);
+
+						if user_provided_amt.is_none() {
+							println!("Can't pay to a human-readable-name without an amount");
+							continue;
+						}
+
+						// We need some nodes that will resolve DNS for us in order to pay a Human
+						// Readable Name. They don't need to be trusted, but until onion message
+						// forwarding is widespread we'll directly connect to them, revealing who
+						// we intend to pay.
+						let mut dns_resolvers = Vec::new();
+						for (node_id, node) in network_graph.read_only().nodes().unordered_iter() {
+							if let Some(info) = &node.announcement_info {
+								// Sadly, 31 nodes currently squat on the DNS Resolver feature bit
+								// without speaking it.
+								// Its unclear why they're doing so, but none of them currently
+								// also have the onion messaging feature bit set, so here we check
+								// for both.
+								let supports_dns = info.features().supports_dns_resolution();
+								let supports_om = info.features().supports_onion_messages();
+								if supports_dns && supports_om {
+									if let Ok(pubkey) = node_id.as_pubkey() {
+										dns_resolvers.push(Destination::Node(pubkey));
+									}
+								}
+							}
+							if dns_resolvers.len() > 5 {
+								break;
+							}
+						}
+						if dns_resolvers.is_empty() {
+							println!(
+								"Failed to find any DNS resolving nodes, check your network graph is synced"
+							);
+							continue;
+						}
+
+						let amt_msat = user_provided_amt.unwrap();
+						outbound_payments.lock().unwrap().payments.insert(
+							payment_id,
+							PaymentInfo {
+								preimage: None,
+								secret: None,
+								status: HTLCStatus::Pending,
+								amt_msat: MillisatAmount(Some(amt_msat)),
+							},
+						);
+						fs_store
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.unwrap();
+
+						let retry = Retry::Timeout(Duration::from_secs(10));
+						let pay = |a, b, c, d, e, f| {
+							channel_manager.pay_for_offer_from_human_readable_name(a, b, c, d, e, f)
+						};
+						let pay = pay(hrn, amt_msat, payment_id, retry, None, dns_resolvers);
+						if pay.is_ok() {
+							println!("Payment in flight");
+						} else {
+							println!("ERROR: Failed to pay");
+						}
 					} else {
-						match Bolt11Invoice::from_str(invoice_str.unwrap()) {
+						match Bolt11Invoice::from_str(invoice_str) {
 							Ok(invoice) => send_payment(
 								&channel_manager,
 								&invoice,
@@ -325,10 +395,7 @@ pub(crate) fn poll_for_user_input(
 						amt_msat.unwrap(),
 						&mut inbound_payments,
 						&channel_manager,
-						Arc::clone(&keys_manager),
-						network,
 						expiry_secs.unwrap(),
-						Arc::clone(&logger),
 					);
 					fs_store
 						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
@@ -507,7 +574,7 @@ fn help() {
 	println!("      disconnectpeer <peer_pubkey>");
 	println!("      listpeers");
 	println!("\n  Payments:");
-	println!("      sendpayment <invoice|offer> [<amount_msat>]");
+	println!("      sendpayment <invoice|offer|human readable name> [<amount_msat>]");
 	println!("      keysend <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
@@ -746,7 +813,7 @@ fn send_payment(
 		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
 	let pay_params_opt = if zero_amt_invoice {
 		if let Some(amt_msat) = required_amount_msat {
-			payment_parameters_from_zero_amount_invoice(invoice, amt_msat)
+			payment_parameters_from_variable_amount_invoice(invoice, amt_msat)
 		} else {
 			println!("Need an amount for the given 0-value invoice");
 			print!("> ");
@@ -826,7 +893,7 @@ fn keysend<E: EntropySource>(
 		},
 	);
 	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-	match channel_manager.send_spontaneous_payment_with_retry(
+	match channel_manager.send_spontaneous_payment(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
 		payment_id,
@@ -848,25 +915,12 @@ fn keysend<E: EntropySource>(
 
 fn get_invoice(
 	amt_msat: u64, inbound_payments: &mut InboundPaymentInfoStorage,
-	channel_manager: &ChannelManager, keys_manager: Arc<KeysManager>, network: Network,
-	expiry_secs: u32, logger: Arc<disk::FilesystemLogger>,
+	channel_manager: &ChannelManager, expiry_secs: u32,
 ) {
-	let currency = match network {
-		Network::Bitcoin => Currency::Bitcoin,
-		Network::Regtest => Currency::Regtest,
-		Network::Signet => Currency::Signet,
-		Network::Testnet | _ => Currency::BitcoinTestnet,
-	};
-	let invoice = match utils::create_invoice_from_channelmanager(
-		channel_manager,
-		keys_manager,
-		logger,
-		currency,
-		Some(amt_msat),
-		"ldk-tutorial-node".to_string(),
-		expiry_secs,
-		None,
-	) {
+	let mut invoice_params: Bolt11InvoiceParameters = Default::default();
+	invoice_params.amount_msats = Some(amt_msat);
+	invoice_params.invoice_expiry_delta_secs = Some(expiry_secs);
+	let invoice = match channel_manager.create_bolt11_invoice(invoice_params) {
 		Ok(inv) => {
 			println!("SUCCESS: generated invoice: {}", inv);
 			inv
