@@ -355,6 +355,7 @@ async fn handle_ldk_events(
 				temporary_channel_id,
 				counterparty_node_id,
 				user_channel_id,
+				None,
 			);
 
 			if let Err(e) = res {
@@ -800,7 +801,7 @@ async fn start_ldk() {
 		];
 
 		for (blockhash, channel_monitor) in channelmonitors.drain(..) {
-			let outpoint = channel_monitor.get_funding_txo().0;
+			let outpoint = channel_monitor.get_funding_txo();
 			chain_listener_channel_monitors.push((
 				blockhash,
 				(channel_monitor, broadcaster.clone(), fee_estimator.clone(), logger.clone()),
@@ -830,9 +831,10 @@ async fn start_ldk() {
 	// Step 14: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
-		let funding_outpoint = item.2;
+		// let funding_outpoint = item.2;
+		let channel_id = channel_monitor.channel_id();
 		assert_eq!(
-			chain_monitor.watch_channel(funding_outpoint, channel_monitor),
+			chain_monitor.watch_channel(channel_id, channel_monitor),
 			Ok(ChannelMonitorUpdateStatus::Completed)
 		);
 	}
