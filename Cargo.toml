@@ -19,27 +19,6 @@ lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightnin
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "f9b8d630c579d76ec85e283bdd0fd0c9408a7474" }
 lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "f9b8d630c579d76ec85e283bdd0fd0c9408a7474" }
 
-
-
-# lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
-# lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["std"] }
-# lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
-# lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
-# lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["futures"] }
-# lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
-# lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main", features = ["rpc-client", "tokio"] }
-# lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
-# lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", branch = "main" }
-
-# lightning = { version = "0.1.0", features = ["dnssec"] }
-# lightning-block-sync = { version = "0.1.0", features = [ "rpc-client", "tokio" ] }
-# lightning-dns-resolver = { version = "0.2.0" }
-# lightning-invoice = { version = "0.33.0" }
-# lightning-net-tokio = { version = "0.1.0" }
-# lightning-persister = { version = "0.1.0" }
-# lightning-background-processor = { version = "0.1.0", features = [ "futures" ] }
-# lightning-rapid-gossip-sync = { version = "0.1.0" }
-
 base64 = "0.13.0"
 bitcoin = "0.32"
 bitcoin-bech32 = "0.12"

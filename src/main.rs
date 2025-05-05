@@ -831,7 +831,6 @@ async fn start_ldk() {
 	// Step 14: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
-		// let funding_outpoint = item.2;
 		let channel_id = channel_monitor.channel_id();
 		assert_eq!(
 			chain_monitor.watch_channel(channel_id, channel_monitor),

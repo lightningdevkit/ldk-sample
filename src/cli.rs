@@ -9,8 +9,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance;
-// use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
-// use lightning::ln::bolt11_payment::payment_parameters_from_variable_amount_invoice;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry,
 };
@@ -829,36 +827,27 @@ fn send_payment(
 ) {
 	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
-	// let zero_amt_invoice =
-	//   invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
-	// let pay_params_opt = if zero_amt_invoice {
-	//   if let Some(amt_msat) = required_amount_msat {
-	//     payment_parameters_from_variable_amount_invoice(invoice, amt_msat)
-	//   } else {
-	//     println!("Need an amount for the given 0-value invoice");
-	//     print!("> ");
-	//     return;
-	//   }
-	// } else {
-	//   if required_amount_msat.is_some() && invoice.amount_milli_satoshis() != required_amount_msat
-	//   {
-	//     println!(
-	//       "Amount didn't match invoice value of {}msat",
-	//       invoice.amount_milli_satoshis().unwrap_or(0)
-	//     );
-	//     print!("> ");
-	//     return;
-	//   }
-	//   payment_parameters_from_invoice(invoice)
-	// };
-	// let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
-	//   Ok(res) => res,
-	//   Err(e) => {
-	//     println!("Failed to parse invoice: {:?}", e);
-	//     print!("> ");
-	//     return;
-	//   },
-	// };
+	let zero_amt_invoice =
+		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
+	let amount_msats = if zero_amt_invoice {
+		if required_amount_msat.is_none() {
+			println!("Need an amount for the given 0-value invoice");
+			print!("> ");
+			return;
+		}
+		required_amount_msat
+	} else {
+		if required_amount_msat.is_some() && invoice.amount_milli_satoshis() != required_amount_msat
+		{
+			println!(
+				"Amount didn't match invoice value of {}msat",
+				invoice.amount_milli_satoshis().unwrap_or(0)
+			);
+			print!("> ");
+			return;
+		}
+		None
+	};
 	outbound_payments.payments.insert(
 		payment_id,
 		PaymentInfo {
@@ -870,34 +859,27 @@ fn send_payment(
 	);
 	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 
-	// TODO: fix this so the amounts match
-	let amount_msats = invoice.amount_milli_satoshis().or(required_amount_msat);
 	let route_params_config = RouteParametersConfig::default();
-	channel_manager.pay_for_bolt11_invoice(
-		invoice, payment_id, amount_msats, route_params_config,
-		Retry::Timeout(Duration::from_secs(10))
-	).unwrap();
-
-	// match channel_manager.send_payment(
-	//   payment_hash,
-	//   recipient_onion,
-	//   payment_id,
-	//   route_params,
-	//   Retry::Timeout(Duration::from_secs(10)),
-	// ) {
-	//   Ok(_) => {
-	//     let payee_pubkey = invoice.recover_payee_pub_key();
-	//     let amt_msat = invoice.amount_milli_satoshis().unwrap();
-	//     println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-	//     print!("> ");
-	//   },
-	//   Err(e) => {
-	//     println!("ERROR: failed to send payment: {:?}", e);
-	//     print!("> ");
-	//     outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
-	//     fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-	//   },
-	// };
+	match channel_manager.pay_for_bolt11_invoice(
+		invoice,
+		payment_id,
+		amount_msats,
+		route_params_config,
+		Retry::Timeout(Duration::from_secs(10)),
+	) {
+		Ok(_) => {
+			let payee_pubkey = invoice.recover_payee_pub_key();
+			let amt_msat = invoice.amount_milli_satoshis().unwrap();
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			print!("> ");
+		},
+		Err(e) => {
+			println!("ERROR: failed to send payment: {:?}", e);
+			print!("> ");
+			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+		},
+	};
 }
 
 fn keysend<E: EntropySource>(
