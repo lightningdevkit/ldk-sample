@@ -756,10 +756,8 @@ fn list_payments(
 pub(crate) async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 ) -> Result<(), ()> {
-	for peer_details in peer_manager.list_peers() {
-		if peer_details.counterparty_node_id == pubkey {
-			return Ok(());
-		}
+	if peer_manager.peer_by_node_id(&pubkey).is_some() {
+		return Ok(());
 	}
 	let res = do_connect_peer(pubkey, peer_addr, peer_manager).await;
 	if res.is_err() {
