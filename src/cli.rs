@@ -1,4 +1,4 @@
-use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
+use crate::disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
 	ChainMonitor, ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount,
@@ -29,7 +29,6 @@ use lightning_persister::fs_store::FilesystemStore;
 use std::env;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,8 +51,7 @@ pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
-	fs_store: Arc<FilesystemStore>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -144,24 +142,13 @@ pub(crate) async fn poll_for_user_input(
 						}
 					}
 
-					if open_channel(
+					let _ = open_channel(
 						pubkey,
 						chan_amt_sat.unwrap(),
 						announce_channel,
 						with_anchors,
 						channel_manager.clone(),
-					)
-					.is_ok()
-					{
-						if peer_addr_str.is_some() {
-							let peer_data_path =
-								format!("{}/channel_peer_data", ldk_data_dir.clone());
-							let _ = disk::persist_channel_peer(
-								Path::new(&peer_data_path),
-								peer_pubkey_and_ip_addr,
-							);
-						}
-					}
+					);
 				},
 				"sendpayment" => {
 					let invoice_str = words.next();

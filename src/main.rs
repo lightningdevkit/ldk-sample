@@ -1083,37 +1083,47 @@ async fn start_ldk() {
 	// Regularly reconnect to channel peers.
 	let connect_cm = Arc::clone(&channel_manager);
 	let connect_pm = Arc::clone(&peer_manager);
-	let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir);
 	let stop_connect = Arc::clone(&stop_listen_connect);
+	let graph_connect = Arc::clone(&network_graph);
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
 		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			interval.tick().await;
-			match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
-				Ok(info) => {
-					for node_id in connect_cm
-						.list_channels()
-						.iter()
-						.map(|chan| chan.counterparty.node_id)
-						.filter(|id| connect_pm.peer_by_node_id(id).is_none())
-					{
-						if stop_connect.load(Ordering::Acquire) {
-							return;
-						}
-						for (pubkey, peer_addr) in info.iter() {
-							if *pubkey == node_id {
-								let _ = cli::do_connect_peer(
-									*pubkey,
-									peer_addr.clone(),
-									Arc::clone(&connect_pm),
-								)
-								.await;
-							}
-						}
+			for node_id in connect_cm
+				.list_channels()
+				.iter()
+				.map(|chan| chan.counterparty.node_id)
+				.filter(|id| connect_pm.peer_by_node_id(id).is_none())
+			{
+				if stop_connect.load(Ordering::Acquire) {
+					return;
+				}
+				let id = NodeId::from_pubkey(&node_id);
+				let addrs = if let Some(node) = graph_connect.read_only().node(&id) {
+					if let Some(ann) = &node.announcement_info {
+						let non_onion = |addr| match addr {
+							&lightning::ln::msgs::SocketAddress::OnionV2(_) => None,
+							&lightning::ln::msgs::SocketAddress::OnionV3 { .. } => None,
+							_ => Some(addr.clone()),
+						};
+						ann.addresses().iter().filter_map(non_onion).collect::<Vec<_>>()
+					} else {
+						Vec::new()
 					}
-				},
-				Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
+				} else {
+					Vec::new()
+				};
+				for addr in addrs {
+					let sockaddrs = addr.to_socket_addrs();
+					if sockaddrs.is_err() {
+						continue;
+					}
+					for sockaddr in sockaddrs.unwrap() {
+						let _ =
+							cli::do_connect_peer(node_id, sockaddr, Arc::clone(&connect_pm)).await;
+					}
+				}
 			}
 		}
 	});
@@ -1165,7 +1175,6 @@ async fn start_ldk() {
 			network_graph,
 			inbound_payments,
 			outbound_payments,
-			ldk_data_dir,
 			cli_persister,
 		)
 	);
