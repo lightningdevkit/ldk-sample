@@ -845,7 +845,7 @@ async fn send_payment(
 ) {
 	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
-	match (invoice.amount_milli_satoshis(), required_amount_msat) {
+	let amt_msat = match (invoice.amount_milli_satoshis(), required_amount_msat) {
 		// pay_for_bolt11_invoice only validates that the amount we pay is >= the invoice's
 		// required amount, not that its equal (to allow for overpayment). As that is somewhat
 		// surprising, here we check and reject all disagreements in amount.
@@ -857,8 +857,14 @@ async fn send_payment(
 			print!("> ");
 			return;
 		},
-		_ => {},
-	}
+		(Some(inv_amt), _) => inv_amt,
+		(_, Some(req_amt)) => req_amt,
+		(None, None) => {
+			println!("Need an amount to pay an amountless invoice");
+			print!("> ");
+			return;
+		},
+	};
 	let write_future = {
 		let mut outbound_payments = outbound_payments.lock().unwrap();
 		outbound_payments.payments.insert(
@@ -867,7 +873,7 @@ async fn send_payment(
 				preimage: None,
 				secret: payment_secret,
 				status: HTLCStatus::Pending,
-				amt_msat: MillisatAmount(invoice.amount_milli_satoshis()),
+				amt_msat: MillisatAmount(Some(amt_msat)),
 			},
 		);
 		fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
@@ -883,7 +889,6 @@ async fn send_payment(
 	) {
 		Ok(_) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
-			let amt_msat = invoice.amount_milli_satoshis().unwrap();
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 			print!("> ");
 		},
