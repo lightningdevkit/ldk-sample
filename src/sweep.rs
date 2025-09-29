@@ -5,7 +5,7 @@ use std::{fs, io};
 
 use lightning::sign::{EntropySource, KeysManager, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, WithoutLength, Writeable};
 
 use lightning_persister::fs_store::FilesystemStore;
@@ -63,6 +63,7 @@ pub(crate) async fn migrate_deprecated_spendable_outputs(
 			let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
 			persister
 				.write("spendable_outputs", "", &key, WithoutLength(&outputs).encode())
+				.await
 				.unwrap();
 			fs::remove_dir_all(&processing_spendables_dir).unwrap();
 		}
@@ -90,7 +91,7 @@ pub(crate) async fn migrate_deprecated_spendable_outputs(
 	}
 
 	let spend_delay = Some(best_block.height + 2);
-	sweeper.track_spendable_outputs(outputs.clone(), None, false, spend_delay).unwrap();
+	sweeper.track_spendable_outputs(outputs.clone(), None, false, spend_delay).await.unwrap();
 
 	fs::remove_dir_all(&spendables_dir).unwrap();
 	fs::remove_dir_all(&pending_spendables_dir).unwrap();

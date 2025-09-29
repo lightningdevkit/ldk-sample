@@ -17,7 +17,7 @@ use bitcoin_bech32::WitnessProgram;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{BestBlock, Filter, Watch};
-use lightning::events::bump_transaction::sync::{BumpTransactionEventHandlerSync, WalletSync};
+use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager::{self, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
@@ -41,19 +41,15 @@ use lightning::util::config::UserConfig;
 use lightning::util::hash_tables::hash_map::Entry;
 use lightning::util::hash_tables::HashMap;
 use lightning::util::persist::{
-	self, KVStoreSync, MonitorUpdatingPersister, OUTPUT_SWEEPER_PERSISTENCE_KEY,
+	self, KVStore, MonitorUpdatingPersister, OUTPUT_SWEEPER_PERSISTENCE_KEY,
 	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning::util::sweep as ldk_sweep;
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
-use lightning_background_processor::{
-	process_events_async_with_kv_store_sync, GossipSync, NO_LIQUIDITY_MANAGER,
-};
-use lightning_block_sync::init;
-use lightning_block_sync::poll;
-use lightning_block_sync::SpvClient;
-use lightning_block_sync::UnboundedCache;
+use lightning_background_processor::{process_events_async, GossipSync, NO_LIQUIDITY_MANAGER};
+use lightning_block_sync::gossip::TokioSpawner;
+use lightning_block_sync::{init, poll, SpvClient, UnboundedCache};
 use lightning_dns_resolver::OMDomainResolver;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
@@ -157,7 +153,7 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 >;
 
 pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
-	lightning_block_sync::gossip::TokioSpawner,
+	TokioSpawner,
 	Arc<lightning_block_sync::rpc::RpcClient>,
 	Arc<FilesystemLogger>,
 >;
@@ -194,14 +190,14 @@ type OnionMessenger = LdkOnionMessenger<
 	IgnoringMessageHandler,
 >;
 
-pub(crate) type BumpTxEventHandler = BumpTransactionEventHandlerSync<
+pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 	Arc<BitcoindClient>,
-	Arc<WalletSync<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
+	Arc<Wallet<Arc<BitcoindClient>, Arc<FilesystemLogger>>>,
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
 >;
 
-pub(crate) type OutputSweeper = ldk_sweep::OutputSweeperSync<
+pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
 	Arc<BitcoindClient>,
 	Arc<BitcoindClient>,
 	Arc<BitcoindClient>,
@@ -310,9 +306,7 @@ fn handle_ldk_events<'a>(
 					} => (payment_preimage, Some(payment_secret)),
 					PaymentPurpose::Bolt12OfferPayment {
 						payment_preimage, payment_secret, ..
-					} => {
-						(payment_preimage, Some(payment_secret))
-					},
+					} => (payment_preimage, Some(payment_secret)),
 					PaymentPurpose::Bolt12RefundPayment {
 						payment_preimage,
 						payment_secret,
@@ -320,53 +314,65 @@ fn handle_ldk_events<'a>(
 					} => (payment_preimage, Some(payment_secret)),
 					PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
 				};
-				let mut inbound = inbound_payments.lock().unwrap();
-				match inbound.payments.entry(payment_hash) {
-					Entry::Occupied(mut e) => {
-						let payment = e.get_mut();
-						payment.status = HTLCStatus::Succeeded;
-						payment.preimage = payment_preimage;
-						payment.secret = payment_secret;
-					},
-					Entry::Vacant(e) => {
-						e.insert(PaymentInfo {
-							preimage: payment_preimage,
-							secret: payment_secret,
-							status: HTLCStatus::Succeeded,
-							amt_msat: MillisatAmount(Some(amount_msat)),
-						});
-					},
-				}
-				fs_store.write("", "", INBOUND_PAYMENTS_FNAME, inbound.encode()).unwrap();
+				let write_future = {
+					let mut inbound = inbound_payments.lock().unwrap();
+					match inbound.payments.entry(payment_hash) {
+						Entry::Occupied(mut e) => {
+							let payment = e.get_mut();
+							payment.status = HTLCStatus::Succeeded;
+							payment.preimage = payment_preimage;
+							payment.secret = payment_secret;
+						},
+						Entry::Vacant(e) => {
+							e.insert(PaymentInfo {
+								preimage: payment_preimage,
+								secret: payment_secret,
+								status: HTLCStatus::Succeeded,
+								amt_msat: MillisatAmount(Some(amount_msat)),
+							});
+						},
+					}
+					fs_store.write("", "", INBOUND_PAYMENTS_FNAME, inbound.encode())
+				};
+				write_future.await.unwrap();
 			},
 			Event::PaymentSent {
-				payment_preimage, payment_hash, fee_paid_msat, payment_id, ..
+				payment_preimage,
+				payment_hash,
+				fee_paid_msat,
+				payment_id,
+				..
 			} => {
-				let mut outbound = outbound_payments.lock().unwrap();
-				for (id, payment) in outbound.payments.iter_mut() {
-					if *id == payment_id.unwrap() {
-						payment.preimage = Some(payment_preimage);
-						payment.status = HTLCStatus::Succeeded;
-						println!(
-							"\nEVENT: successfully sent payment of {} millisatoshis{} from \
-									 payment hash {} with preimage {}",
-							payment.amt_msat,
-							if let Some(fee) = fee_paid_msat {
-								format!(" (fee {} msat)", fee)
-							} else {
-								"".to_string()
-							},
-							payment_hash,
-							payment_preimage
-						);
-						print!("> ");
-						std::io::stdout().flush().unwrap();
+				let write_future = {
+					let mut outbound = outbound_payments.lock().unwrap();
+					for (id, payment) in outbound.payments.iter_mut() {
+						if *id == payment_id.unwrap() {
+							payment.preimage = Some(payment_preimage);
+							payment.status = HTLCStatus::Succeeded;
+							println!(
+								"\nEVENT: successfully sent payment of {} millisatoshis{} from \
+										 payment hash {} with preimage {}",
+								payment.amt_msat,
+								if let Some(fee) = fee_paid_msat {
+									format!(" (fee {} msat)", fee)
+								} else {
+									"".to_string()
+								},
+								payment_hash,
+								payment_preimage
+							);
+							print!("> ");
+							std::io::stdout().flush().unwrap();
+						}
 					}
-				}
-				fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound.encode()).unwrap();
+					fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound.encode())
+				};
+				write_future.await.unwrap();
 			},
 			Event::OpenChannelRequest {
-				ref temporary_channel_id, ref counterparty_node_id, ..
+				ref temporary_channel_id,
+				ref counterparty_node_id,
+				..
 			} => {
 				let mut random_bytes = [0u8; 16];
 				random_bytes.copy_from_slice(&keys_manager.get_secure_random_bytes()[..16]);
@@ -405,24 +411,35 @@ fn handle_ldk_events<'a>(
 						"\nEVENT: Failed to send payment to payment ID {}, payment hash {}: {:?}",
 						payment_id,
 						hash,
-						if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
+						if let Some(r) = reason {
+							r
+						} else {
+							PaymentFailureReason::RetriesExhausted
+						}
 					);
 				} else {
 					print!(
 						"\nEVENT: Failed fetch invoice for payment ID {}: {:?}",
 						payment_id,
-						if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
+						if let Some(r) = reason {
+							r
+						} else {
+							PaymentFailureReason::RetriesExhausted
+						}
 					);
 				}
 				print!("> ");
 				std::io::stdout().flush().unwrap();
 
-				let mut outbound = outbound_payments.lock().unwrap();
-				if outbound.payments.contains_key(&payment_id) {
-					let payment = outbound.payments.get_mut(&payment_id).unwrap();
-					payment.status = HTLCStatus::Failed;
-				}
-				fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound.encode()).unwrap();
+				let write_future = {
+					let mut outbound = outbound_payments.lock().unwrap();
+					if outbound.payments.contains_key(&payment_id) {
+						let payment = outbound.payments.get_mut(&payment_id).unwrap();
+						payment.status = HTLCStatus::Failed;
+					}
+					fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound.encode())
+				};
+				write_future.await.unwrap();
 			},
 			Event::InvoiceReceived { .. } => {
 				// We don't use the manual invoice payment logic, so this event should never be seen.
@@ -441,7 +458,8 @@ fn handle_ldk_events<'a>(
 
 				let node_str = |channel_id: &Option<ChannelId>| match channel_id {
 					None => String::new(),
-					Some(channel_id) => match channels.iter().find(|c| c.channel_id == *channel_id) {
+					Some(channel_id) => match channels.iter().find(|c| c.channel_id == *channel_id)
+					{
 						None => String::new(),
 						Some(channel) => {
 							match nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id)) {
@@ -461,8 +479,11 @@ fn handle_ldk_events<'a>(
 						.map(|channel_id| format!(" with channel {}", channel_id))
 						.unwrap_or_default()
 				};
-				let from_prev_str =
-					format!(" from {}{}", node_str(&prev_channel_id), channel_str(&prev_channel_id));
+				let from_prev_str = format!(
+					" from {}{}",
+					node_str(&prev_channel_id),
+					channel_str(&prev_channel_id),
+				);
 				let to_next_str =
 					format!(" to {}{}", node_str(&next_channel_id), channel_str(&next_channel_id));
 
@@ -492,7 +513,11 @@ fn handle_ldk_events<'a>(
 			},
 			Event::HTLCHandlingFailed { .. } => {},
 			Event::SpendableOutputs { outputs, channel_id } => {
-				output_sweeper.0.track_spendable_outputs(outputs, channel_id, false, None).unwrap();
+				output_sweeper
+					.0
+					.track_spendable_outputs(outputs, channel_id, false, None)
+					.await
+					.unwrap();
 			},
 			Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
 				println!(
@@ -503,11 +528,7 @@ fn handle_ldk_events<'a>(
 				print!("> ");
 				std::io::stdout().flush().unwrap();
 			},
-			Event::ChannelReady {
-				ref channel_id,
-				ref counterparty_node_id,
-				..
-			} => {
+			Event::ChannelReady { ref channel_id, ref counterparty_node_id, .. } => {
 				println!(
 					"\nEVENT: Channel {} with peer {} is ready to be used!",
 					channel_id,
@@ -539,7 +560,7 @@ fn handle_ldk_events<'a>(
 				// We don't use the onion message interception feature, so we have no use for this
 				// event.
 			},
-			Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
+			Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event).await,
 			Event::ConnectionNeeded { node_id, addresses } => {
 				tokio::spawn(async move {
 					for address in addresses {
@@ -649,9 +670,9 @@ async fn start_ldk() {
 	let keys_manager =
 		Arc::new(KeysManager::new(&keys_seed, cur.as_secs(), cur.subsec_nanos(), true));
 
-	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandlerSync::new(
+	let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 		Arc::clone(&broadcaster),
-		Arc::new(WalletSync::new(Arc::clone(&bitcoind_client), Arc::clone(&logger))),
+		Arc::new(Wallet::new(Arc::clone(&bitcoind_client), Arc::clone(&logger))),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 	));
@@ -771,11 +792,14 @@ async fn start_ldk() {
 	};
 
 	// Step 12: Initialize the OutputSweeper.
-	let (sweeper_best_block, output_sweeper) = match fs_store.read(
-		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
-		OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
-		OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	) {
+	let (sweeper_best_block, output_sweeper) = match fs_store
+		.read(
+			OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+			OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+			OUTPUT_SWEEPER_PERSISTENCE_KEY,
+		)
+		.await
+	{
 		Err(e) if e.kind() == io::ErrorKind::NotFound => {
 			let sweeper = OutputSweeper::new(
 				channel_manager.current_best_block(),
@@ -899,7 +923,7 @@ async fn start_ldk() {
 	// Install a GossipVerifier in in the P2PGossipSync
 	let utxo_lookup = GossipVerifier::new(
 		Arc::clone(&bitcoind_client.bitcoind_rpc_client),
-		lightning_block_sync::gossip::TokioSpawner,
+		TokioSpawner,
 		Arc::clone(&gossip_sync),
 		Arc::clone(&peer_manager),
 	);
@@ -979,6 +1003,7 @@ async fn start_ldk() {
 	}
 	fs_store
 		.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.lock().unwrap().encode())
+		.await
 		.unwrap();
 
 	// Step 20: Handle LDK Events
@@ -1028,7 +1053,7 @@ async fn start_ldk() {
 
 	// Step 22: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
-	let mut background_processor = tokio::spawn(process_events_async_with_kv_store_sync(
+	let mut background_processor = tokio::spawn(process_events_async(
 		Arc::clone(&persister),
 		event_handler,
 		Arc::clone(&chain_monitor),
@@ -1129,7 +1154,7 @@ async fn start_ldk() {
 	let cli_chain_monitor = Arc::clone(&chain_monitor);
 	let cli_persister = Arc::clone(&persister);
 	let cli_peer_manager = Arc::clone(&peer_manager);
-	let cli_poll = tokio::task::spawn_blocking(move || {
+	let cli_poll = tokio::task::spawn(
 		cli::poll_for_user_input(
 			cli_peer_manager,
 			cli_channel_manager,
@@ -1141,7 +1166,7 @@ async fn start_ldk() {
 			ldk_data_dir,
 			cli_persister,
 		)
-	});
+	);
 
 	// Exit if either CLI polling exits or the background processor exits (which shouldn't happen
 	// unless we fail to write to the filesystem).
@@ -1166,6 +1191,7 @@ async fn start_ldk() {
 				persist::CHANNEL_MANAGER_PERSISTENCE_KEY,
 				channel_manager.encode(),
 			)
+			.await
 			.unwrap();
 		use lightning::util::logger::Logger;
 		lightning::log_error!(
