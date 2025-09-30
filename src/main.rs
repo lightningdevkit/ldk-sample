@@ -16,7 +16,7 @@ use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
-use lightning::chain::{BestBlock, Filter, Watch};
+use lightning::chain::{BestBlock, Filter};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::channelmanager::{self, RecentPaymentDetails};
@@ -871,7 +871,7 @@ async fn start_ldk() {
 	for (_, (channel_monitor, _, _, _), _) in chain_listener_channel_monitors {
 		let channel_id = channel_monitor.channel_id();
 		assert_eq!(
-			chain_monitor.watch_channel(channel_id, channel_monitor),
+			chain_monitor.load_existing_monitor(channel_id, channel_monitor),
 			Ok(ChannelMonitorUpdateStatus::Completed)
 		);
 	}
