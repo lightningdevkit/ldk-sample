@@ -1050,13 +1050,10 @@ async fn start_ldk() {
 		}
 	};
 
-	// Step 21: Persist ChannelManager and NetworkGraph
-	let persister = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
-
-	// Step 22: Background Processing
+	// Step 21: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
 	let mut background_processor = tokio::spawn(process_events_async(
-		Arc::clone(&persister),
+		Arc::clone(&fs_store),
 		event_handler,
 		Arc::clone(&chain_monitor),
 		Arc::clone(&channel_manager),
@@ -1157,27 +1154,25 @@ async fn start_ldk() {
 		ldk_data_dir.clone(),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
-		Arc::clone(&persister),
+		Arc::clone(&fs_store),
 		Arc::clone(&output_sweeper),
 	));
 
 	// Start the CLI.
 	let cli_channel_manager = Arc::clone(&channel_manager);
 	let cli_chain_monitor = Arc::clone(&chain_monitor);
-	let cli_persister = Arc::clone(&persister);
+	let cli_fs_store = Arc::clone(&fs_store);
 	let cli_peer_manager = Arc::clone(&peer_manager);
-	let cli_poll = tokio::task::spawn(
-		cli::poll_for_user_input(
-			cli_peer_manager,
-			cli_channel_manager,
-			cli_chain_monitor,
-			keys_manager,
-			network_graph,
-			inbound_payments,
-			outbound_payments,
-			cli_persister,
-		)
-	);
+	let cli_poll = tokio::task::spawn(cli::poll_for_user_input(
+		cli_peer_manager,
+		cli_channel_manager,
+		cli_chain_monitor,
+		keys_manager,
+		network_graph,
+		inbound_payments,
+		outbound_payments,
+		cli_fs_store,
+	));
 
 	// Exit if either CLI polling exits or the background processor exits (which shouldn't happen
 	// unless we fail to write to the filesystem).
@@ -1195,7 +1190,7 @@ async fn start_ldk() {
 	peer_manager.disconnect_all_peers();
 
 	if let Err(e) = bg_res {
-		let persist_res = persister
+		let persist_res = fs_store
 			.write(
 				persist::CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 				persist::CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
