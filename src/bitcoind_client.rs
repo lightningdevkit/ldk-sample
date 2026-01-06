@@ -16,9 +16,10 @@ use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
 use bitcoin::{Network, OutPoint, TxOut, WPubkeyHash};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::events::bump_transaction::{Utxo, WalletSource};
+use lightning::events::bump_transaction::Utxo;
+use lightning::events::bump_transaction::sync::WalletSourceSync;
 use lightning::log_error;
-use lightning::sign::ChangeDestinationSource;
+use lightning::sign::ChangeDestinationSourceSync;
 use lightning::util::logger::Logger;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
@@ -405,14 +406,14 @@ impl BroadcasterInterface for BitcoindClient {
 	}
 }
 
-impl ChangeDestinationSource for BitcoindClient {
+impl ChangeDestinationSourceSync for BitcoindClient {
 	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
 		let future = self.get_new_address();
 		Ok(self.run_future_in_blocking_context(async move { future.await.script_pubkey() }))
 	}
 }
 
-impl WalletSource for BitcoindClient {
+impl WalletSourceSync for BitcoindClient {
 	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
 		let future = self.list_unspent();
 		let utxos = self.run_future_in_blocking_context(async move { future.await.0 });

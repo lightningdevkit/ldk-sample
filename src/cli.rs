@@ -9,10 +9,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance;
-use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
-use lightning::ln::bolt11_payment::payment_parameters_from_variable_amount_invoice;
 use lightning::ln::channelmanager::{
-	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry,
+	Bolt11InvoiceParameters, OptionalOfferPaymentParams, PaymentId, RecipientOnionFields, Retry,
 };
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
@@ -20,11 +18,11 @@ use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::onion_message::messenger::Destination;
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning::sign::{EntropySource, KeysManager};
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
-use lightning::util::persist::KVStore;
+use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::Writeable;
 use lightning_invoice::Bolt11Invoice;
 use lightning_persister::fs_store::FilesystemStore;
@@ -229,13 +227,15 @@ pub(crate) fn poll_for_user_input(
 							},
 						);
 						fs_store
-							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
 							.unwrap();
 
-						let retry = Retry::Timeout(Duration::from_secs(10));
+						let params = OptionalOfferPaymentParams {
+							retry_strategy: Retry::Timeout(Duration::from_secs(10)),
+							..Default::default()
+						};
 						let amt = Some(amt_msat);
-						let pay = channel_manager
-							.pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
+						let pay = channel_manager.pay_for_offer(&offer, amt, payment_id, params);
 						if pay.is_ok() {
 							println!("Payment in flight");
 						} else {
@@ -292,14 +292,17 @@ pub(crate) fn poll_for_user_input(
 							},
 						);
 						fs_store
-							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
 							.unwrap();
 
-						let retry = Retry::Timeout(Duration::from_secs(10));
-						let pay = |a, b, c, d, e, f| {
-							channel_manager.pay_for_offer_from_human_readable_name(a, b, c, d, e, f)
+						let params = OptionalOfferPaymentParams {
+							retry_strategy: Retry::Timeout(Duration::from_secs(10)),
+							..Default::default()
 						};
-						let pay = pay(hrn, amt_msat, payment_id, retry, None, dns_resolvers);
+						let pay = |a, b, c, d, e| {
+							channel_manager.pay_for_offer_from_human_readable_name(a, b, c, d, e)
+						};
+						let pay = pay(hrn, amt_msat, payment_id, params, dns_resolvers);
 						if pay.is_ok() {
 							println!("Payment in flight");
 						} else {
@@ -358,7 +361,7 @@ pub(crate) fn poll_for_user_input(
 					);
 				},
 				"getoffer" => {
-					let offer_builder = channel_manager.create_offer_builder(None);
+					let offer_builder = channel_manager.create_offer_builder();
 					if let Err(e) = offer_builder {
 						println!("ERROR: Failed to initiate offer building: {:?}", e);
 						continue;
@@ -418,7 +421,7 @@ pub(crate) fn poll_for_user_input(
 						expiry_secs.unwrap(),
 					);
 					fs_store
-						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
+						.write("", "", INBOUND_PAYMENTS_FNAME, inbound_payments.encode())
 						.unwrap();
 				},
 				"connectpeer" => {
@@ -618,9 +621,11 @@ fn node_info(
 	let local_balance_sat = balances.iter().map(|b| b.claimable_amount_satoshis()).sum::<u64>();
 	println!("\t\t local_balance_sats: {}", local_balance_sat);
 	let close_fees_map = |b| match b {
-		&Balance::ClaimableOnChannelClose { transaction_fee_satoshis, .. } => {
-			transaction_fee_satoshis
-		},
+		&Balance::ClaimableOnChannelClose {
+			ref balance_candidates,
+			confirmed_balance_candidate_index,
+			..
+		} => balance_candidates[confirmed_balance_candidate_index].transaction_fee_satoshis,
 		_ => 0,
 	};
 	let close_fees_sats = balances.iter().map(close_fees_map).sum::<u64>();
@@ -829,36 +834,20 @@ fn send_payment(
 ) {
 	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
-	let zero_amt_invoice =
-		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
-	let pay_params_opt = if zero_amt_invoice {
-		if let Some(amt_msat) = required_amount_msat {
-			payment_parameters_from_variable_amount_invoice(invoice, amt_msat)
-		} else {
-			println!("Need an amount for the given 0-value invoice");
-			print!("> ");
-			return;
-		}
-	} else {
-		if required_amount_msat.is_some() && invoice.amount_milli_satoshis() != required_amount_msat
-		{
+	match (invoice.amount_milli_satoshis(), required_amount_msat) {
+		// pay_for_bolt11_invoice only validates that the amount we pay is >= the invoice's
+		// required amount, not that its equal (to allow for overpayment). As that is somewhat
+		// surprising, here we check and reject all disagreements in amount.
+		(Some(inv_amt), Some(req_amt)) if inv_amt != req_amt => {
 			println!(
 				"Amount didn't match invoice value of {}msat",
 				invoice.amount_milli_satoshis().unwrap_or(0)
 			);
 			print!("> ");
 			return;
-		}
-		payment_parameters_from_invoice(invoice)
-	};
-	let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
-		Ok(res) => res,
-		Err(e) => {
-			println!("Failed to parse invoice: {:?}", e);
-			print!("> ");
-			return;
 		},
-	};
+		_ => {},
+	}
 	outbound_payments.payments.insert(
 		payment_id,
 		PaymentInfo {
@@ -868,13 +857,13 @@ fn send_payment(
 			amt_msat: MillisatAmount(invoice.amount_milli_satoshis()),
 		},
 	);
-	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode()).unwrap();
 
-	match channel_manager.send_payment(
-		payment_hash,
-		recipient_onion,
+	match channel_manager.pay_for_bolt11_invoice(
+		invoice,
 		payment_id,
-		route_params,
+		required_amount_msat,
+		RouteParametersConfig::default(),
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
 		Ok(_) => {
@@ -887,7 +876,7 @@ fn send_payment(
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
-			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode()).unwrap();
 		},
 	};
 }
@@ -912,7 +901,7 @@ fn keysend<E: EntropySource>(
 			amt_msat: MillisatAmount(Some(amt_msat)),
 		},
 	);
-	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode()).unwrap();
 	match channel_manager.send_spontaneous_payment(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
@@ -928,7 +917,7 @@ fn keysend<E: EntropySource>(
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
-			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode()).unwrap();
 		},
 	};
 }
