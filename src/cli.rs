@@ -1,4 +1,4 @@
-use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
+use crate::disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
 	ChainMonitor, ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount,
@@ -9,10 +9,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
 use bitcoin::secp256k1::PublicKey;
 use lightning::chain::channelmonitor::Balance;
-use lightning::ln::bolt11_payment::payment_parameters_from_invoice;
-use lightning::ln::bolt11_payment::payment_parameters_from_variable_amount_invoice;
 use lightning::ln::channelmanager::{
-	Bolt11InvoiceParameters, PaymentId, RecipientOnionFields, Retry,
+	Bolt11InvoiceParameters, OptionalOfferPaymentParams, PaymentId, RecipientOnionFields, Retry,
 };
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
@@ -20,7 +18,7 @@ use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::dns_resolution::HumanReadableName;
 use lightning::onion_message::messenger::Destination;
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::{PaymentParameters, RouteParameters};
+use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
 use lightning::sign::{EntropySource, KeysManager};
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
@@ -31,10 +29,11 @@ use lightning_persister::fs_store::FilesystemStore;
 use std::env;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub(crate) struct LdkUserInfo {
 	pub(crate) bitcoind_rpc_username: String,
@@ -48,30 +47,31 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) network: Network,
 }
 
-pub(crate) fn poll_for_user_input(
+pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	chain_monitor: Arc<ChainMonitor>, keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
-	fs_store: Arc<FilesystemStore>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
 	);
 	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
 	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
+
+	let mut input = BufReader::new(tokio::io::stdin()).lines();
 	'read_command: loop {
 		print!("> ");
 		std::io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
-		let mut line = String::new();
-		if let Err(e) = std::io::stdin().read_line(&mut line) {
-			break println!("ERROR: {}", e);
-		}
-
-		if line.len() == 0 {
-			// We hit EOF / Ctrl-D
-			break;
-		}
+		let line = match input.next_line().await {
+			Ok(Some(l)) => l,
+			Err(e) => {
+				break println!("ERROR: {}", e);
+			},
+			Ok(None) => {
+				break println!("ERROR: End of stdin");
+			},
+		};
 
 		let mut words = line.split_whitespace();
 		if let Some(word) = words.next() {
@@ -111,12 +111,8 @@ pub(crate) fn poll_for_user_input(
 								},
 							};
 
-						if tokio::runtime::Handle::current()
-							.block_on(connect_peer_if_necessary(
-								pubkey,
-								peer_addr,
-								peer_manager.clone(),
-							))
+						if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+							.await
 							.is_err()
 						{
 							continue;
@@ -142,24 +138,13 @@ pub(crate) fn poll_for_user_input(
 						}
 					}
 
-					if open_channel(
+					let _ = open_channel(
 						pubkey,
 						chan_amt_sat.unwrap(),
 						announce_channel,
 						with_anchors,
 						channel_manager.clone(),
-					)
-					.is_ok()
-					{
-						if peer_addr_str.is_some() {
-							let peer_data_path =
-								format!("{}/channel_peer_data", ldk_data_dir.clone());
-							let _ = disk::persist_channel_peer(
-								Path::new(&peer_data_path),
-								peer_pubkey_and_ip_addr,
-							);
-						}
-					}
+					);
 				},
 				"sendpayment" => {
 					let invoice_str = words.next();
@@ -201,15 +186,17 @@ pub(crate) fn poll_for_user_input(
 							print!("Paying offer for {} msat. Continue (Y/N)? >", amt_msat);
 							std::io::stdout().flush().unwrap();
 
-							if let Err(e) = std::io::stdin().read_line(&mut line) {
-								println!("ERROR: {}", e);
-								break 'read_command;
-							}
-
-							if line.len() == 0 {
-								// We hit EOF / Ctrl-D
-								break 'read_command;
-							}
+							let line = match input.next_line().await {
+								Ok(Some(l)) => l,
+								Err(e) => {
+									println!("ERROR: {}", e);
+									break 'read_command;
+								},
+								Ok(None) => {
+									println!("ERROR: End of stdin");
+									break 'read_command;
+								},
+							};
 
 							if line.starts_with("Y") {
 								break;
@@ -229,13 +216,16 @@ pub(crate) fn poll_for_user_input(
 							},
 						);
 						fs_store
-							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
+							.await
 							.unwrap();
 
-						let retry = Retry::Timeout(Duration::from_secs(10));
+						let params = OptionalOfferPaymentParams {
+							retry_strategy: Retry::Timeout(Duration::from_secs(10)),
+							..Default::default()
+						};
 						let amt = Some(amt_msat);
-						let pay = channel_manager
-							.pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
+						let pay = channel_manager.pay_for_offer(&offer, amt, payment_id, params);
 						if pay.is_ok() {
 							println!("Payment in flight");
 						} else {
@@ -292,14 +282,18 @@ pub(crate) fn poll_for_user_input(
 							},
 						);
 						fs_store
-							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
+							.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
+							.await
 							.unwrap();
 
-						let retry = Retry::Timeout(Duration::from_secs(10));
-						let pay = |a, b, c, d, e, f| {
-							channel_manager.pay_for_offer_from_human_readable_name(a, b, c, d, e, f)
+						let params = OptionalOfferPaymentParams {
+							retry_strategy: Retry::Timeout(Duration::from_secs(10)),
+							..Default::default()
 						};
-						let pay = pay(hrn, amt_msat, payment_id, retry, None, dns_resolvers);
+						let pay = |a, b, c, d, e| {
+							channel_manager.pay_for_offer_from_human_readable_name(a, b, c, d, e)
+						};
+						let pay = pay(hrn, amt_msat, payment_id, params, dns_resolvers);
 						if pay.is_ok() {
 							println!("Payment in flight");
 						} else {
@@ -307,13 +301,16 @@ pub(crate) fn poll_for_user_input(
 						}
 					} else {
 						match Bolt11Invoice::from_str(invoice_str) {
-							Ok(invoice) => send_payment(
-								&channel_manager,
-								&invoice,
-								user_provided_amt,
-								&mut outbound_payments.lock().unwrap(),
-								Arc::clone(&fs_store),
-							),
+							Ok(invoice) => {
+								send_payment(
+									&channel_manager,
+									&invoice,
+									user_provided_amt,
+									&outbound_payments,
+									&*fs_store,
+								)
+								.await
+							},
 							Err(e) => {
 								println!("ERROR: invalid invoice: {:?}", e);
 							},
@@ -353,12 +350,13 @@ pub(crate) fn poll_for_user_input(
 						dest_pubkey,
 						amt_msat,
 						&*keys_manager,
-						&mut outbound_payments.lock().unwrap(),
-						Arc::clone(&fs_store),
-					);
+						&outbound_payments,
+						&*fs_store,
+					)
+					.await;
 				},
 				"getoffer" => {
-					let offer_builder = channel_manager.create_offer_builder(None);
+					let offer_builder = channel_manager.create_offer_builder();
 					if let Err(e) = offer_builder {
 						println!("ERROR: Failed to initiate offer building: {:?}", e);
 						continue;
@@ -410,16 +408,17 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 
-					let mut inbound_payments = inbound_payments.lock().unwrap();
-					get_invoice(
-						amt_msat.unwrap(),
-						&mut inbound_payments,
-						&channel_manager,
-						expiry_secs.unwrap(),
-					);
-					fs_store
-						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
-						.unwrap();
+					let write_future = {
+						let mut inbound_payments = inbound_payments.lock().unwrap();
+						get_invoice(
+							amt_msat.unwrap(),
+							&mut inbound_payments,
+							&channel_manager,
+							expiry_secs.unwrap(),
+						);
+						fs_store.write("", "", INBOUND_PAYMENTS_FNAME, inbound_payments.encode())
+					};
+					write_future.await.unwrap();
 				},
 				"connectpeer" => {
 					let peer_pubkey_and_ip_addr = words.next();
@@ -435,12 +434,8 @@ pub(crate) fn poll_for_user_input(
 								continue;
 							},
 						};
-					if tokio::runtime::Handle::current()
-						.block_on(connect_peer_if_necessary(
-							pubkey,
-							peer_addr,
-							peer_manager.clone(),
-						))
+					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
+						.await
 						.is_ok()
 					{
 						println!("SUCCESS: connected to peer {}", pubkey);
@@ -618,9 +613,11 @@ fn node_info(
 	let local_balance_sat = balances.iter().map(|b| b.claimable_amount_satoshis()).sum::<u64>();
 	println!("\t\t local_balance_sats: {}", local_balance_sat);
 	let close_fees_map = |b| match b {
-		&Balance::ClaimableOnChannelClose { transaction_fee_satoshis, .. } => {
-			transaction_fee_satoshis
-		},
+		&Balance::ClaimableOnChannelClose {
+			ref balance_candidates,
+			confirmed_balance_candidate_index,
+			..
+		} => balance_candidates[confirmed_balance_candidate_index].transaction_fee_satoshis,
 		_ => 0,
 	};
 	let close_fees_sats = balances.iter().map(close_fees_map).sum::<u64>();
@@ -738,10 +735,8 @@ fn list_payments(
 pub(crate) async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 ) -> Result<(), ()> {
-	for peer_details in peer_manager.list_peers() {
-		if peer_details.counterparty_node_id == pubkey {
-			return Ok(());
-		}
+	if peer_manager.peer_by_node_id(&pubkey).is_some() {
+		return Ok(());
 	}
 	let res = do_connect_peer(pubkey, peer_addr, peer_manager).await;
 	if res.is_err() {
@@ -823,78 +818,76 @@ fn open_channel(
 	}
 }
 
-fn send_payment(
+async fn send_payment(
 	channel_manager: &ChannelManager, invoice: &Bolt11Invoice, required_amount_msat: Option<u64>,
-	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &Mutex<OutboundPaymentInfoStorage>, fs_store: &FilesystemStore,
 ) {
 	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
-	let zero_amt_invoice =
-		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
-	let pay_params_opt = if zero_amt_invoice {
-		if let Some(amt_msat) = required_amount_msat {
-			payment_parameters_from_variable_amount_invoice(invoice, amt_msat)
-		} else {
-			println!("Need an amount for the given 0-value invoice");
-			print!("> ");
-			return;
-		}
-	} else {
-		if required_amount_msat.is_some() && invoice.amount_milli_satoshis() != required_amount_msat
-		{
+	let amt_msat = match (invoice.amount_milli_satoshis(), required_amount_msat) {
+		// pay_for_bolt11_invoice only validates that the amount we pay is >= the invoice's
+		// required amount, not that its equal (to allow for overpayment). As that is somewhat
+		// surprising, here we check and reject all disagreements in amount.
+		(Some(inv_amt), Some(req_amt)) if inv_amt != req_amt => {
 			println!(
 				"Amount didn't match invoice value of {}msat",
 				invoice.amount_milli_satoshis().unwrap_or(0)
 			);
 			print!("> ");
 			return;
-		}
-		payment_parameters_from_invoice(invoice)
-	};
-	let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
-		Ok(res) => res,
-		Err(e) => {
-			println!("Failed to parse invoice: {:?}", e);
+		},
+		(Some(inv_amt), _) => inv_amt,
+		(_, Some(req_amt)) => req_amt,
+		(None, None) => {
+			println!("Need an amount to pay an amountless invoice");
 			print!("> ");
 			return;
 		},
 	};
-	outbound_payments.payments.insert(
-		payment_id,
-		PaymentInfo {
-			preimage: None,
-			secret: payment_secret,
-			status: HTLCStatus::Pending,
-			amt_msat: MillisatAmount(invoice.amount_milli_satoshis()),
-		},
-	);
-	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+	let write_future = {
+		let mut outbound_payments = outbound_payments.lock().unwrap();
+		outbound_payments.payments.insert(
+			payment_id,
+			PaymentInfo {
+				preimage: None,
+				secret: payment_secret,
+				status: HTLCStatus::Pending,
+				amt_msat: MillisatAmount(Some(amt_msat)),
+			},
+		);
+		fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
+	};
+	write_future.await.unwrap();
 
-	match channel_manager.send_payment(
-		payment_hash,
-		recipient_onion,
+	match channel_manager.pay_for_bolt11_invoice(
+		invoice,
 		payment_id,
-		route_params,
+		required_amount_msat,
+		RouteParametersConfig::default(),
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
 		Ok(_) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
-			let amt_msat = invoice.amount_milli_satoshis().unwrap();
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 			print!("> ");
 		},
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
-			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
-			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+			let write_future = {
+				let mut outbound_payments = outbound_payments.lock().unwrap();
+				outbound_payments.payments.get_mut(&payment_id).unwrap().status =
+					HTLCStatus::Failed;
+				fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
+			};
+			write_future.await.unwrap();
 		},
 	};
 }
 
-fn keysend<E: EntropySource>(
+async fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &Mutex<OutboundPaymentInfoStorage>, fs_store: &FilesystemStore,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
 	let payment_id = PaymentId(Sha256::hash(&payment_preimage.0[..]).to_byte_array());
@@ -903,16 +896,20 @@ fn keysend<E: EntropySource>(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false),
 		amt_msat,
 	);
-	outbound_payments.payments.insert(
-		payment_id,
-		PaymentInfo {
-			preimage: None,
-			secret: None,
-			status: HTLCStatus::Pending,
-			amt_msat: MillisatAmount(Some(amt_msat)),
-		},
-	);
-	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+	let write_future = {
+		let mut outbound_payments = outbound_payments.lock().unwrap();
+		outbound_payments.payments.insert(
+			payment_id,
+			PaymentInfo {
+				preimage: None,
+				secret: None,
+				status: HTLCStatus::Pending,
+				amt_msat: MillisatAmount(Some(amt_msat)),
+			},
+		);
+		fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
+	};
+	write_future.await.unwrap();
 	match channel_manager.send_spontaneous_payment(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
@@ -927,8 +924,13 @@ fn keysend<E: EntropySource>(
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
-			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
-			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
+			let write_future = {
+				let mut outbound_payments = outbound_payments.lock().unwrap();
+				outbound_payments.payments.get_mut(&payment_id).unwrap().status =
+					HTLCStatus::Failed;
+				fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, outbound_payments.encode())
+			};
+			write_future.await.unwrap();
 		},
 	};
 }
