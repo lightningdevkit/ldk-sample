@@ -21,6 +21,19 @@ cargo run <bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<b
 `announced-listen-addr` can be set to an IPv4 or IPv6 address to announce that as a publicly-connectable address for this node.
 `announced-node-name` can be any string up to 32 bytes in length, representing this node's alias.
 
+## Probe Config
+Targeted probing is disabled unless a config file exists.
+
+```
+cp ./prober_config.json.example <ldk data dir>/prober_config.json
+```
+
+`probe_peers` pubkey of peers you are probing.
+
+`probe_interval_sec` how often to probe, in seconds.
+
+`max_amount_msats` maximum amount to probe, in millisatoshis.
+
 ## License
 
 Licensed under either:

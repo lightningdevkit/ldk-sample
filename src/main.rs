@@ -58,6 +58,7 @@ use lightning_dns_resolver::OMDomainResolver;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
 use rand::{thread_rng, Rng};
+use serde::Deserialize;
 use std::collections::HashMap as StdHashMap;
 use std::convert::TryInto;
 use std::fmt;
@@ -75,6 +76,13 @@ pub(crate) enum HTLCStatus {
 	Pending,
 	Succeeded,
 	Failed,
+}
+
+#[derive(Deserialize)]
+struct ProbeConfig {
+	probe_interval_sec: u64,
+	probe_peers: Vec<String>,
+	max_amount_msats: u64,
 }
 
 impl_writeable_tlv_based_enum!(HTLCStatus,
@@ -213,21 +221,20 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
 // Needed due to rust-lang/rust#63033.
 struct OutputSweeperWrapper(Arc<OutputSweeper>);
 
-fn send_rand_probe(
+fn prepare_probe(
 	channel_manager: &ChannelManager, graph: &NetworkGraph, logger: &disk::FilesystemLogger,
 	scorer: &RwLock<ProbabilisticScorer<Arc<NetworkGraph>, Arc<disk::FilesystemLogger>>>,
+	pub_key_hex: &str, probe_amount: u64,
 ) {
-	let rcpt = {
-		let lck = graph.read_only();
-		if lck.nodes().is_empty() {
-			return;
-		}
-		let mut it =
-			lck.nodes().unordered_iter().skip(::rand::random::<usize>() % lck.nodes().len());
-		it.next().unwrap().0.clone()
+	if probe_amount == 0 {
+		return;
+	}
+	let amt = ::rand::random::<u64>() % probe_amount;
+	let pub_key_bytes = match hex_utils::to_vec(pub_key_hex) {
+		Some(bytes) => bytes,
+		None => return,
 	};
-	let amt = ::rand::random::<u64>() % 500_000_000;
-	if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(rcpt.as_slice()) {
+	if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(&pub_key_bytes) {
 		send_probe(channel_manager, pk, graph, logger, amt, scorer);
 	}
 }
@@ -260,6 +267,14 @@ fn send_probe(
 			let _ = channel_manager.send_probe(path);
 		}
 	}
+}
+
+fn read_probe_file(ldk_data_dir: &str) -> Result<ProbeConfig, std::io::Error> {
+	let prober_file = format!("{}/prober_config.json", ldk_data_dir);
+	let file = fs::read_to_string(prober_file)?;
+	let config: ProbeConfig = serde_json::from_str(&file)
+		.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+	Ok(config)
 }
 
 fn handle_ldk_events<'a>(
@@ -1216,13 +1231,35 @@ async fn start_ldk() {
 	let probing_graph = Arc::clone(&network_graph);
 	let probing_logger = Arc::clone(&logger);
 	let probing_scorer = Arc::clone(&scorer);
-	tokio::spawn(async move {
-		let mut interval = tokio::time::interval(Duration::from_secs(1));
-		loop {
-			interval.tick().await;
-			send_rand_probe(&*probing_cm, &*probing_graph, &*probing_logger, &*probing_scorer);
-		}
-	});
+	match read_probe_file(&ldk_data_dir) {
+		Ok(probe_config) => {
+			if probe_config.probe_peers.is_empty() {
+				println!("WARNING: prober_config.json has no probe_peers. Probing disabled.");
+			} else {
+				let mut index = 0usize;
+				tokio::spawn(async move {
+					let mut interval =
+						tokio::time::interval(Duration::from_secs(probe_config.probe_interval_sec));
+					loop {
+						interval.tick().await;
+						if index >= probe_config.probe_peers.len() {
+							index = 0;
+						}
+						prepare_probe(
+							&*probing_cm,
+							&*probing_graph,
+							&*probing_logger,
+							&*probing_scorer,
+							&probe_config.probe_peers[index],
+							probe_config.max_amount_msats,
+						);
+						index += 1;
+					}
+				});
+			}
+		},
+		Err(_) => println!("WARNING: prober_config.json is missing. Probing disabled."),
+	};
 
 	// Start the CLI.
 	let cli_channel_manager = Arc::clone(&channel_manager);
