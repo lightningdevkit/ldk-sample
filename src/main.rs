@@ -12,6 +12,7 @@ use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::io;
 use bitcoin::network::Network;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
@@ -33,7 +34,10 @@ use lightning::onion_message::messenger::{
 };
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
-use lightning::routing::router::DefaultRouter;
+use lightning::routing::router::{
+	DefaultRouter, PaymentParameters, RouteParameters, ScorerAccountingForInFlightHtlcs,
+};
+use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
 use lightning::sign::{EntropySource, InMemorySigner, KeysManager, NodeSigner};
 use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
@@ -208,6 +212,55 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
 
 // Needed due to rust-lang/rust#63033.
 struct OutputSweeperWrapper(Arc<OutputSweeper>);
+
+fn send_rand_probe(
+	channel_manager: &ChannelManager, graph: &NetworkGraph, logger: &disk::FilesystemLogger,
+	scorer: &RwLock<ProbabilisticScorer<Arc<NetworkGraph>, Arc<disk::FilesystemLogger>>>,
+) {
+	let rcpt = {
+		let lck = graph.read_only();
+		if lck.nodes().is_empty() {
+			return;
+		}
+		let mut it =
+			lck.nodes().unordered_iter().skip(::rand::random::<usize>() % lck.nodes().len());
+		it.next().unwrap().0.clone()
+	};
+	let amt = ::rand::random::<u64>() % 500_000_000;
+	if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(rcpt.as_slice()) {
+		send_probe(channel_manager, pk, graph, logger, amt, scorer);
+	}
+}
+
+fn send_probe(
+	channel_manager: &ChannelManager, recipient: PublicKey, graph: &NetworkGraph,
+	logger: &disk::FilesystemLogger, amt_msat: u64,
+	scorer: &RwLock<ProbabilisticScorer<Arc<NetworkGraph>, Arc<disk::FilesystemLogger>>>,
+) {
+	let chans = channel_manager.list_usable_channels();
+	let chan_refs = chans.iter().map(|a| a).collect::<Vec<_>>();
+	let mut payment_params = PaymentParameters::from_node_id(recipient, 144);
+	payment_params.max_path_count = 1;
+	let in_flight_htlcs = channel_manager.compute_inflight_htlcs();
+	let scorer = scorer.read().unwrap();
+	let inflight_scorer = ScorerAccountingForInFlightHtlcs::new(&scorer, &in_flight_htlcs);
+	let score_params: ProbabilisticScoringFeeParameters = Default::default();
+	let route_res = lightning::routing::router::find_route(
+		&channel_manager.get_our_node_id(),
+		&RouteParameters::from_payment_params_and_value(payment_params, amt_msat),
+		&graph,
+		Some(&chan_refs),
+		logger,
+		&inflight_scorer,
+		&score_params,
+		&[32; 32],
+	);
+	if let Ok(route) = route_res {
+		for path in route.paths {
+			let _ = channel_manager.send_probe(path);
+		}
+	}
+}
 
 fn handle_ldk_events<'a>(
 	channel_manager: Arc<ChannelManager>, bitcoind_client: &'a BitcoindClient,
@@ -1157,6 +1210,19 @@ async fn start_ldk() {
 		Arc::clone(&fs_store),
 		Arc::clone(&output_sweeper),
 	));
+
+	// Regularly probe
+	let probing_cm = Arc::clone(&channel_manager);
+	let probing_graph = Arc::clone(&network_graph);
+	let probing_logger = Arc::clone(&logger);
+	let probing_scorer = Arc::clone(&scorer);
+	tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(1));
+		loop {
+			interval.tick().await;
+			send_rand_probe(&*probing_cm, &*probing_graph, &*probing_logger, &*probing_scorer);
+		}
+	});
 
 	// Start the CLI.
 	let cli_channel_manager = Arc::clone(&channel_manager);
